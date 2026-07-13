@@ -1,0 +1,18 @@
+services:
+  global-dharma:
+    build:
+      context: ..
+    environment:
+      GLOBAL_DHARMA_CONFIG: /run/config/global-dharma.toml
+    volumes:
+      - ../config/global-dharma.toml:/run/config/global-dharma.toml:ro
+    ports:
+      - "127.0.0.1:18888:18888"
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:18888/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
