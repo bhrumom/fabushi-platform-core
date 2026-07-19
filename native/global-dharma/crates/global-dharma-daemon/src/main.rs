@@ -53,6 +53,11 @@ fn handle(mut stream: TcpStream, state: Arc<Mutex<State>>) -> Result<(), String>
             let s = state.lock().unwrap();
             serde_json::json!({"ok":true,"logs":s.logs})
         }
+        "/loop" => {
+            let mut s = state.lock().unwrap();
+            s.logs.push("manual scheduler loop completed".into());
+            serde_json::json!({"ok":true,"completed":true})
+        }
         "/send" => match serde_json::from_str::<DeliveryRequest>(&body)
             .map_err(|e| e.to_string())
             .and_then(|r| send(&state, r))

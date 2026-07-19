@@ -28,7 +28,7 @@ fn main() -> ExitCode {
         }
         Some("start") | Some("stop") => service(args[1].as_str()),
         Some("install-systemd") => install_systemd(),
-        Some("status") | Some("logs") => proxy(args[1].as_str(), ""),
+        Some("status") | Some("logs") | Some("loop") => proxy(args[1].as_str(), ""),
         Some("send") => {
             let task = args.get(2).cloned().unwrap_or_else(|| "manual".into());
             let content = args.get(3).cloned().unwrap_or_default();
@@ -38,7 +38,7 @@ fn main() -> ExitCode {
             )
         }
         _ => {
-            eprintln!("usage: global-dharmactl validate-config|status|logs|send <task-id> <content>|start|stop|install-systemd|systemd-unit|compose");
+            eprintln!("usage: global-dharmactl validate-config|status|logs|loop|send <task-id> <content>|start|stop|install-systemd|systemd-unit|compose");
             ExitCode::from(64)
         }
     }
