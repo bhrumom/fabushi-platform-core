@@ -20,7 +20,7 @@ The account session contract is:
 
 The production Worker must have all bindings in
 `wrangler.auth-production.toml.example`: `ACCOUNT_DB`, `PLATFORM_DB`,
-`PLUGIN_PACKAGES`, and `PLATFORM_EVENTS`. A custom-domain deployment is not an
+`PLATFORM_EVENTS`. A custom-domain deployment is not an
 auth-only overlay: once attached to `api.ombhrum.com`, every route is served by
 Rust and an unknown route returns 404.
 
@@ -54,8 +54,10 @@ values with `wrangler secret put`:
 7. Deploy to a `workers.dev` staging URL first. Test a real production-compatible
    account through login, user-info, two refresh rotations, reuse rejection,
    logout, and post-logout rejection.
-8. Test marketplace, wallet, purchases, model usage reservation/capture, and
-   every Flutter API route against the staging Worker.
+8. Test marketplace publishing and downloads against independent Cloudflare
+   Pages/Worker plugin sites; plugin package bytes must never be stored in R2.
+   Also test wallet, purchases, model usage reservation/capture, and every
+   Flutter API route against the staging Worker.
 9. Add Cloudflare source-IP rate limits for `/api/auth/login` and
    `/api/auth/refresh`. Rust additionally limits ten known-account failures in
    a rolling 15-minute window.

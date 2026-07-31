@@ -26,10 +26,17 @@ use mahayana_platform_core::UsageReservationRequest;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
+use sha2::Digest;
+use sha2::Sha256;
+use std::time::Duration;
+use url::Url;
 use uuid::Uuid;
 use worker::Context;
 use worker::Date;
+use worker::Delay;
 use worker::Env;
+use worker::Fetch;
+use worker::FormEntry;
 use worker::Headers;
 use worker::Method;
 use worker::Request;
@@ -50,23 +57,50 @@ const MAX_ACCOUNT_LOGIN_FAILURES: i64 = 10;
 const USAGE_WINDOW_SECONDS: i64 = 30 * 24 * 60 * 60;
 const USAGE_RESERVATION_SECONDS: i64 = 10 * 60;
 const MAX_TOKENS_PER_RESERVATION: i64 = 2_000_000;
+const MARKETPLACE_DEPLOYMENT_VERIFY_ATTEMPTS: usize = 6;
+const MARKETPLACE_DEPLOYMENT_VERIFY_DELAY_SECONDS: u64 = 3;
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct MarketplacePluginRow {
     plugin_id: String,
     display_name: String,
     description: String,
     latest_version: Option<String>,
     package_sha256: Option<String>,
-    package_size: Option<i64>,
+    package_size: Option<f64>,
+    platforms_json: String,
+    deployment_url: Option<String>,
+    published_at: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MarketplaceReleaseMetadataRow {
+    plugin_id: String,
+    version: String,
+    package_sha256: String,
+    package_size: f64,
+    deployment_url: String,
+    published_at: f64,
+    platforms_json: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct MarketplaceReleaseDownloadRow {
-    package_key: String,
+    deployment_url: String,
     package_sha256: String,
-    package_size: i64,
+    package_size: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MarketplaceSiteManifest {
+    schema_version: u32,
+    plugin_id: String,
+    version: String,
+    package_path: String,
+    package_sha256: String,
+    package_size: usize,
+    runtime: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -196,6 +230,8 @@ struct LoginFailureCountRow {
 struct AuthenticatedAccount {
     user_id: String,
     session_id: Option<String>,
+    scopes: Vec<String>,
+    is_test_account: bool,
 }
 
 #[event(fetch, respond_with_errors)]
@@ -222,6 +258,11 @@ pub async fn main(request: Request, env: Env, _context: Context) -> Result<Respo
             ai_usage_release,
         )
         .get_async("/v1/marketplace/plugins", marketplace_plugins)
+        .post_async("/v1/marketplace/releases", marketplace_release_publish)
+        .get_async(
+            "/v1/marketplace/plugins/:plugin_id/releases/:version",
+            marketplace_release_metadata,
+        )
         .get_async(
             "/v1/marketplace/plugins/:plugin_id/releases/:version/download",
             marketplace_plugin_download,
@@ -850,42 +891,333 @@ async fn ai_usage_release(request: Request, context: RouteContext<()>) -> Result
 }
 
 async fn marketplace_plugins(request: Request, context: RouteContext<()>) -> Result<Response> {
-    let query = request.url()?.query_pairs().find_map(|(key, value)| {
-        (key == "q" && !value.trim().is_empty()).then(|| format!("%{}%", value.trim()))
-    });
+    let mut query = "%".to_string();
+    let mut platform = None;
+    for (key, value) in request.url()?.query_pairs() {
+        if key == "q" && !value.trim().is_empty() {
+            query = format!("%{}%", value.trim());
+        } else if key == "platform" && !value.trim().is_empty() {
+            let value = value.trim().to_string();
+            if !matches!(value.as_str(), "cli" | "desktop" | "mobile" | "web") {
+                return error_response(
+                    400,
+                    "invalid_marketplace_platform",
+                    "platform must be cli, desktop, mobile, or web.",
+                );
+            }
+            platform = Some(value);
+        }
+    }
+    let platform_pattern = platform
+        .as_deref()
+        .map(|value| format!("%\"{value}\"%"))
+        .unwrap_or_else(|| "%".to_string());
     let database = context.env.d1(DATABASE_BINDING)?;
-    let rows = if let Some(query) = query {
-        worker::query!(
-            &database,
-            "SELECT mp.plugin_id, mp.display_name, mp.description, mp.latest_version,
-                    pr.package_sha256, pr.package_size
-             FROM marketplace_plugins mp
-             LEFT JOIN plugin_releases pr
-               ON pr.plugin_id = mp.plugin_id AND pr.version = mp.latest_version
-             WHERE mp.visibility = 'public' AND mp.review_state = 'approved'
-               AND (mp.display_name LIKE ?1 OR mp.description LIKE ?1 OR mp.plugin_id LIKE ?1)
-             ORDER BY mp.updated_at DESC LIMIT 100",
-            &query
-        )?
-        .all()
-        .await?
-        .results::<MarketplacePluginRow>()?
-    } else {
-        database
-            .prepare(
-                "SELECT mp.plugin_id, mp.display_name, mp.description, mp.latest_version,
-                        pr.package_sha256, pr.package_size
-                 FROM marketplace_plugins mp
-                 LEFT JOIN plugin_releases pr
-                   ON pr.plugin_id = mp.plugin_id AND pr.version = mp.latest_version
-                 WHERE mp.visibility = 'public' AND mp.review_state = 'approved'
-                 ORDER BY mp.updated_at DESC LIMIT 100",
-            )
-            .all()
-            .await?
-            .results::<MarketplacePluginRow>()?
+    let rows = worker::query!(
+        &database,
+        "SELECT mp.plugin_id, mp.display_name, mp.description, mp.latest_version,
+                pr.package_sha256, pr.package_size, mp.platforms_json,
+                pr.deployment_url, pr.published_at
+         FROM marketplace_plugins mp
+         JOIN plugin_releases pr
+           ON pr.plugin_id = mp.plugin_id AND pr.version = mp.latest_version
+         WHERE mp.visibility = 'public' AND mp.review_state = 'approved'
+           AND pr.deployment_url <> ''
+           AND (mp.display_name LIKE ?1 OR mp.description LIKE ?1 OR mp.plugin_id LIKE ?1)
+           AND mp.platforms_json LIKE ?2
+         ORDER BY mp.updated_at DESC LIMIT 100",
+        &query,
+        &platform_pattern
+    )?
+    .all()
+    .await?
+    .results::<MarketplacePluginRow>()?;
+    let plugins = rows
+        .into_iter()
+        .map(|row| {
+            let platforms =
+                serde_json::from_str::<Vec<String>>(&row.platforms_json).unwrap_or_default();
+            json!({
+                "pluginId": row.plugin_id,
+                "displayName": row.display_name,
+                "description": row.description,
+                "latestVersion": row.latest_version,
+                "packageSha256": row.package_sha256,
+                "packageSize": row.package_size.and_then(exact_nonnegative_i64),
+                "platforms": platforms,
+                "deploymentUrl": row.deployment_url,
+                "publishedAt": row.published_at.and_then(exact_nonnegative_i64),
+            })
+        })
+        .collect::<Vec<_>>();
+    Response::from_json(&json!({"plugins": plugins}))
+}
+
+async fn marketplace_release_publish(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    const MAX_PACKAGE_BYTES: usize = 50 * 1024 * 1024;
+
+    let account = match authenticated_account(&request, &context.env) {
+        Ok(account) => account,
+        Err(_) => {
+            return error_response(
+                401,
+                "unauthorized",
+                "A valid Mahayana account token is required to publish marketplace releases.",
+            );
+        }
     };
-    Response::from_json(&json!({"plugins": rows}))
+    if !account.is_test_account
+        && !account
+            .scopes
+            .iter()
+            .any(|scope| scope == "marketplace.publish")
+    {
+        return error_response(
+            403,
+            "marketplace_publish_forbidden",
+            "The account token does not permit marketplace publishing.",
+        );
+    }
+
+    let form = request.form_data().await?;
+    let field = |name: &str| -> Result<String> {
+        match form.get(name) {
+            Some(FormEntry::Field(value)) if !value.trim().is_empty() => Ok(value),
+            _ => Err(worker::Error::RustError(format!(
+                "marketplace release field {name} is required"
+            ))),
+        }
+    };
+    let plugin_id = field("pluginId")?;
+    let version = field("version")?;
+    if !is_identifier(&plugin_id) || !is_version_identifier(&version) {
+        return error_response(
+            400,
+            "invalid_marketplace_release_identifier",
+            "pluginId and version must be normalized identifiers.",
+        );
+    }
+    let deployment_url = field("deploymentUrl")?;
+    if !is_public_https_url(&deployment_url) {
+        return error_response(
+            400,
+            "invalid_marketplace_deployment_url",
+            "deploymentUrl must be a public HTTPS URL.",
+        );
+    }
+    let expected_sha256 = field("packageSha256")?.to_ascii_lowercase();
+    if expected_sha256.len() != 64 || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return error_response(
+            400,
+            "invalid_marketplace_package_sha256",
+            "packageSha256 must be a 64-character hexadecimal digest.",
+        );
+    }
+    let expected_size = field("packageSize")?
+        .parse::<usize>()
+        .map_err(|_| worker::Error::RustError("invalid packageSize".into()))?;
+    if expected_size == 0 || expected_size > MAX_PACKAGE_BYTES {
+        return error_response(
+            400,
+            "invalid_marketplace_package_size",
+            "packageSize must be between 1 byte and 50 MiB.",
+        );
+    }
+    let platforms = serde_json::from_str::<Vec<String>>(&field("platforms")?)
+        .map_err(|_| worker::Error::RustError("invalid marketplace platforms".into()))?;
+    if platforms.is_empty()
+        || platforms
+            .iter()
+            .any(|platform| !matches!(platform.as_str(), "cli" | "desktop" | "mobile" | "web"))
+    {
+        return error_response(
+            400,
+            "invalid_marketplace_platforms",
+            "platforms must contain supported Mahayana targets.",
+        );
+    }
+    let package = match form.get("package") {
+        Some(FormEntry::File(file)) => file.bytes().await?,
+        _ => {
+            return error_response(
+                400,
+                "marketplace_package_missing",
+                "The release package file is required.",
+            );
+        }
+    };
+    if package.len() != expected_size {
+        return error_response(
+            400,
+            "marketplace_package_size_mismatch",
+            "The uploaded package size does not match release metadata.",
+        );
+    }
+    let actual_sha256 = format!("{:x}", Sha256::digest(&package));
+    if actual_sha256 != expected_sha256 {
+        return error_response(
+            400,
+            "marketplace_package_sha256_mismatch",
+            "The uploaded package digest does not match release metadata.",
+        );
+    }
+
+    let remote_package = match verified_marketplace_site_package_with_retry(
+        &deployment_url,
+        &plugin_id,
+        &version,
+        &actual_sha256,
+        expected_size,
+    )
+    .await
+    {
+        Ok(package) => package,
+        Err(message) => {
+            return error_response(400, "marketplace_deployment_verification_failed", &message);
+        }
+    };
+    if remote_package != package {
+        return error_response(
+            400,
+            "marketplace_deployment_package_mismatch",
+            "The package served by the Cloudflare plugin site differs from the uploaded release package.",
+        );
+    }
+    let package_key = marketplace_asset_url(&deployment_url, "/mahayana/plugin.tar.gz")?;
+
+    let now = now_seconds();
+    let package_size = i64::try_from(expected_size)
+        .map_err(|_| worker::Error::RustError("packageSize exceeds D1 integer range".into()))?;
+    let platforms_json = serde_json::to_string(&platforms)
+        .map_err(|error| worker::Error::RustError(error.to_string()))?;
+    let database = context.env.d1(DATABASE_BINDING)?;
+    database
+        .batch(vec![
+            worker::query!(
+                &database,
+                "INSERT INTO marketplace_plugins
+                 (plugin_id, display_name, description, publisher_user_id, latest_version,
+                  visibility, review_state, created_at, updated_at, platforms_json)
+                 VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8)
+                 ON CONFLICT(plugin_id) DO UPDATE SET
+                   display_name = excluded.display_name,
+                   description = excluded.description,
+                   publisher_user_id = excluded.publisher_user_id,
+                   latest_version = excluded.latest_version,
+                   visibility = excluded.visibility,
+                   review_state = excluded.review_state,
+                   updated_at = excluded.updated_at,
+                   platforms_json = excluded.platforms_json",
+                &plugin_id,
+                &format!("Published from {deployment_url}"),
+                &account.user_id,
+                &version,
+                if account.is_test_account {
+                    "public"
+                } else {
+                    "unlisted"
+                },
+                if account.is_test_account {
+                    "approved"
+                } else {
+                    "pending"
+                },
+                now,
+                &platforms_json
+            )?,
+            worker::query!(
+                &database,
+                "INSERT INTO plugin_releases
+                 (plugin_id, version, package_key, package_sha256, package_size,
+                  tuf_target_path, published_at, deployment_url)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(plugin_id, version) DO UPDATE SET
+                   package_key = excluded.package_key,
+                   package_sha256 = excluded.package_sha256,
+                   package_size = excluded.package_size,
+                   tuf_target_path = excluded.tuf_target_path,
+                   published_at = excluded.published_at,
+                   deployment_url = excluded.deployment_url",
+                &plugin_id,
+                &version,
+                &package_key,
+                &actual_sha256,
+                package_size,
+                &format!("plugins/{plugin_id}/{version}.tar.gz"),
+                now,
+                &deployment_url
+            )?,
+        ])
+        .await?;
+
+    Response::from_json(&json!({
+        "published": true,
+        "approved": account.is_test_account,
+        "pluginId": plugin_id,
+        "version": version,
+        "deploymentUrl": deployment_url,
+        "packageSha256": actual_sha256,
+        "packageSize": package_size,
+        "platforms": platforms,
+    }))
+}
+
+async fn marketplace_release_metadata(
+    _request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let plugin_id = route_identifier(&context, "plugin_id")?;
+    let version = route_version(&context)?;
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let row = worker::query!(
+        &database,
+        "SELECT pr.plugin_id, pr.version, pr.package_sha256, pr.package_size,
+                pr.deployment_url, pr.published_at, mp.platforms_json
+         FROM plugin_releases pr
+         JOIN marketplace_plugins mp ON mp.plugin_id = pr.plugin_id
+         WHERE pr.plugin_id = ?1 AND pr.version = ?2
+           AND mp.visibility = 'public' AND mp.review_state = 'approved'
+           AND pr.deployment_url <> ''",
+        &plugin_id,
+        &version
+    )?
+    .first::<MarketplaceReleaseMetadataRow>(None)
+    .await?;
+    let Some(row) = row else {
+        return error_response(
+            404,
+            "marketplace_release_not_found",
+            "The approved plugin release does not exist.",
+        );
+    };
+    let platforms = serde_json::from_str::<Vec<String>>(&row.platforms_json).unwrap_or_default();
+    let Some(package_size) = exact_nonnegative_i64(row.package_size) else {
+        return error_response(
+            503,
+            "marketplace_package_size_invalid",
+            "The approved release has an invalid package size.",
+        );
+    };
+    let Some(published_at) = exact_nonnegative_i64(row.published_at) else {
+        return error_response(
+            503,
+            "marketplace_published_at_invalid",
+            "The approved release has an invalid published timestamp.",
+        );
+    };
+    Response::from_json(&json!({
+        "pluginId": row.plugin_id,
+        "version": row.version,
+        "packageSha256": row.package_sha256,
+        "packageSize": package_size,
+        "deploymentUrl": row.deployment_url,
+        "publishedAt": published_at,
+        "platforms": platforms,
+    }))
 }
 
 async fn marketplace_plugin_download(
@@ -893,15 +1225,16 @@ async fn marketplace_plugin_download(
     context: RouteContext<()>,
 ) -> Result<Response> {
     let plugin_id = route_identifier(&context, "plugin_id")?;
-    let version = route_identifier(&context, "version")?;
+    let version = route_version(&context)?;
     let database = context.env.d1(DATABASE_BINDING)?;
     let release = worker::query!(
         &database,
-        "SELECT pr.package_key, pr.package_sha256, pr.package_size
+        "SELECT pr.deployment_url, pr.package_sha256, pr.package_size
          FROM plugin_releases pr
          JOIN marketplace_plugins mp ON mp.plugin_id = pr.plugin_id
          WHERE pr.plugin_id = ?1 AND pr.version = ?2
-           AND mp.visibility = 'public' AND mp.review_state = 'approved'",
+           AND mp.visibility = 'public' AND mp.review_state = 'approved'
+           AND pr.deployment_url <> ''",
         &plugin_id,
         &version
     )?
@@ -915,28 +1248,36 @@ async fn marketplace_plugin_download(
         );
     };
 
-    let bucket = context.env.bucket("PLUGIN_PACKAGES")?;
-    let object = bucket.get(&release.package_key).execute().await?;
-    let Some(object) = object else {
+    if !is_public_https_url(&release.deployment_url) {
         return error_response(
             503,
-            "marketplace_package_unavailable",
-            "The plugin package is not available in cloud storage.",
-        );
-    };
-    if object.size() != release.package_size as u64 {
-        return error_response(
-            503,
-            "marketplace_package_size_mismatch",
-            "The plugin package size does not match its approved release metadata.",
+            "marketplace_deployment_url_invalid",
+            "The approved release does not point to a valid Cloudflare Pages/Worker site.",
         );
     }
-    let Some(body) = object.body() else {
-        return error_response(
-            503,
-            "marketplace_package_body_missing",
-            "The plugin package body is unavailable.",
-        );
+    let package_size = match exact_nonnegative_i64(release.package_size)
+        .and_then(|size| usize::try_from(size).ok())
+    {
+        Some(size) if size > 0 && size <= 50 * 1024 * 1024 => size,
+        _ => {
+            return error_response(
+                503,
+                "marketplace_package_size_invalid",
+                "The approved release has an invalid package size.",
+            );
+        }
+    };
+    let package = match fetch_verified_marketplace_package(
+        &release.deployment_url,
+        &release.package_sha256,
+        package_size,
+    )
+    .await
+    {
+        Ok(package) => package,
+        Err(message) => {
+            return error_response(503, "marketplace_package_unavailable", &message);
+        }
     };
     let headers = Headers::new();
     headers.set("Content-Type", "application/gzip")?;
@@ -944,10 +1285,10 @@ async fn marketplace_plugin_download(
         "Content-Disposition",
         &format!("attachment; filename=\"{plugin_id}-{version}.tar.gz\""),
     )?;
-    headers.set("Content-Length", &release.package_size.to_string())?;
+    headers.set("Content-Length", &package_size.to_string())?;
     headers.set("X-Mahayana-Package-Sha256", &release.package_sha256)?;
     headers.set("Cache-Control", "public, max-age=31536000, immutable")?;
-    Ok(Response::from_body(body.response_body()?)?.with_headers(headers))
+    Ok(Response::from_bytes(package)?.with_headers(headers))
 }
 
 async fn wallet_balance(request: Request, context: RouteContext<()>) -> Result<Response> {
@@ -1697,6 +2038,7 @@ fn issue_account_access_token(
         scope: vec![
             "account.read".to_string(),
             "marketplace.read".to_string(),
+            "marketplace.publish".to_string(),
             "wallet.read".to_string(),
             "commerce.purchase".to_string(),
             "model.invoke".to_string(),
@@ -1879,6 +2221,20 @@ fn authenticated_account(request: &Request, env: &Env) -> Result<AuthenticatedAc
     let token = authorization
         .strip_prefix("Bearer ")
         .ok_or_else(|| worker::Error::RustError("invalid Authorization scheme".into()))?;
+    if let Ok(expected) = env.secret("TEST_ACCOUNT_TOKEN")
+        && constant_time_eq(token.as_bytes(), expected.to_string().as_bytes())
+    {
+        return Ok(AuthenticatedAccount {
+            user_id: "user:test_account".to_string(),
+            session_id: None,
+            scopes: vec![
+                "marketplace.read".to_string(),
+                "marketplace.publish".to_string(),
+                "model.invoke".to_string(),
+            ],
+            is_test_account: true,
+        });
+    }
     let public_key = env.secret("ACCESS_TOKEN_PUBLIC_KEY_PEM")?.to_string();
     let key = DecodingKey::from_rsa_pem(public_key.as_bytes()).map_err(jwt_error)?;
     let mut validation = Validation::new(Algorithm::RS256);
@@ -1899,7 +2255,138 @@ fn authenticated_account(request: &Request, env: &Env) -> Result<AuthenticatedAc
     Ok(AuthenticatedAccount {
         user_id: claims.sub,
         session_id: Some(claims.sid),
+        scopes: claims.scope,
+        is_test_account: false,
     })
+}
+
+fn marketplace_asset_url(deployment_url: &str, asset_path: &str) -> Result<String> {
+    if !is_public_https_url(deployment_url) {
+        return Err(worker::Error::RustError(
+            "invalid marketplace deployment URL".into(),
+        ));
+    }
+    let mut url = Url::parse(deployment_url)
+        .map_err(|_| worker::Error::RustError("invalid marketplace deployment URL".into()))?;
+    let mut path = url.path().trim_end_matches('/').to_string();
+    path.push_str(asset_path);
+    url.set_path(&path);
+    Ok(url.to_string())
+}
+
+async fn fetch_marketplace_asset(
+    deployment_url: &str,
+    asset_path: &str,
+    max_bytes: usize,
+) -> std::result::Result<Vec<u8>, String> {
+    let url =
+        marketplace_asset_url(deployment_url, asset_path).map_err(|error| error.to_string())?;
+    let parsed = url
+        .parse()
+        .map_err(|error| format!("invalid Cloudflare plugin asset URL: {error}"))?;
+    let mut response = Fetch::Url(parsed)
+        .send()
+        .await
+        .map_err(|error| format!("failed to fetch Cloudflare plugin asset: {error}"))?;
+    if !(200..300).contains(&response.status_code()) {
+        return Err(format!(
+            "Cloudflare plugin asset returned HTTP {}.",
+            response.status_code()
+        ));
+    }
+    if response
+        .headers()
+        .get("Content-Length")
+        .map_err(|error| error.to_string())?
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|length| length > max_bytes)
+    {
+        return Err("Cloudflare plugin asset exceeds the approved size limit.".into());
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| format!("failed to read Cloudflare plugin asset: {error}"))?;
+    if bytes.len() > max_bytes {
+        return Err("Cloudflare plugin asset exceeds the approved size limit.".into());
+    }
+    Ok(bytes)
+}
+
+async fn fetch_verified_marketplace_package(
+    deployment_url: &str,
+    expected_sha256: &str,
+    expected_size: usize,
+) -> std::result::Result<Vec<u8>, String> {
+    let package =
+        fetch_marketplace_asset(deployment_url, "/mahayana/plugin.tar.gz", expected_size).await?;
+    if package.len() != expected_size {
+        return Err("Cloudflare plugin package size does not match approved metadata.".into());
+    }
+    let actual_sha256 = format!("{:x}", Sha256::digest(&package));
+    if !actual_sha256.eq_ignore_ascii_case(expected_sha256) {
+        return Err("Cloudflare plugin package SHA-256 does not match approved metadata.".into());
+    }
+    Ok(package)
+}
+
+async fn verified_marketplace_site_package_with_retry(
+    deployment_url: &str,
+    plugin_id: &str,
+    version: &str,
+    expected_sha256: &str,
+    expected_size: usize,
+) -> std::result::Result<Vec<u8>, String> {
+    let mut last_error = "Cloudflare plugin deployment is not available yet.".to_string();
+    for attempt in 1..=MARKETPLACE_DEPLOYMENT_VERIFY_ATTEMPTS {
+        match verified_marketplace_site_package(
+            deployment_url,
+            plugin_id,
+            version,
+            expected_sha256,
+            expected_size,
+        )
+        .await
+        {
+            Ok(package) => return Ok(package),
+            Err(error) => last_error = error,
+        }
+        if attempt < MARKETPLACE_DEPLOYMENT_VERIFY_ATTEMPTS {
+            Delay::from(Duration::from_secs(
+                MARKETPLACE_DEPLOYMENT_VERIFY_DELAY_SECONDS,
+            ))
+            .await;
+        }
+    }
+    Err(format!(
+        "Cloudflare plugin deployment verification failed after {MARKETPLACE_DEPLOYMENT_VERIFY_ATTEMPTS} attempts: {last_error}"
+    ))
+}
+
+async fn verified_marketplace_site_package(
+    deployment_url: &str,
+    plugin_id: &str,
+    version: &str,
+    expected_sha256: &str,
+    expected_size: usize,
+) -> std::result::Result<Vec<u8>, String> {
+    let manifest_bytes =
+        fetch_marketplace_asset(deployment_url, "/mahayana/plugin.json", 64 * 1024).await?;
+    let manifest: MarketplaceSiteManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| format!("invalid Cloudflare plugin manifest: {error}"))?;
+    if manifest.schema_version != 1
+        || manifest.plugin_id != plugin_id
+        || manifest.version != version
+        || manifest.package_path != "/mahayana/plugin.tar.gz"
+        || !manifest
+            .package_sha256
+            .eq_ignore_ascii_case(expected_sha256)
+        || manifest.package_size != expected_size
+        || manifest.runtime != "independent-worker-or-pages"
+    {
+        return Err("Cloudflare plugin manifest does not match the release request.".into());
+    }
+    fetch_verified_marketplace_package(deployment_url, expected_sha256, expected_size).await
 }
 
 fn route_identifier<'a>(context: &'a RouteContext<()>, name: &str) -> Result<&'a str> {
@@ -1914,6 +2401,45 @@ fn route_identifier<'a>(context: &'a RouteContext<()>, name: &str) -> Result<&'a
         })
         .ok_or_else(|| worker::Error::RustError(format!("invalid route parameter {name}")))?;
     Ok(value)
+}
+
+fn route_version(context: &RouteContext<()>) -> Result<&str> {
+    context
+        .param("version")
+        .map(String::as_str)
+        .filter(|value| is_version_identifier(value))
+        .ok_or_else(|| worker::Error::RustError("invalid route parameter version".into()))
+}
+
+fn exact_nonnegative_i64(value: f64) -> Option<i64> {
+    (value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value <= i64::MAX as f64)
+        .then_some(value as i64)
+}
+
+fn is_version_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+'))
+}
+
+fn is_public_https_url(value: &str) -> bool {
+    let Ok(url) = Url::parse(value) else {
+        return false;
+    };
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return false;
+    }
+    url.host_str()
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|domain| domain.ends_with(".workers.dev") || domain.ends_with(".pages.dev"))
 }
 
 fn is_identifier(value: &str) -> bool {

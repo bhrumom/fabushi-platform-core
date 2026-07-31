@@ -17,13 +17,18 @@ use serde::Serialize;
 use serde_json::Map;
 use serde_json::Value;
 use serde_json::json;
+use sha2::Digest;
 use std::env;
+use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
+use std::thread;
 use std::time::Duration;
 
 const DEFAULT_API_BASE_URL: &str = "https://api.ombhrum.com";
 const MAHAYANA_ACCOUNT_SESSION_SECRET: &str = "MAHAYANA_ACCOUNT_SESSION";
+const MAHAYANA_TEST_ACCOUNT_TOKEN_ENV: &str = "MAHAYANA_TEST_ACCOUNT_TOKEN";
+const MAHAYANA_TEST_ACCOUNT_MARKER: &str = "test-account-login.sha256";
 const ACCESS_TOKEN_REFRESH_SKEW_SECONDS: i64 = 60;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,11 +151,13 @@ impl MahayanaProductClient {
     }
 
     /// Stores the environment-provisioned smoke-test credential in the same
-    /// encrypted Mahayana session backend used by normal account logins. The
-    /// credential is never accepted as a CLI argument or returned to callers.
+    /// encrypted Mahayana session backend used by normal account logins. On a
+    /// headless CI runner without an OS keyring, only a SHA-256 login marker is
+    /// written; later CLI processes read the credential from the existing
+    /// GitHub Actions secret environment instead of persisting it on disk.
     pub fn store_test_account_session(&self, token: &str) -> Result<(), ProductError> {
         let token = safe_test_account_token(token)?;
-        self.save_session(&json!({
+        let session = json!({
             "accessToken": token,
             "provider": "test",
             "username": "TestAccount",
@@ -161,7 +168,25 @@ impl MahayanaProductClient {
                 "membership": {"type": "lifetime", "active": true},
                 "isTestAccount": true,
             },
-        }))
+        });
+        match self.save_session(&session) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(self.test_account_marker_path());
+                Ok(())
+            }
+            Err(error) => {
+                let environment_token = env::var(MAHAYANA_TEST_ACCOUNT_TOKEN_ENV)
+                    .ok()
+                    .map(|value| value.trim().to_string());
+                if environment_token.as_deref() != Some(token) {
+                    return Err(error);
+                }
+                write_private_file(
+                    &self.test_account_marker_path(),
+                    &format!("{:x}", sha2::Sha256::digest(token.as_bytes())),
+                )
+            }
+        }
     }
 
     pub fn marketplace_browse(
@@ -182,6 +207,21 @@ impl MahayanaProductClient {
         self.get_json("/v1/marketplace/plugins", &parameters, token.as_deref())
     }
 
+    pub fn marketplace_release_metadata(
+        &self,
+        plugin_id: &str,
+        version: &str,
+    ) -> Result<Value, ProductError> {
+        let plugin_id = safe_path_identifier(plugin_id, "pluginId")?;
+        let version = safe_marketplace_version(version)?;
+        let token = self.optional_authorization_token(&Value::Null)?;
+        self.get_json(
+            &format!("/v1/marketplace/plugins/{plugin_id}/releases/{version}"),
+            &[],
+            token.as_deref(),
+        )
+    }
+
     pub fn download_marketplace_plugin(
         &self,
         plugin_id: &str,
@@ -189,7 +229,7 @@ impl MahayanaProductClient {
         max_bytes: usize,
     ) -> Result<Vec<u8>, ProductError> {
         let plugin_id = safe_path_identifier(plugin_id, "pluginId")?;
-        let version = safe_path_identifier(version, "version")?;
+        let version = safe_marketplace_version(version)?;
         let token = self.optional_authorization_token(&Value::Null)?;
         let client = http_client()?;
         let mut request = client
@@ -219,10 +259,17 @@ impl MahayanaProductClient {
                 "marketplace plugin package exceeds the local size limit".into(),
             ));
         }
-        let bytes = response
-            .bytes()
-            .map_err(|error| ProductError::Transport(error.to_string()))?
-            .to_vec();
+        let mut bytes = Vec::with_capacity(
+            response
+                .content_length()
+                .and_then(|length| usize::try_from(length).ok())
+                .unwrap_or(0)
+                .min(max_bytes),
+        );
+        response
+            .take((max_bytes as u64).saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|error| ProductError::Transport(error.to_string()))?;
         if bytes.len() > max_bytes {
             return Err(ProductError::Response(
                 "marketplace plugin package exceeds the local size limit".into(),
@@ -231,6 +278,54 @@ impl MahayanaProductClient {
         Ok(bytes)
     }
 
+    /// Wait until a newly deployed Cloudflare plugin site serves the exact
+    /// release manifest and package. Cloudflare deployments can report success
+    /// before static assets are readable from every edge, while the platform
+    /// intentionally performs an immediate authoritative verification.
+    pub fn wait_for_marketplace_deployment(
+        &self,
+        plugin_id: &str,
+        version: &str,
+        deployment_url: &str,
+        package_sha256: &str,
+        package_size: u64,
+    ) -> Result<(), ProductError> {
+        let plugin_id = safe_path_identifier(plugin_id, "pluginId")?;
+        let version = safe_marketplace_version(version)?;
+        let deployment_url = https_deployment_url(deployment_url)?;
+        let package_sha256 = safe_sha256(package_sha256)?;
+        if package_size == 0 || package_size > 50 * 1024 * 1024 {
+            return Err(ProductError::InvalidParameter("packageSize"));
+        }
+        let package_size = usize::try_from(package_size)
+            .map_err(|_| ProductError::InvalidParameter("packageSize"))?;
+        let client = http_client()?;
+        let manifest_url = format!("{deployment_url}/mahayana/plugin.json");
+        let package_url = format!("{deployment_url}/mahayana/plugin.tar.gz");
+        let mut last_error = "deployment assets are not available yet".to_string();
+        for attempt in 1..=24 {
+            match verify_marketplace_deployment_once(
+                &client,
+                &manifest_url,
+                &package_url,
+                plugin_id,
+                version,
+                package_sha256,
+                package_size,
+            ) {
+                Ok(()) => return Ok(()),
+                Err(error) => last_error = error,
+            }
+            if attempt < 24 {
+                thread::sleep(Duration::from_secs(5));
+            }
+        }
+        Err(ProductError::Response(format!(
+            "Cloudflare plugin deployment did not become verifiable: {last_error}"
+        )))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn publish_plugin(
         &self,
         plugin_id: &str,
@@ -239,13 +334,26 @@ impl MahayanaProductClient {
         package_sha256: &str,
         package_size: u64,
         platforms: &[String],
+        package: &[u8],
     ) -> Result<Value, ProductError> {
         let plugin_id = safe_path_identifier(plugin_id, "pluginId")?;
-        let version = non_empty(version, "version")?;
+        let version = safe_marketplace_version(version)?;
         let deployment_url = https_deployment_url(deployment_url)?;
         let package_sha256 = safe_sha256(package_sha256)?;
         let platforms = safe_marketplace_platforms(platforms)?;
+        if package_size == 0
+            || package_size > 50 * 1024 * 1024
+            || package.len() as u64 != package_size
+        {
+            return Err(ProductError::InvalidParameter("packageSize"));
+        }
+        let actual_sha256 = format!("{:x}", sha2::Sha256::digest(package));
+        if !actual_sha256.eq_ignore_ascii_case(package_sha256) {
+            return Err(ProductError::InvalidParameter("packageSha256"));
+        }
         let token = self.authorization_token(&Value::Null)?;
+        let package_part = reqwest::blocking::multipart::Part::bytes(package.to_vec())
+            .file_name(format!("{plugin_id}-{version}.tar.gz"));
         let form = reqwest::blocking::multipart::Form::new()
             .text("pluginId", plugin_id.to_string())
             .text("version", version.to_string())
@@ -256,7 +364,8 @@ impl MahayanaProductClient {
                 "platforms",
                 serde_json::to_string(&platforms)
                     .map_err(|error| ProductError::Configuration(error.to_string()))?,
-            );
+            )
+            .part("package", package_part);
         let client = http_client()?;
         decode_response(
             client
@@ -811,6 +920,9 @@ impl MahayanaProductClient {
         if let Some(token) = access_token(command) {
             return Ok(token.to_string());
         }
+        if let Some(token) = self.environment_test_account_token()? {
+            return Ok(token);
+        }
         let session = self.required_session()?;
         self.active_session_token(session)
     }
@@ -821,6 +933,9 @@ impl MahayanaProductClient {
     ) -> Result<Option<String>, ProductError> {
         if let Some(token) = access_token(command) {
             return Ok(Some(token.to_string()));
+        }
+        if let Some(token) = self.environment_test_account_token()? {
+            return Ok(Some(token));
         }
         self.load_session()?
             .map(|session| self.active_session_token(session))
@@ -914,11 +1029,148 @@ impl MahayanaProductClient {
 
     fn remove_session(&self) -> Result<(), ProductError> {
         let name = account_session_secret_name()?;
-        self.secrets_manager
+        let encrypted_result = self
+            .secrets_manager
             .delete(&SecretScope::Global, &name)
             .map(|_| ())
-            .map_err(secrets_error)
+            .map_err(secrets_error);
+        let marker_result = match std::fs::remove_file(self.test_account_marker_path()) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(ProductError::Session(error.to_string())),
+        };
+        encrypted_result.and(marker_result)
     }
+
+    fn test_account_marker_path(&self) -> PathBuf {
+        self.session_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(MAHAYANA_TEST_ACCOUNT_MARKER)
+    }
+
+    fn environment_test_account_token(&self) -> Result<Option<String>, ProductError> {
+        let token = match env::var(MAHAYANA_TEST_ACCOUNT_TOKEN_ENV) {
+            Ok(token) if !token.trim().is_empty() => token,
+            _ => return Ok(None),
+        };
+        let token = safe_test_account_token(&token)?;
+        let marker = match std::fs::read_to_string(self.test_account_marker_path()) {
+            Ok(marker) => marker,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(ProductError::Session(error.to_string())),
+        };
+        let digest = format!("{:x}", sha2::Sha256::digest(token.as_bytes()));
+        if marker.trim() != digest {
+            return Err(ProductError::Session(
+                "test account environment token does not match the completed CLI login".into(),
+            ));
+        }
+        Ok(Some(token.to_string()))
+    }
+}
+
+fn verify_marketplace_deployment_once(
+    client: &reqwest::blocking::Client,
+    manifest_url: &str,
+    package_url: &str,
+    plugin_id: &str,
+    version: &str,
+    package_sha256: &str,
+    package_size: usize,
+) -> Result<(), String> {
+    let manifest_response = client
+        .get(manifest_url)
+        .header("Accept", "application/json")
+        .send()
+        .map_err(|error| format!("failed to fetch plugin manifest: {error}"))?;
+    if !manifest_response.status().is_success() {
+        return Err(format!(
+            "plugin manifest returned HTTP {}",
+            manifest_response.status()
+        ));
+    }
+    if manifest_response
+        .content_length()
+        .is_some_and(|length| length > 64 * 1024)
+    {
+        return Err("plugin manifest exceeds 64 KiB".into());
+    }
+    let mut manifest_bytes = Vec::with_capacity(
+        manifest_response
+            .content_length()
+            .and_then(|length| usize::try_from(length).ok())
+            .unwrap_or(0)
+            .min(64 * 1024),
+    );
+    manifest_response
+        .take(64 * 1024 + 1)
+        .read_to_end(&mut manifest_bytes)
+        .map_err(|error| format!("failed to read plugin manifest: {error}"))?;
+    if manifest_bytes.len() > 64 * 1024 {
+        return Err("plugin manifest exceeds 64 KiB".into());
+    }
+    let manifest = serde_json::from_slice::<Value>(&manifest_bytes)
+        .map_err(|error| format!("plugin manifest is invalid JSON: {error}"))?;
+    validate_marketplace_site_manifest(
+        &manifest,
+        plugin_id,
+        version,
+        package_sha256,
+        package_size,
+    )?;
+
+    let package_response = client
+        .get(package_url)
+        .send()
+        .map_err(|error| format!("failed to fetch plugin package: {error}"))?;
+    if !package_response.status().is_success() {
+        return Err(format!(
+            "plugin package returned HTTP {}",
+            package_response.status()
+        ));
+    }
+    if package_response
+        .content_length()
+        .is_some_and(|length| length != package_size as u64)
+    {
+        return Err("plugin package size does not match release metadata".into());
+    }
+    let mut package = Vec::with_capacity(package_size);
+    package_response
+        .take(package_size as u64 + 1)
+        .read_to_end(&mut package)
+        .map_err(|error| format!("failed to read plugin package: {error}"))?;
+    if package.len() != package_size {
+        return Err("plugin package size does not match release metadata".into());
+    }
+    let actual_sha256 = format!("{:x}", sha2::Sha256::digest(&package));
+    if !actual_sha256.eq_ignore_ascii_case(package_sha256) {
+        return Err("plugin package SHA-256 does not match release metadata".into());
+    }
+    Ok(())
+}
+
+fn validate_marketplace_site_manifest(
+    manifest: &Value,
+    plugin_id: &str,
+    version: &str,
+    package_sha256: &str,
+    package_size: usize,
+) -> Result<(), String> {
+    let matches = manifest.get("schemaVersion").and_then(Value::as_u64) == Some(1)
+        && manifest.get("pluginId").and_then(Value::as_str) == Some(plugin_id)
+        && manifest.get("version").and_then(Value::as_str) == Some(version)
+        && manifest.get("packagePath").and_then(Value::as_str) == Some("/mahayana/plugin.tar.gz")
+        && manifest
+            .get("packageSha256")
+            .and_then(Value::as_str)
+            .is_some_and(|digest| digest.eq_ignore_ascii_case(package_sha256))
+        && manifest.get("packageSize").and_then(Value::as_u64) == Some(package_size as u64)
+        && manifest.get("runtime").and_then(Value::as_str) == Some("independent-worker-or-pages");
+    matches
+        .then_some(())
+        .ok_or_else(|| "plugin manifest does not match release metadata".to_string())
 }
 
 fn https_deployment_url(value: &str) -> Result<String, ProductError> {
@@ -928,18 +1180,29 @@ fn https_deployment_url(value: &str) -> Result<String, ProductError> {
         || !url.username().is_empty()
         || url.password().is_some()
         || url.host_str().is_none()
+        || url.port().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
     {
         return Err(ProductError::InvalidParameter("deploymentUrl"));
     }
     let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
-    if host == "localhost" || host.ends_with(".localhost") || host == "127.0.0.1" || host == "::1" {
+    if !(host.ends_with(".workers.dev") || host.ends_with(".pages.dev")) {
         return Err(ProductError::InvalidParameter("deploymentUrl"));
     }
     let normalized = url.path().trim_end_matches('/').to_string();
     url.set_path(&normalized);
     Ok(url.to_string().trim_end_matches('/').to_string())
+}
+
+fn safe_marketplace_version(value: &str) -> Result<&str, ProductError> {
+    let value = non_empty(value, "version")?;
+    ((1..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+')))
+    .then_some(value)
+    .ok_or(ProductError::InvalidParameter("version"))
 }
 
 fn safe_sha256(value: &str) -> Result<&str, ProductError> {
@@ -973,6 +1236,25 @@ fn safe_marketplace_platforms(platforms: &[String]) -> Result<Vec<&str>, Product
         return Err(ProductError::InvalidParameter("platforms"));
     }
     Ok(normalized)
+}
+
+fn write_private_file(path: &Path, contents: &str) -> Result<(), ProductError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| ProductError::Session(error.to_string()))?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| ProductError::Session(error.to_string()))?;
+    std::io::Write::write_all(&mut file, contents.as_bytes())
+        .map_err(|error| ProductError::Session(error.to_string()))
 }
 
 fn safe_test_account_token(value: &str) -> Result<&str, ProductError> {
@@ -1121,11 +1403,14 @@ fn decode_response(
     let message = serde_json::from_str::<Value>(&body)
         .ok()
         .and_then(|value| {
-            value
-                .get("error")
-                .or_else(|| value.get("message"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
+            let code = value.get("error").and_then(Value::as_str);
+            let detail = value.get("message").and_then(Value::as_str);
+            match (code, detail) {
+                (Some(code), Some(detail)) if code != detail => Some(format!("{code}: {detail}")),
+                (Some(code), _) => Some(code.to_string()),
+                (_, Some(detail)) => Some(detail.to_string()),
+                _ => None,
+            }
         })
         .unwrap_or(body);
     Err(ProductError::HttpStatus {
@@ -1367,10 +1652,50 @@ mod tests {
     }
 
     #[test]
+    fn marketplace_site_manifest_must_match_release_metadata() {
+        let digest = "a".repeat(64);
+        let manifest = json!({
+            "schemaVersion": 1,
+            "pluginId": "cloud-market-hello",
+            "version": "1.0.0",
+            "packagePath": "/mahayana/plugin.tar.gz",
+            "packageSha256": digest,
+            "packageSize": 4706,
+            "runtime": "independent-worker-or-pages",
+        });
+        assert_eq!(
+            validate_marketplace_site_manifest(
+                &manifest,
+                "cloud-market-hello",
+                "1.0.0",
+                &"a".repeat(64),
+                4706,
+            ),
+            Ok(())
+        );
+        let mut wrong_runtime = manifest;
+        wrong_runtime["runtime"] = Value::String("r2-package".into());
+        assert!(
+            validate_marketplace_site_manifest(
+                &wrong_runtime,
+                "cloud-market-hello",
+                "1.0.0",
+                &"a".repeat(64),
+                4706,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn marketplace_deployment_metadata_requires_public_https_and_sha256() {
         assert_eq!(
-            https_deployment_url("https://plugin.example/"),
-            Ok("https://plugin.example".to_string())
+            https_deployment_url("https://plugin-example.pages.dev/"),
+            Ok("https://plugin-example.pages.dev".to_string())
+        );
+        assert_eq!(
+            https_deployment_url("https://plugin.example"),
+            Err(ProductError::InvalidParameter("deploymentUrl"))
         );
         assert_eq!(
             https_deployment_url("http://localhost:8787"),

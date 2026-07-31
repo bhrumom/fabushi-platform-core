@@ -873,7 +873,10 @@ fn parse_tool_command(
                     == Some("string") =>
         {
             let field = properties.keys().next().expect("one property");
-            json!({ (field): remainder })
+            match serde_json::from_str::<Value>(remainder) {
+                Ok(parsed) if parsed.is_object() => parsed,
+                _ => json!({ (field): remainder }),
+            }
         }
         Some(_) => {
             let parsed: Value = serde_json::from_str(remainder).map_err(|_| {
@@ -1310,6 +1313,16 @@ mod tests {
             )
             .expect("send command"),
             ("send".to_string(), json!({"content": "保留  后续文本"}))
+        );
+        assert_eq!(
+            parse_tool_command(
+                r#"/send {"content":"Actions"}"#,
+                "test-plugin",
+                &tools,
+                &HashMap::new(),
+            )
+            .expect("send command with explicit JSON arguments"),
+            ("send".to_string(), json!({"content": "Actions"}))
         );
         assert_eq!(
             parse_tool_command(

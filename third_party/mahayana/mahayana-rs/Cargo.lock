@@ -8611,6 +8611,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "url",
 ]
 
@@ -8641,6 +8642,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.18",
+ "url",
  "uuid",
  "worker",
 ]

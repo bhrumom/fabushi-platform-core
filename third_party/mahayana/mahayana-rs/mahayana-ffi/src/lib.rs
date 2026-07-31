@@ -198,8 +198,11 @@ fn build_runtime(create: RuntimeCreateConfig) -> Result<MahayanaRuntime, String>
             .ok_or_else(|| "Dacheng Responses base URL is required".to_string())?;
         let settings = CodexAgentConfig {
             codex_home,
-            bundled_plugin_marketplace: create.bundled_plugin_marketplace,
-            bundled_plugin_ids: mini_apps.iter().map(|app| app.plugin_id.clone()).collect(),
+            bundled_plugin_marketplace: create.bundled_plugin_marketplace.clone(),
+            bundled_plugin_ids: bundled_marketplace_plugin_ids(
+                create.bundled_plugin_marketplace.as_deref(),
+                &mini_apps,
+            )?,
             inherit_installed_plugins: create.inherit_installed_plugins.unwrap_or(
                 matches!(runtime_config.build_profile, BuildProfile::DesktopFull) && !cfg!(test),
             ),
@@ -278,6 +281,35 @@ fn merge_official_mini_apps(
         );
     }
     definitions.into_values().collect()
+}
+
+fn bundled_marketplace_plugin_ids(
+    marketplace_root: Option<&std::path::Path>,
+    mini_apps: &[MiniAppDefinition],
+) -> Result<Vec<String>, String> {
+    let Some(marketplace_root) = marketplace_root else {
+        return Ok(Vec::new());
+    };
+    let mut plugin_ids = Vec::new();
+    for mini_app in mini_apps {
+        let plugin_id = mini_app.plugin_id.as_str();
+        if plugin_id.is_empty()
+            || !plugin_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(format!("invalid bundled plugin id: {plugin_id}"));
+        }
+        if marketplace_root
+            .join("plugins")
+            .join(plugin_id)
+            .join(".codex-plugin/plugin.json")
+            .is_file()
+        {
+            plugin_ids.push(plugin_id.to_string());
+        }
+    }
+    Ok(plugin_ids)
 }
 
 fn discover_mini_apps(client: &MahayanaProductClient) -> Option<Vec<MiniAppDefinition>> {
@@ -563,6 +595,39 @@ mod tests {
             .to_string();
         unsafe { mahayana_runtime_free_string(pointer) };
         serde_json::from_str(&text).expect("JSON response")
+    }
+
+    #[test]
+    fn bundled_marketplace_enables_only_plugins_present_on_disk() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "mahayana-ffi-marketplace-{}-{unique}",
+            std::process::id()
+        ));
+        let manifest = root.join("plugins/cloud-market-hello/.codex-plugin/plugin.json");
+        std::fs::create_dir_all(manifest.parent().expect("manifest parent"))
+            .expect("create plugin tree");
+        std::fs::write(&manifest, "{}").expect("write plugin manifest");
+
+        let mini_apps = vec![
+            MiniAppDefinition {
+                plugin_id: "cloud-market-hello".into(),
+                title: "Cloud Market Hello".into(),
+                pinned: false,
+            },
+            MiniAppDefinition {
+                plugin_id: "bot-father".into(),
+                title: "Bot Father".into(),
+                pinned: false,
+            },
+        ];
+        let plugin_ids =
+            bundled_marketplace_plugin_ids(Some(&root), &mini_apps).expect("bundled plugin ids");
+        assert_eq!(plugin_ids, vec!["cloud-market-hello"]);
+        std::fs::remove_dir_all(root).expect("remove plugin tree");
     }
 
     #[test]

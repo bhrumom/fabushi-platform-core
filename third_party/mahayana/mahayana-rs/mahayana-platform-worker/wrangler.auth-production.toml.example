@@ -26,9 +26,6 @@ database_name = "mahayana-platform"
 database_id = "REPLACE_WITH_PRODUCTION_PLATFORM_DB_ID"
 migrations_dir = "migrations"
 
-[[r2_buckets]]
-binding = "PLUGIN_PACKAGES"
-bucket_name = "mahayana-plugin-packages"
 
 [[queues.producers]]
 binding = "PLATFORM_EVENTS"

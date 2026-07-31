@@ -9,7 +9,7 @@
 - pre-migration Time Travel bookmark:
   `00002837-00000000-000050ac-06a7a4666f268847c20cc15c98fab198`
 - platform database: `0001_platform.sql` applied
-- R2: `mahayana-plugin-packages` created
+- Legacy R2 bucket exists but is not bound or used by the marketplace; releases are served by each plugin site.
 - Queue: `mahayana-platform-events` created
 - custom domain: not attached; route-coverage gate remains open
 
