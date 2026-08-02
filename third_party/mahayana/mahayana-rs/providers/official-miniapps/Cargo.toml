@@ -20,5 +20,12 @@ mahayana-miniapp-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+html-escape = "0.2"
+regex = "1"
+reqwest = { workspace = true, features = ["cookies"] }
+sha2.workspace = true
+url.workspace = true
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen.workspace = true

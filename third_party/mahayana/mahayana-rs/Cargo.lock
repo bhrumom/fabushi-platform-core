@@ -5340,9 +5340,14 @@ dependencies = [
 name = "fabushi-official-miniapps"
 version = "0.1.0"
 dependencies = [
+ "html-escape",
  "mahayana-miniapp-protocol",
+ "regex",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "url",
  "wasm-bindgen",
 ]
 
@@ -7120,6 +7125,12 @@ dependencies = [
  "libc",
  "windows-link",
 ]
+
+[[package]]
+name = "html-escape"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9356095b4b41197bba32173600e1582792cda618f65d12f68e2e77d273413c5"
 
 [[package]]
 name = "http"

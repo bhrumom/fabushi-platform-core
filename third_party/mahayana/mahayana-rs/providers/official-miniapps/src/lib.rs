@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const OFFICIAL_PLUGIN_IDS: [&str; 7] = [
+pub const OFFICIAL_PLUGIN_IDS: [&str; 8] = [
     "global-dharma",
     "faliu-flashcards",
     "platform-publish",
@@ -30,6 +30,7 @@ pub const OFFICIAL_PLUGIN_IDS: [&str; 7] = [
     "bot-father",
     "mahayana-assistant",
     "chatgpt-auto-confirm",
+    "wechat-article-downloader",
 ];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -164,6 +165,9 @@ impl OfficialMiniAppEngine {
             "bot-father" => self.call_bot_father(tool_name, &arguments),
             "mahayana-assistant" => self.call_assistant(tool_name, &arguments),
             "chatgpt-auto-confirm" => self.call_chatgpt_auto_confirm(tool_name, &arguments),
+            "wechat-article-downloader" => {
+                self.call_wechat_article_downloader(tool_name, &arguments)
+            }
             _ => unreachable!("validated plugin id"),
         }
     }
@@ -649,6 +653,37 @@ impl OfficialMiniAppEngine {
         Ok(outcome(&text, structured, Vec::new()))
     }
 
+    fn call_wechat_article_downloader(
+        &mut self,
+        tool: &str,
+        arguments: &Value,
+    ) -> Result<ToolCallOutcome, String> {
+        let url = required_string(arguments, "url")?;
+        let capability = match tool {
+            "inspect" => "network.wechat-archive.inspect",
+            "discover" => "network.wechat-archive.discover",
+            "download" => "network.wechat-archive.download",
+            _ => {
+                return Err(format!(
+                    "unsupported wechat article downloader tool: {tool}"
+                ));
+            }
+        };
+        Ok(outcome(
+            "已把微信公众号公开文章归档请求交给宿主执行。桌面 CLI 会直接使用内置 Rust 下载器。",
+            json!({
+                "queued": true,
+                "hostRequest": host_request(capability, json!({
+                    "url": url,
+                    "outputDir": arguments.get("outputDir").cloned().unwrap_or(Value::Null),
+                    "downloadImages": arguments.get("downloadImages").and_then(Value::as_bool).unwrap_or(false),
+                    "searchPages": arguments.get("searchPages").and_then(Value::as_u64).unwrap_or(10)
+                }))
+            }),
+            progress_pair("准备公众号归档请求", "已交给宿主"),
+        ))
+    }
+
     fn call_chatgpt_auto_confirm(
         &mut self,
         tool: &str,
@@ -843,6 +878,16 @@ pub fn app_definition(plugin_id: &str) -> Option<AppDefinition> {
                 ("audit", "audit_log"),
                 ("diagnose", "diagnose"),
                 ("web", "web-serve"),
+            ]),
+        ),
+        "wechat-article-downloader" => (
+            "微信公众号归档器",
+            "从任意公开微信公众号文章链接出发，递归发现公开专辑与公开索引并归档文章正文、元数据和可选图片",
+            wechat_article_downloader_tools(),
+            command_map(&[
+                ("inspect", "inspect"),
+                ("discover", "discover"),
+                ("download", "download"),
             ]),
         ),
         _ => return None,
@@ -1472,6 +1517,51 @@ fn chatgpt_auto_confirm_tools() -> Vec<Value> {
             json!({}),
             &[],
             annotations(true, false, false),
+            false,
+        ),
+    ]
+}
+
+fn wechat_article_downloader_tools() -> Vec<Value> {
+    let common = json!({
+        "url":{"type":"string","format":"uri","pattern":"^https://mp\\.weixin\\.qq\\.com/s"},
+        "outputDir":{"type":"string","default":"wechat-articles"},
+        "searchPages":{"type":"integer","minimum":0,"maximum":10,"default":10},
+        "delayMs":{"type":"integer","minimum":100,"maximum":5000,"default":450},
+        "articleRetries":{"type":"integer","minimum":1,"maximum":10,"default":5,"description":"临时验证页或空页面的退避重试次数"},
+        "maxArticles":{"type":"integer","minimum":0,"default":0},
+        "maxAlbums":{"type":"integer","minimum":1,"maximum":2000,"default":250},
+        "allowSogou":{"type":"boolean","default":true},
+        "downloadImages":{"type":"boolean","default":false},
+        "rawHtml":{"type":"boolean","default":false},
+        "strict":{"type":"boolean","default":false},
+        "cookie":{"type":"string","description":"可选的用户自有微信会话 Cookie；不会上传或写入日志"},
+        "cookieFile":{"type":"string","description":"可选的本机 Cookie 文件路径"}
+    });
+    vec![
+        home_tool(),
+        tool(
+            "inspect",
+            "读取一篇公开微信文章并识别公众号、文章和专辑元数据",
+            common.clone(),
+            &["url"],
+            annotations(true, false, true),
+            false,
+        ),
+        tool(
+            "discover",
+            "递归发现同一公众号公开可访问的专辑、前后文章和公开搜索索引，不写文章文件",
+            common.clone(),
+            &["url"],
+            annotations(true, false, true),
+            false,
+        ),
+        tool(
+            "download",
+            "递归发现并归档同一公众号公开可访问的文章正文、元数据、索引和可选图片",
+            common,
+            &["url"],
+            annotations(false, false, true),
             false,
         ),
     ]
