@@ -676,7 +676,7 @@ impl OfficialMiniAppEngine {
                 "hostRequest": host_request(capability, json!({
                     "url": url,
                     "outputDir": arguments.get("outputDir").cloned().unwrap_or(Value::Null),
-                    "downloadImages": arguments.get("downloadImages").and_then(Value::as_bool).unwrap_or(false),
+                    "downloadImages": arguments.get("downloadImages").and_then(Value::as_bool).unwrap_or(true),
                     "searchPages": arguments.get("searchPages").and_then(Value::as_u64).unwrap_or(10)
                 }))
             }),
@@ -1532,7 +1532,7 @@ fn wechat_article_downloader_tools() -> Vec<Value> {
         "maxArticles":{"type":"integer","minimum":0,"default":0},
         "maxAlbums":{"type":"integer","minimum":1,"maximum":2000,"default":250},
         "allowSogou":{"type":"boolean","default":true},
-        "downloadImages":{"type":"boolean","default":false},
+        "downloadImages":{"type":"boolean","default":true,"description":"默认下载正文图片并改写为本地路径，生成可离线打开的完整文章"},
         "rawHtml":{"type":"boolean","default":false},
         "strict":{"type":"boolean","default":false},
         "cookie":{"type":"string","description":"可选的用户自有微信会话 Cookie；不会上传或写入日志"},
@@ -1558,7 +1558,7 @@ fn wechat_article_downloader_tools() -> Vec<Value> {
         ),
         tool(
             "download",
-            "递归发现并归档同一公众号公开可访问的文章正文、元数据、索引和可选图片",
+            "递归发现并下载同一公众号公开可访问的完整文章正文、纯文本、元数据和本地图片，生成可离线打开的文件",
             common,
             &["url"],
             annotations(false, false, true),

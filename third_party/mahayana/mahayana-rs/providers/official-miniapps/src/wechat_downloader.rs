@@ -64,8 +64,16 @@ impl Config {
             max_albums: usize_any(arguments, &["maxAlbums", "max_albums"])
                 .unwrap_or(250)
                 .clamp(1, 2_000),
-            download_images: bool_any(arguments, &["downloadImages", "download_images"])
-                .unwrap_or(false),
+            download_images: bool_any(
+                arguments,
+                &[
+                    "downloadImages",
+                    "download_images",
+                    "downloadAssets",
+                    "download_assets",
+                ],
+            )
+            .unwrap_or(true),
             raw_html: bool_any(arguments, &["rawHtml", "raw_html"]).unwrap_or(false),
             allow_sogou: bool_any(arguments, &["allowSogou", "allow_sogou"]).unwrap_or(true),
             strict: bool_any(arguments, &["strict"]).unwrap_or(false),
@@ -98,11 +106,29 @@ struct ArticleRecord {
     source_url: String,
     canonical_url: String,
     output_path: Option<String>,
+    content_html_path: Option<String>,
+    content_text_path: Option<String>,
     body_bytes: usize,
+    text_bytes: usize,
     image_count: usize,
     downloaded_images: usize,
+    failed_images: usize,
+    offline_complete: bool,
     album_ids: Vec<String>,
     discovered_from: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct WrittenArticle {
+    output_path: Option<String>,
+    content_html_path: Option<String>,
+    content_text_path: Option<String>,
+    body_bytes: usize,
+    text_bytes: usize,
+    image_count: usize,
+    downloaded_images: usize,
+    failed_images: usize,
+    offline_complete: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -131,6 +157,8 @@ struct ManifestStats {
     failures: usize,
     images: usize,
     downloaded_images: usize,
+    failed_images: usize,
+    offline_articles: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -434,7 +462,7 @@ impl Downloader {
                 );
             }
         }
-        let (output_path, image_count, downloaded_images, body_bytes) = if self.write_files {
+        let written = if self.write_files {
             match write_article(&self.client, &self.config, &parsed, &html) {
                 Ok(value) => value,
                 Err(error) => {
@@ -443,21 +471,23 @@ impl Downloader {
                         target: queued.url.clone(),
                         error,
                     });
-                    (
-                        None,
-                        count_images(&parsed.body_html),
-                        0,
-                        parsed.body_html.len(),
-                    )
+                    let image_count = count_images(&parsed.body_html);
+                    WrittenArticle {
+                        body_bytes: parsed.body_html.len(),
+                        text_bytes: html_to_text(&parsed.body_html).len(),
+                        image_count,
+                        failed_images: image_count,
+                        ..WrittenArticle::default()
+                    }
                 }
             }
         } else {
-            (
-                None,
-                count_images(&parsed.body_html),
-                0,
-                parsed.body_html.len(),
-            )
+            WrittenArticle {
+                body_bytes: parsed.body_html.len(),
+                text_bytes: html_to_text(&parsed.body_html).len(),
+                image_count: count_images(&parsed.body_html),
+                ..WrittenArticle::default()
+            }
         };
         let record = ArticleRecord {
             key: key.clone(),
@@ -471,10 +501,15 @@ impl Downloader {
             publish_time: parsed.publish_time,
             source_url: queued.url,
             canonical_url: parsed.canonical_url,
-            output_path,
-            body_bytes,
-            image_count,
-            downloaded_images,
+            output_path: written.output_path,
+            content_html_path: written.content_html_path,
+            content_text_path: written.content_text_path,
+            body_bytes: written.body_bytes,
+            text_bytes: written.text_bytes,
+            image_count: written.image_count,
+            downloaded_images: written.downloaded_images,
+            failed_images: written.failed_images,
+            offline_complete: written.offline_complete,
             album_ids: parsed.album_ids.into_iter().collect(),
             discovered_from: if recovered_from_title_index {
                 "sogou-title-recovery".into()
@@ -668,8 +703,13 @@ impl Downloader {
             .iter()
             .map(|article| article.downloaded_images)
             .sum();
+        let failed_images = articles.iter().map(|article| article.failed_images).sum();
+        let offline_articles = articles
+            .iter()
+            .filter(|article| article.offline_complete)
+            .count();
         Manifest {
-            schema_version: 1,
+            schema_version: 2,
             generated_at_unix: now_unix(),
             seed_url: self.config.seed_url.clone(),
             account: self.account.clone(),
@@ -679,6 +719,8 @@ impl Downloader {
                 failures: self.failures.len(),
                 images,
                 downloaded_images,
+                failed_images,
+                offline_articles,
             },
             articles,
             albums,
@@ -1015,6 +1057,7 @@ fn extract_js_content(html: &str) -> Option<String> {
     let end = end?;
     let mut content = html[start..end].to_string();
     content = content.replace("visibility: hidden;", "visibility: visible;");
+    content = content.replace("opacity: 0;", "opacity: 1;");
     content = content.replace("data-src=", "src=");
     Some(content)
 }
@@ -1193,7 +1236,7 @@ fn write_article(
     config: &Config,
     parsed: &ParsedArticle,
     raw_html: &str,
-) -> Result<(Option<String>, usize, usize, usize), String> {
+) -> Result<WrittenArticle, String> {
     let slug = slugify(&parsed.title);
     let directory_name = format!(
         "{}-{}-{}",
@@ -1214,18 +1257,37 @@ fn write_article(
     let mut body = parsed.body_html.clone();
     let image_urls = extract_image_urls(&body);
     let mut downloaded = 0usize;
+    let mut failed_image_urls = Vec::new();
     if config.download_images && !image_urls.is_empty() {
         let images_dir = directory.join("images");
         fs::create_dir_all(&images_dir).map_err(|error| error.to_string())?;
         for (index, image_url) in image_urls.iter().enumerate() {
-            if let Ok(local) = download_image(client, config, image_url, &images_dir, index) {
-                body = body.replace(image_url, &local);
-                downloaded += 1;
+            match download_image(client, config, image_url, &images_dir, index) {
+                Ok(local) => {
+                    body = localize_media_reference(&body, image_url, &local);
+                    downloaded += 1;
+                }
+                Err(error) => failed_image_urls.push(json!({
+                    "url": image_url,
+                    "error": error
+                })),
             }
         }
+    } else if !image_urls.is_empty() {
+        failed_image_urls.extend(
+            image_urls
+                .iter()
+                .map(|url| json!({"url": url, "error": "media download disabled"})),
+        );
     }
+    let remaining_remote_media = extract_image_urls(&body);
+    let content_text = html_to_text(&body);
+    fs::write(directory.join("content.html"), body.as_bytes())
+        .map_err(|error| error.to_string())?;
+    fs::write(directory.join("content.txt"), content_text.as_bytes())
+        .map_err(|error| error.to_string())?;
     let standalone = format!(
-        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{}</title><style>body{{max-width:860px;margin:32px auto;padding:0 20px;font:17px/1.8 system-ui,sans-serif;color:#222}}img{{max-width:100%;height:auto}}.meta{{color:#666;border-bottom:1px solid #ddd;padding-bottom:16px;margin-bottom:24px}}pre{{white-space:pre-wrap}}</style></head><body><h1>{}</h1><div class=\"meta\">公众号：{}<br>作者：{}<br>发布时间：{}<br>原文：<a href=\"{}\">{}</a></div>{}</body></html>",
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{}</title><style>body{{max-width:860px;margin:32px auto;padding:0 20px;font:17px/1.8 system-ui,sans-serif;color:#222}}img{{max-width:100%;height:auto}}.meta{{color:#666;border-bottom:1px solid #ddd;padding-bottom:16px;margin-bottom:24px}}pre{{white-space:pre-wrap}}</style></head><body><h1>{}</h1><div class=\"meta\">公众号：{}<br>作者：{}<br>发布时间：{}<br>原文：<a href=\"{}\">{}</a><br>本地正文：<a href=\"content.html\">HTML</a> · <a href=\"content.txt\">纯文本</a></div>{}</body></html>",
         escape_html(&parsed.title),
         escape_html(&parsed.title),
         escape_html(&parsed.account.nickname),
@@ -1237,6 +1299,9 @@ fn write_article(
     );
     fs::write(directory.join("index.html"), standalone.as_bytes())
         .map_err(|error| error.to_string())?;
+    let offline_complete = remaining_remote_media.is_empty()
+        && failed_image_urls.is_empty()
+        && !content_text.trim().is_empty();
     let metadata = json!({
         "title": parsed.title,
         "author": parsed.author,
@@ -1247,27 +1312,49 @@ fn write_article(
         "publishTime": parsed.publish_time,
         "canonicalUrl": parsed.canonical_url,
         "albumIds": parsed.album_ids,
+        "contentFiles": {
+            "standaloneHtml": "index.html",
+            "bodyHtml": "content.html",
+            "plainText": "content.txt"
+        },
+        "bodyBytes": body.len(),
+        "textBytes": content_text.len(),
         "imageCount": image_urls.len(),
-        "downloadedImages": downloaded
+        "downloadedImages": downloaded,
+        "failedImages": failed_image_urls,
+        "remainingRemoteMedia": remaining_remote_media,
+        "offlineComplete": offline_complete
     });
     write_json(&directory.join("metadata.json"), &metadata)?;
     if config.raw_html {
         fs::write(directory.join("raw.html"), raw_html.as_bytes())
             .map_err(|error| error.to_string())?;
     }
-    Ok((
-        Some(
-            directory
-                .strip_prefix(&config.output_dir)
-                .unwrap_or(&directory)
-                .join("index.html")
+    let article_dir = directory
+        .strip_prefix(&config.output_dir)
+        .unwrap_or(&directory)
+        .to_path_buf();
+    Ok(WrittenArticle {
+        output_path: Some(article_dir.join("index.html").to_string_lossy().to_string()),
+        content_html_path: Some(
+            article_dir
+                .join("content.html")
                 .to_string_lossy()
                 .to_string(),
         ),
-        image_urls.len(),
-        downloaded,
-        parsed.body_html.len(),
-    ))
+        content_text_path: Some(
+            article_dir
+                .join("content.txt")
+                .to_string_lossy()
+                .to_string(),
+        ),
+        body_bytes: body.len(),
+        text_bytes: content_text.len(),
+        image_count: image_urls.len(),
+        downloaded_images: downloaded,
+        failed_images: failed_image_urls.len().max(remaining_remote_media.len()),
+        offline_complete,
+    })
 }
 
 fn download_image(
@@ -1298,6 +1385,13 @@ fn download_image(
                     .to_string();
                 match response.bytes() {
                     Ok(bytes) => {
+                        if bytes.is_empty() || !looks_like_image(&bytes, &content_type) {
+                            last_error = format!(
+                                "media response is not an image: content-type={content_type} bytes={}",
+                                bytes.len()
+                            );
+                            continue;
+                        }
                         let extension = image_extension(url, &content_type);
                         let digest = hex_digest(url.as_bytes());
                         let filename = format!("{:04}-{}.{}", index + 1, &digest[..12], extension);
@@ -1319,26 +1413,75 @@ fn download_image(
 }
 
 fn extract_image_urls(html: &str) -> Vec<String> {
-    let regex = match Regex::new(r#"(?is)(?:src|data-src)\s*=\s*["']([^"']+)["']"#) {
+    let attribute_regex = match Regex::new(
+        r#"(?is)(?:src|data-src|data-original|data-croporisrc|poster)\s*=\s*["']([^"']+)["']"#,
+    ) {
         Ok(regex) => regex,
         Err(_) => return Vec::new(),
     };
+    let css_regex = Regex::new(r#"(?is)url\(\s*["']?([^"')]+)["']?\s*\)"#).ok();
     let mut urls = BTreeSet::new();
-    for captures in regex.captures_iter(html) {
-        let Some(value) = captures.get(1) else {
-            continue;
-        };
-        let url = decode_wechat_string(value.as_str());
-        let url = if url.starts_with("//") {
-            format!("https:{url}")
-        } else {
-            url
-        };
-        if is_allowed_media_url(&url) {
-            urls.insert(url);
+    for captures in attribute_regex.captures_iter(html) {
+        if let Some(value) = captures
+            .get(1)
+            .and_then(|value| normalize_media_url(value.as_str()))
+        {
+            urls.insert(value);
+        }
+    }
+    if let Some(css_regex) = css_regex {
+        for captures in css_regex.captures_iter(html) {
+            if let Some(value) = captures
+                .get(1)
+                .and_then(|value| normalize_media_url(value.as_str()))
+            {
+                urls.insert(value);
+            }
         }
     }
     urls.into_iter().collect()
+}
+
+fn normalize_media_url(value: &str) -> Option<String> {
+    let value = decode_wechat_string(value).trim().to_string();
+    let value = if value.starts_with("//") {
+        format!("https:{value}")
+    } else {
+        value
+    };
+    is_allowed_media_url(&value).then_some(value)
+}
+
+fn localize_media_reference(html: &str, remote: &str, local: &str) -> String {
+    let mut localized = html.replace(remote, local);
+    localized = localized.replace(&remote.replace('&', "&amp;"), local);
+    if let Some(protocol_relative) = remote.strip_prefix("https:") {
+        localized = localized.replace(protocol_relative, local);
+        localized = localized.replace(&protocol_relative.replace('&', "&amp;"), local);
+    }
+    localized
+}
+
+fn html_to_text(html: &str) -> String {
+    let without_hidden = Regex::new(r"(?is)<(?:script|style)\b[^>]*>.*?</(?:script|style)>")
+        .map(|regex| regex.replace_all(html, "").into_owned())
+        .unwrap_or_else(|_| html.to_string());
+    let with_breaks =
+        Regex::new(r"(?is)<br\s*/?>|</(?:p|div|section|article|li|blockquote|h[1-6]|tr)\s*>")
+            .map(|regex| regex.replace_all(&without_hidden, "\n").into_owned())
+            .unwrap_or(without_hidden);
+    let without_tags = Regex::new(r"(?is)<[^>]+>")
+        .map(|regex| regex.replace_all(&with_breaks, "").into_owned())
+        .unwrap_or(with_breaks);
+    let decoded = decode_wechat_string(&without_tags);
+    let mut lines = Vec::new();
+    for line in decoded.lines() {
+        let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !line.is_empty() && lines.last() != Some(&line) {
+            lines.push(line);
+        }
+    }
+    lines.join("\n\n")
 }
 
 fn count_images(html: &str) -> usize {
@@ -1355,6 +1498,20 @@ fn is_allowed_media_url(value: &str) -> bool {
     ["qpic.cn", "qlogo.cn", "wx.qq.com", "weixin.qq.com"]
         .iter()
         .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
+}
+
+fn looks_like_image(bytes: &[u8], content_type: &str) -> bool {
+    if content_type.to_ascii_lowercase().starts_with("image/") {
+        return true;
+    }
+    bytes.starts_with(&[0xff, 0xd8, 0xff])
+        || bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+        || bytes.starts_with(b"GIF87a")
+        || bytes.starts_with(b"GIF89a")
+        || (bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP")
+        || String::from_utf8_lossy(&bytes[..bytes.len().min(256)])
+            .to_ascii_lowercase()
+            .contains("<svg")
 }
 
 fn image_extension(url: &str, content_type: &str) -> &'static str {
@@ -1682,6 +1839,38 @@ fn value_truthy(value: Option<&Value>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn downloads_article_media_by_default() {
+        let config = Config::from_arguments(&json!({
+            "url": "https://mp.weixin.qq.com/s/test"
+        }))
+        .unwrap();
+        assert!(config.download_images);
+    }
+
+    #[test]
+    fn extracts_and_localizes_all_wechat_image_attributes() {
+        let source = r#"<img src="https://mmbiz.qpic.cn/a.jpg?x=1&amp;y=2" data-croporisrc="//mmbiz.qpic.cn/original.png"><div style="background:url('https://mmbiz.qpic.cn/bg.webp')"></div>"#;
+        let urls = extract_image_urls(source);
+        assert_eq!(urls.len(), 3);
+        let localized = localize_media_reference(
+            source,
+            "https://mmbiz.qpic.cn/a.jpg?x=1&y=2",
+            "images/a.jpg",
+        );
+        assert!(localized.contains("src=\"images/a.jpg\""));
+        assert!(!localized.contains("a.jpg?x=1"));
+    }
+
+    #[test]
+    fn writes_readable_plain_text_from_article_html() {
+        let text = html_to_text("<p>第一段&nbsp;文字</p><p><strong>第二段</strong><br>下一行</p>");
+        assert!(text.contains("第一段 文字"));
+        assert!(text.contains("第二段"));
+        assert!(text.contains("下一行"));
+        assert!(!text.contains('<'));
+    }
 
     #[test]
     fn album_manifest_counts_include_the_current_article() {
