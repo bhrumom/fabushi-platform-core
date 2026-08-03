@@ -1414,7 +1414,7 @@ fn download_image(
 
 fn extract_image_urls(html: &str) -> Vec<String> {
     let attribute_regex = match Regex::new(
-        r#"(?is)(?:src|data-src|data-original|data-croporisrc|poster)\s*=\s*["']([^"']+)["']"#,
+        r#"(?is)(?:src|data-src|data-original|data-croporisrc|data-headimg|poster)\s*=\s*["']([^"']+)["']"#,
     ) {
         Ok(regex) => regex,
         Err(_) => return Vec::new(),
@@ -1851,9 +1851,13 @@ mod tests {
 
     #[test]
     fn extracts_and_localizes_all_wechat_image_attributes() {
-        let source = r#"<img src="https://mmbiz.qpic.cn/a.jpg?x=1&amp;y=2" data-croporisrc="//mmbiz.qpic.cn/original.png"><div style="background:url('https://mmbiz.qpic.cn/bg.webp')"></div>"#;
+        let source = r#"<img src="https://mmbiz.qpic.cn/a.jpg?x=1&amp;y=2" data-croporisrc="//mmbiz.qpic.cn/original.png"><mpprofile data-headimg="http://mmbiz.qpic.cn/avatar.png"></mpprofile><div style="background:url('https://mmbiz.qpic.cn/bg.webp')"></div>"#;
         let urls = extract_image_urls(source);
-        assert_eq!(urls.len(), 3);
+        assert_eq!(urls.len(), 4);
+        assert!(
+            urls.iter()
+                .any(|url| url == "http://mmbiz.qpic.cn/avatar.png")
+        );
         let localized = localize_media_reference(
             source,
             "https://mmbiz.qpic.cn/a.jpg?x=1&y=2",
@@ -1861,6 +1865,12 @@ mod tests {
         );
         assert!(localized.contains("src=\"images/a.jpg\""));
         assert!(!localized.contains("a.jpg?x=1"));
+        let profile_localized = localize_media_reference(
+            source,
+            "http://mmbiz.qpic.cn/avatar.png",
+            "images/profile-avatar.png",
+        );
+        assert!(profile_localized.contains("data-headimg=\"images/profile-avatar.png\""));
     }
 
     #[test]
