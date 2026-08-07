@@ -289,6 +289,8 @@ impl MahayanaProductClient {
         deployment_url: &str,
         package_sha256: &str,
         package_size: u64,
+        source: &Value,
+        release_manifest: &Value,
     ) -> Result<(), ProductError> {
         let plugin_id = safe_path_identifier(plugin_id, "pluginId")?;
         let version = safe_marketplace_version(version)?;
@@ -302,16 +304,20 @@ impl MahayanaProductClient {
         let client = http_client()?;
         let manifest_url = format!("{deployment_url}/mahayana/plugin.json");
         let package_url = format!("{deployment_url}/mahayana/plugin.tar.gz");
+        let release_manifest_url = format!("{deployment_url}/mahayana/release-manifest.json");
         let mut last_error = "deployment assets are not available yet".to_string();
         for attempt in 1..=24 {
             match verify_marketplace_deployment_once(
                 &client,
                 &manifest_url,
                 &package_url,
+                &release_manifest_url,
                 plugin_id,
                 version,
                 package_sha256,
                 package_size,
+                source,
+                release_manifest,
             ) {
                 Ok(()) => return Ok(()),
                 Err(error) => last_error = error,
@@ -335,6 +341,8 @@ impl MahayanaProductClient {
         package_size: u64,
         platforms: &[String],
         package: &[u8],
+        source: &Value,
+        release_manifest: &Value,
     ) -> Result<Value, ProductError> {
         let plugin_id = safe_path_identifier(plugin_id, "pluginId")?;
         let version = safe_marketplace_version(version)?;
@@ -363,6 +371,16 @@ impl MahayanaProductClient {
             .text(
                 "platforms",
                 serde_json::to_string(&platforms)
+                    .map_err(|error| ProductError::Configuration(error.to_string()))?,
+            )
+            .text(
+                "source",
+                serde_json::to_string(source)
+                    .map_err(|error| ProductError::Configuration(error.to_string()))?,
+            )
+            .text(
+                "releaseManifest",
+                serde_json::to_string(release_manifest)
                     .map_err(|error| ProductError::Configuration(error.to_string()))?,
             )
             .part("package", package_part);
@@ -1074,10 +1092,13 @@ fn verify_marketplace_deployment_once(
     client: &reqwest::blocking::Client,
     manifest_url: &str,
     package_url: &str,
+    release_manifest_url: &str,
     plugin_id: &str,
     version: &str,
     package_sha256: &str,
     package_size: usize,
+    source: &Value,
+    release_manifest: &Value,
 ) -> Result<(), String> {
     let manifest_response = client
         .get(manifest_url)
@@ -1118,7 +1139,32 @@ fn verify_marketplace_deployment_once(
         version,
         package_sha256,
         package_size,
+        source,
+        release_manifest,
     )?;
+
+    let release_response = client
+        .get(release_manifest_url)
+        .header("Accept", "application/json")
+        .send()
+        .map_err(|error| format!("failed to fetch release manifest: {error}"))?;
+    if !release_response.status().is_success() {
+        return Err(format!(
+            "release manifest returned HTTP {}",
+            release_response.status()
+        ));
+    }
+    let release_bytes = release_response
+        .bytes()
+        .map_err(|error| format!("failed to read release manifest: {error}"))?;
+    if release_bytes.len() > 256 * 1024 {
+        return Err("release manifest exceeds 256 KiB".into());
+    }
+    let expected_release_bytes =
+        serde_json::to_vec(release_manifest).map_err(|error| error.to_string())?;
+    if release_bytes.as_ref() != expected_release_bytes.as_slice() {
+        return Err("deployed release manifest differs from the source-bound manifest".into());
+    }
 
     let package_response = client
         .get(package_url)
@@ -1157,8 +1203,13 @@ fn validate_marketplace_site_manifest(
     version: &str,
     package_sha256: &str,
     package_size: usize,
+    source: &Value,
+    release_manifest: &Value,
 ) -> Result<(), String> {
-    let matches = manifest.get("schemaVersion").and_then(Value::as_u64) == Some(1)
+    let release_manifest_bytes =
+        serde_json::to_vec(release_manifest).map_err(|error| error.to_string())?;
+    let release_manifest_sha256 = format!("{:x}", sha2::Sha256::digest(&release_manifest_bytes));
+    let matches = manifest.get("schemaVersion").and_then(Value::as_u64) == Some(2)
         && manifest.get("pluginId").and_then(Value::as_str) == Some(plugin_id)
         && manifest.get("version").and_then(Value::as_str) == Some(version)
         && manifest.get("packagePath").and_then(Value::as_str) == Some("/mahayana/plugin.tar.gz")
@@ -1167,7 +1218,14 @@ fn validate_marketplace_site_manifest(
             .and_then(Value::as_str)
             .is_some_and(|digest| digest.eq_ignore_ascii_case(package_sha256))
         && manifest.get("packageSize").and_then(Value::as_u64) == Some(package_size as u64)
-        && manifest.get("runtime").and_then(Value::as_str) == Some("independent-worker-or-pages");
+        && manifest.get("runtime").and_then(Value::as_str) == Some("independent-worker-or-pages")
+        && manifest.get("source") == Some(source)
+        && manifest.get("releaseManifestPath").and_then(Value::as_str)
+            == Some("/mahayana/release-manifest.json")
+        && manifest
+            .get("releaseManifestSha256")
+            .and_then(Value::as_str)
+            .is_some_and(|digest| digest.eq_ignore_ascii_case(&release_manifest_sha256));
     matches
         .then_some(())
         .ok_or_else(|| "plugin manifest does not match release metadata".to_string())
@@ -1655,14 +1713,27 @@ mod tests {
     fn marketplace_site_manifest_must_match_release_metadata() {
         let digest = "a".repeat(64);
         let manifest = json!({
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "pluginId": "cloud-market-hello",
             "version": "1.0.0",
             "packagePath": "/mahayana/plugin.tar.gz",
             "packageSha256": digest,
             "packageSize": 4706,
             "runtime": "independent-worker-or-pages",
+            "source": {"provider":"github","repository":"bhrumom/fabushi"},
+            "releaseManifestPath": "/mahayana/release-manifest.json",
+            "releaseManifestSha256": format!(
+                "{:x}",
+                sha2::Sha256::digest(
+                    serde_json::to_vec(&json!({
+                        "protocol": "mahayana.multi-artifact-release.v1"
+                    }))
+                    .unwrap()
+                )
+            ),
         });
+        let source = json!({"provider":"github","repository":"bhrumom/fabushi"});
+        let release_manifest = json!({"protocol":"mahayana.multi-artifact-release.v1"});
         assert_eq!(
             validate_marketplace_site_manifest(
                 &manifest,
@@ -1670,6 +1741,8 @@ mod tests {
                 "1.0.0",
                 &"a".repeat(64),
                 4706,
+                &source,
+                &release_manifest,
             ),
             Ok(())
         );
@@ -1682,6 +1755,8 @@ mod tests {
                 "1.0.0",
                 &"a".repeat(64),
                 4706,
+                &source,
+                &release_manifest,
             )
             .is_err()
         );
