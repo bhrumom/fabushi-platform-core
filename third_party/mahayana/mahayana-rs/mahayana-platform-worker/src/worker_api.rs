@@ -2690,7 +2690,10 @@ async fn verified_marketplace_site_package(
     if manifest.package_path != "/mahayana/plugin.tar.gz" {
         mismatched_fields.push("packagePath");
     }
-    if !manifest.package_sha256.eq_ignore_ascii_case(expected_sha256) {
+    if !manifest
+        .package_sha256
+        .eq_ignore_ascii_case(expected_sha256)
+    {
         mismatched_fields.push("packageSha256");
     }
     if manifest.package_size != expected_size {
