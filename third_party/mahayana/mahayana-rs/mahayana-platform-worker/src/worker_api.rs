@@ -2677,22 +2677,45 @@ async fn verified_marketplace_site_package(
         fetch_marketplace_asset(deployment_url, "/mahayana/plugin.json", 64 * 1024).await?;
     let manifest: MarketplaceSiteManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|error| format!("invalid Cloudflare plugin manifest: {error}"))?;
-    if manifest.schema_version != 2
-        || manifest.plugin_id != plugin_id
-        || manifest.version != version
-        || manifest.package_path != "/mahayana/plugin.tar.gz"
-        || !manifest
-            .package_sha256
-            .eq_ignore_ascii_case(expected_sha256)
-        || manifest.package_size != expected_size
-        || manifest.runtime != "independent-worker-or-pages"
-        || manifest.source != *expected_source
-        || manifest.release_manifest_path != "/mahayana/release-manifest.json"
-        || !manifest
-            .release_manifest_sha256
-            .eq_ignore_ascii_case(expected_release_manifest_sha256)
+    let mut mismatched_fields = Vec::new();
+    if manifest.schema_version != 2 {
+        mismatched_fields.push("schemaVersion");
+    }
+    if manifest.plugin_id != plugin_id {
+        mismatched_fields.push("pluginId");
+    }
+    if manifest.version != version {
+        mismatched_fields.push("version");
+    }
+    if manifest.package_path != "/mahayana/plugin.tar.gz" {
+        mismatched_fields.push("packagePath");
+    }
+    if !manifest.package_sha256.eq_ignore_ascii_case(expected_sha256) {
+        mismatched_fields.push("packageSha256");
+    }
+    if manifest.package_size != expected_size {
+        mismatched_fields.push("packageSize");
+    }
+    if manifest.runtime != "independent-worker-or-pages" {
+        mismatched_fields.push("runtime");
+    }
+    if manifest.source != *expected_source {
+        mismatched_fields.push("source");
+    }
+    if manifest.release_manifest_path != "/mahayana/release-manifest.json" {
+        mismatched_fields.push("releaseManifestPath");
+    }
+    if !manifest
+        .release_manifest_sha256
+        .eq_ignore_ascii_case(expected_release_manifest_sha256)
     {
-        return Err("Cloudflare plugin manifest does not match the release request.".into());
+        mismatched_fields.push("releaseManifestSha256");
+    }
+    if !mismatched_fields.is_empty() {
+        return Err(format!(
+            "Cloudflare plugin manifest fields do not match the release request: {}.",
+            mismatched_fields.join(", ")
+        ));
     }
     let release_manifest_bytes = fetch_marketplace_asset(
         deployment_url,
