@@ -13,6 +13,7 @@ command = "worker-build --release --no-panic-recovery"
 
 [vars]
 ACCESS_TOKEN_KEY_ID = "REPLACE_WITH_ACTIVE_RSA_KEY_ID"
+AUTH_PUBLIC_BASE_URL = "https://api.ombhrum.com"
 
 [[d1_databases]]
 binding = "ACCOUNT_DB"

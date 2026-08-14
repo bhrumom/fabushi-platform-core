@@ -13,6 +13,22 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentActivityStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentActivity {
+    pub step_id: String,
+    pub kind: String,
+    pub title: String,
+    pub detail: Option<String>,
+    pub status: AgentActivityStatus,
+}
+
 #[derive(Debug, Clone)]
 pub struct StartThreadRequest {
     pub conversation_id: ConversationId,
@@ -74,6 +90,12 @@ pub enum AgentEvent {
     ToolProgress {
         message: String,
     },
+    /// Structured Codex turn item used by desktop/mobile activity timelines.
+    /// It intentionally carries a concise presentation-safe summary rather
+    /// than provider-specific protocol payloads.
+    Activity {
+        activity: AgentActivity,
+    },
     ApprovalRequested {
         approval_id: ApprovalId,
         title: String,
@@ -105,6 +127,61 @@ pub trait AgentBackend: Send + Sync {
     async fn interrupt(&self, operation_id: &OperationId) -> Result<(), AgentError>;
 
     async fn resolve_approval(&self, resolution: ApprovalResolution) -> Result<(), AgentError>;
+
+    /// Returns the live MCP server inventory owned by the agent runtime. The
+    /// values intentionally stay wire-shaped so product hosts can project
+    /// Codex auth/tool metadata without duplicating the upstream protocol.
+    async fn list_mcp_servers(&self) -> Result<Vec<Value>, AgentError> {
+        Err(AgentError::Unavailable(
+            "this agent backend does not expose MCP server status".into(),
+        ))
+    }
+
+    /// Returns the Codex Apps/Connector directory including accessibility and
+    /// install URLs when that capability is enabled for the current account.
+    async fn list_connector_apps(&self) -> Result<Vec<Value>, AgentError> {
+        Err(AgentError::Unavailable(
+            "this agent backend does not expose the connector directory".into(),
+        ))
+    }
+
+    /// Starts the native MCP OAuth flow and returns the authorization URL.
+    async fn mcp_oauth_login(&self, _server: &str) -> Result<String, AgentError> {
+        Err(AgentError::Unavailable(
+            "this agent backend does not support MCP OAuth".into(),
+        ))
+    }
+
+    /// Removes locally stored OAuth credentials for one MCP server.
+    async fn mcp_oauth_logout(&self, _server: &str) -> Result<bool, AgentError> {
+        Err(AgentError::Unavailable(
+            "this agent backend does not support MCP OAuth logout".into(),
+        ))
+    }
+
+    /// Reloads configured MCP servers after credentials or plugin state change.
+    async fn refresh_mcp_servers(&self) -> Result<(), AgentError> {
+        Err(AgentError::Unavailable(
+            "this agent backend does not support MCP refresh".into(),
+        ))
+    }
+
+    /// Calls one tool on a configured MCP server through a dedicated,
+    /// tool-isolated agent thread. This is used by first-party product flows
+    /// (for example an already user-approved email draft) that must execute a
+    /// concrete connector action without asking the language model to decide
+    /// whether to call the tool. Implementations must not expose shell,
+    /// filesystem, web, or unrelated MCP servers to this thread.
+    async fn call_mcp_tool(
+        &self,
+        _server: &str,
+        _tool: &str,
+        _arguments: Value,
+    ) -> Result<Value, AgentError> {
+        Err(AgentError::Unavailable(
+            "this agent backend does not support direct MCP tool calls".into(),
+        ))
+    }
 
     /// Opens a tool-isolated MCP App thread. Backends that support Codex must
     /// expose only this server's MCP tools and no general shell/filesystem

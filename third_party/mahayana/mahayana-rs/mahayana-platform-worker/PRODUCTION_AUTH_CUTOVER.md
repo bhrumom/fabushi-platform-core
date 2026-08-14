@@ -31,6 +31,18 @@ values with `wrangler secret put`:
 - `ACCESS_TOKEN_PUBLIC_KEY_PEM`;
 - `ACCESS_TOKEN_JWKS`.
 
+For each enabled OAuth provider, install both secrets. Providers without a
+complete pair are omitted from discovery instead of rendering a broken button:
+
+- `OAUTH_GOOGLE_CLIENT_ID`, `OAUTH_GOOGLE_CLIENT_SECRET`;
+- `OAUTH_MICROSOFT_CLIENT_ID`, `OAUTH_MICROSOFT_CLIENT_SECRET`;
+- `OAUTH_GITHUB_CLIENT_ID`, `OAUTH_GITHUB_CLIENT_SECRET`.
+
+Register the exact callback `${AUTH_PUBLIC_BASE_URL}/api/auth/oauth/callback`
+with each provider. The broker uses state validation, S256 PKCE, a ten-minute
+attempt lifetime, verified email, stable `(issuer, subject)` identities and a
+one-time session handoff to the Rust-owned desktop keychain.
+
 `ACCESS_TOKEN_KEY_ID` must equal the JWKS `kid`. There is deliberately no
 `LEGACY_HS256_SECRET` or legacy Worker service binding.
 
@@ -41,7 +53,8 @@ values with `wrangler secret put`:
    asynchronous export remains stuck, record a successful official D1 Time
    Travel bookmark immediately before the additive migration and verify that
    `wrangler d1 time-travel info fabushi-db` can read it back.
-2. Apply `account-migrations/0001_account_auth.sql` only to `ACCOUNT_DB`.
+2. Apply `account-migrations/0001_account_auth.sql`, followed by
+   `account-migrations/0002_oauth_identities.sql`, only to `ACCOUNT_DB`.
 3. Apply `migrations/0001_platform.sql` only to `PLATFORM_DB`.
 4. Verify every currently used production API path exists in the Rust router.
    The custom domain must not be moved while any shipped Flutter flow depends

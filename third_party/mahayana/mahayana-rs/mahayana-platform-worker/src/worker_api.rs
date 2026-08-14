@@ -4,6 +4,7 @@ use crate::auth::new_password_salt;
 use crate::auth::new_refresh_token;
 use crate::auth::verify_argon2id;
 use crate::auth::verify_pbkdf2_sha256;
+use base64::Engine;
 use jsonwebtoken::Algorithm;
 use jsonwebtoken::DecodingKey;
 use jsonwebtoken::EncodingKey;
@@ -23,6 +24,8 @@ use mahayana_platform_core::Quote;
 use mahayana_platform_core::UsageCaptureRequest;
 use mahayana_platform_core::UsageReservation;
 use mahayana_platform_core::UsageReservationRequest;
+use mahayana_platform_core::canonical_json_bytes;
+use mahayana_platform_core::canonical_json_sha256;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -41,6 +44,7 @@ use worker::FormEntry;
 use worker::Headers;
 use worker::Method;
 use worker::Request;
+use worker::RequestInit;
 use worker::Response;
 use worker::Result;
 use worker::RouteContext;
@@ -55,6 +59,7 @@ const ACCESS_TOKEN_SECONDS: i64 = 15 * 60;
 const REFRESH_TOKEN_SECONDS: i64 = 30 * 24 * 60 * 60;
 const LOGIN_FAILURE_WINDOW_SECONDS: i64 = 15 * 60;
 const MAX_ACCOUNT_LOGIN_FAILURES: i64 = 10;
+const OAUTH_ATTEMPT_SECONDS: i64 = 10 * 60;
 const USAGE_WINDOW_SECONDS: i64 = 30 * 24 * 60 * 60;
 const USAGE_RESERVATION_SECONDS: i64 = 10 * 60;
 const MAX_TOKENS_PER_RESERVATION: i64 = 2_000_000;
@@ -237,6 +242,60 @@ struct PasswordLoginRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OAuthStartRequest {
+    provider: String,
+    #[serde(default)]
+    device_id: Option<String>,
+    #[serde(default)]
+    platform: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OAuthAttemptRow {
+    attempt_id: String,
+    provider: String,
+    device_id: String,
+    code_verifier: String,
+    status: String,
+    session_json: Option<String>,
+    expires_at: i64,
+    delivered_at: Option<i64>,
+}
+
+struct OAuthProviderConfig {
+    id: &'static str,
+    display_name: &'static str,
+    issuer: &'static str,
+    authorization_endpoint: &'static str,
+    token_endpoint: &'static str,
+    userinfo_endpoint: &'static str,
+    scopes: &'static str,
+    client_id: String,
+    client_secret: String,
+}
+
+#[derive(Debug)]
+struct OAuthIdentityProfile {
+    issuer: String,
+    subject: String,
+    email: Option<String>,
+    email_verified: bool,
+    display_name: Option<String>,
+    avatar_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OAuthIdentityRow {
+    user_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MaxUserIdRow {
+    max_id: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RefreshAccessRequest {
     refresh_token: String,
     #[serde(default)]
@@ -260,6 +319,43 @@ struct LoginFailureCountRow {
     failure_count: i64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ListenerRegistrationInput {
+    platform: String,
+    subscriptions: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ListenerRegistrationRequest {
+    registrations: Vec<ListenerRegistrationInput>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ListenerDrainRequest {
+    #[serde(default)]
+    ack_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ListenerIngressRequest {
+    event_id: String,
+    user_id: String,
+    platform: String,
+    event: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListenerEventRow {
+    event_id: String,
+    platform: String,
+    event_json: String,
+    created_at: f64,
+}
+
 #[derive(Debug)]
 struct AuthenticatedAccount {
     user_id: String,
@@ -273,6 +369,10 @@ pub async fn main(request: Request, env: Env, _context: Context) -> Result<Respo
     Router::new()
         .get("/health", |_, _| Response::from_json(&json!({"ok": true})))
         .post_async("/api/auth/login", password_login)
+        .get_async("/api/auth/oauth/providers", oauth_providers)
+        .post_async("/api/auth/oauth/start", oauth_start)
+        .get_async("/api/auth/oauth/callback", oauth_callback)
+        .get_async("/api/auth/oauth/attempts/:attempt_id", oauth_poll)
         .post_async("/api/auth/refresh", refresh_access_token)
         .get_async("/api/auth/user-info", account_user_info)
         .post_async("/api/auth/logout", account_logout)
@@ -291,6 +391,9 @@ pub async fn main(request: Request, env: Env, _context: Context) -> Result<Respo
             "/v1/ai/usage/reservations/:reservation_id/release",
             ai_usage_release,
         )
+        .post_async("/v1/listeners/register", listener_register)
+        .post_async("/v1/listeners/drain", listener_drain)
+        .post_async("/v1/listeners/ingest", listener_ingest)
         .get_async("/v1/marketplace/plugins", marketplace_plugins)
         .post_async("/v1/marketplace/releases", marketplace_release_publish)
         .get_async(
@@ -320,6 +423,250 @@ pub async fn main(request: Request, env: Env, _context: Context) -> Result<Respo
         .post_async("/v1/purchases/restore", purchases_restore)
         .run(request, env)
         .await
+}
+
+fn is_listener_platform(value: &str) -> bool {
+    matches!(
+        value,
+        "slack" | "github" | "git" | "teams" | "linear" | "sentry" | "pagerduty"
+    )
+}
+
+fn valid_relay_identifier(value: &str, max_len: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.'))
+}
+
+async fn listener_register(mut request: Request, context: RouteContext<()>) -> Result<Response> {
+    let account = match authenticated_account(&request, &context.env) {
+        Ok(account) => account,
+        Err(_) => {
+            return error_response(
+                401,
+                "unauthorized",
+                "A valid Mahayana account token is required to register listeners.",
+            );
+        }
+    };
+    let input: ListenerRegistrationRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_listener_registration",
+                "Listener registrations must be valid JSON.",
+            );
+        }
+    };
+    if input.registrations.len() > 32 {
+        return error_response(
+            400,
+            "too_many_listener_registrations",
+            "At most 32 listener platform registrations are allowed.",
+        );
+    }
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    let mut statements = vec![worker::query!(
+        &database,
+        "DELETE FROM listener_registrations WHERE user_id = ?1",
+        &account.user_id
+    )?];
+    let mut seen = std::collections::BTreeSet::new();
+    for registration in input.registrations {
+        if !is_listener_platform(&registration.platform)
+            || !seen.insert(registration.platform.clone())
+        {
+            return error_response(
+                400,
+                "invalid_listener_platform",
+                "Listener platforms must be supported and unique.",
+            );
+        }
+        let subscriptions_json = serde_json::to_string(&registration.subscriptions)
+            .map_err(|error| worker::Error::RustError(error.to_string()))?;
+        if subscriptions_json.len() > 64 * 1024 {
+            return error_response(
+                400,
+                "listener_registration_too_large",
+                "Listener subscriptions must be at most 64 KiB per platform.",
+            );
+        }
+        statements.push(worker::query!(
+            &database,
+            "INSERT INTO listener_registrations
+             (user_id, platform, subscriptions_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            &account.user_id,
+            &registration.platform,
+            &subscriptions_json,
+            now
+        )?);
+    }
+    database.batch(statements).await?;
+    Ok(Response::from_json(&json!({"registered": seen.len()}))?.with_headers(auth_headers()))
+}
+
+async fn listener_drain(mut request: Request, context: RouteContext<()>) -> Result<Response> {
+    let account = match authenticated_account(&request, &context.env) {
+        Ok(account) => account,
+        Err(_) => {
+            return error_response(
+                401,
+                "unauthorized",
+                "A valid Mahayana account token is required to drain listener events.",
+            );
+        }
+    };
+    let input: ListenerDrainRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_listener_drain",
+                "Listener drain requests must be valid JSON.",
+            );
+        }
+    };
+    if input.ack_ids.len() > 100
+        || input
+            .ack_ids
+            .iter()
+            .any(|id| !valid_relay_identifier(id, 256))
+    {
+        return error_response(
+            400,
+            "invalid_listener_ack",
+            "At most 100 normalized event IDs may be acknowledged at once.",
+        );
+    }
+    let database = context.env.d1(DATABASE_BINDING)?;
+    if !input.ack_ids.is_empty() {
+        let now = now_seconds();
+        let mut statements = Vec::with_capacity(input.ack_ids.len());
+        for event_id in &input.ack_ids {
+            statements.push(worker::query!(
+                &database,
+                "UPDATE listener_events
+                 SET acknowledged_at = COALESCE(acknowledged_at, ?1)
+                 WHERE event_id = ?2 AND user_id = ?3",
+                now,
+                event_id,
+                &account.user_id
+            )?);
+        }
+        database.batch(statements).await?;
+    }
+    let rows = worker::query!(
+        &database,
+        "SELECT event_id, platform, event_json, created_at
+         FROM listener_events
+         WHERE user_id = ?1 AND acknowledged_at IS NULL
+         ORDER BY created_at ASC, event_id ASC
+         LIMIT 100",
+        &account.user_id
+    )?
+    .all()
+    .await?
+    .results::<ListenerEventRow>()?;
+    let events = rows
+        .into_iter()
+        .filter_map(|row| {
+            let event = serde_json::from_str::<Value>(&row.event_json).ok()?;
+            Some(json!({
+                "id": row.event_id,
+                "platform": row.platform,
+                "createdAt": exact_nonnegative_i64(row.created_at).unwrap_or_default(),
+                "event": event,
+            }))
+        })
+        .collect::<Vec<_>>();
+    Ok(Response::from_json(&json!({"events": events}))?.with_headers(auth_headers()))
+}
+
+async fn listener_ingest(mut request: Request, context: RouteContext<()>) -> Result<Response> {
+    let authorization = request.headers().get("Authorization")?.unwrap_or_default();
+    let supplied = authorization.strip_prefix("Bearer ").unwrap_or_default();
+    let expected = match context.env.secret("LISTENER_RELAY_INGEST_TOKEN") {
+        Ok(secret) => secret.to_string(),
+        Err(_) => {
+            return error_response(
+                503,
+                "listener_ingest_not_configured",
+                "Listener relay ingress is not configured.",
+            );
+        }
+    };
+    if supplied.is_empty() || !constant_time_eq(supplied.as_bytes(), expected.as_bytes()) {
+        return error_response(401, "unauthorized", "Invalid listener relay ingress token.");
+    }
+    let input: ListenerIngressRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_listener_event",
+                "Listener ingress requests must be valid JSON.",
+            );
+        }
+    };
+    if !valid_relay_identifier(&input.event_id, 256)
+        || !valid_relay_identifier(&input.user_id, 256)
+        || !is_listener_platform(&input.platform)
+    {
+        return error_response(
+            400,
+            "invalid_listener_event",
+            "Listener event identifiers or platform are invalid.",
+        );
+    }
+    let event_json = serde_json::to_string(&input.event)
+        .map_err(|error| worker::Error::RustError(error.to_string()))?;
+    if event_json.len() > 128 * 1024 {
+        return error_response(
+            413,
+            "listener_event_too_large",
+            "Listener events must be at most 128 KiB.",
+        );
+    }
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let registration = worker::query!(
+        &database,
+        "SELECT platform FROM listener_registrations
+         WHERE user_id = ?1 AND platform = ?2",
+        &input.user_id,
+        &input.platform
+    )?
+    .first::<Value>(None)
+    .await?;
+    if registration.is_none() {
+        return error_response(
+            409,
+            "listener_not_registered",
+            "The target account has not registered this listener platform.",
+        );
+    }
+    let result = worker::query!(
+        &database,
+        "INSERT INTO listener_events
+         (event_id, user_id, platform, event_json, created_at, acknowledged_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, NULL)
+         ON CONFLICT(event_id) DO NOTHING",
+        &input.event_id,
+        &input.user_id,
+        &input.platform,
+        &event_json,
+        now_seconds()
+    )?
+    .run()
+    .await?;
+    Ok(Response::from_json(&json!({
+        "accepted": d1_changes(Some(&result)) > 0,
+        "eventId": input.event_id,
+    }))?)
 }
 
 async fn password_login(mut request: Request, context: RouteContext<()>) -> Result<Response> {
@@ -461,6 +808,589 @@ async fn password_login(mut request: Request, context: RouteContext<()>) -> Resu
         &session_id,
         &device_id,
     )
+}
+
+fn oauth_provider(env: &Env, provider: &str) -> Option<OAuthProviderConfig> {
+    let (
+        id,
+        display_name,
+        issuer,
+        authorization_endpoint,
+        token_endpoint,
+        userinfo_endpoint,
+        scopes,
+    ) = match provider {
+        "google" => (
+            "google",
+            "Google",
+            "https://accounts.google.com",
+            "https://accounts.google.com/o/oauth2/v2/auth",
+            "https://oauth2.googleapis.com/token",
+            "https://openidconnect.googleapis.com/v1/userinfo",
+            "openid email profile",
+        ),
+        "microsoft" => (
+            "microsoft",
+            "Microsoft",
+            "https://login.microsoftonline.com/common/v2.0",
+            "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+            "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+            "https://graph.microsoft.com/oidc/userinfo",
+            "openid email profile",
+        ),
+        "github" => (
+            "github",
+            "GitHub",
+            "https://github.com",
+            "https://github.com/login/oauth/authorize",
+            "https://github.com/login/oauth/access_token",
+            "https://api.github.com/user",
+            "read:user user:email",
+        ),
+        _ => return None,
+    };
+    let prefix = provider.to_ascii_uppercase();
+    let client_id = env
+        .secret(&format!("OAUTH_{prefix}_CLIENT_ID"))
+        .ok()?
+        .to_string();
+    let client_secret = env
+        .secret(&format!("OAUTH_{prefix}_CLIENT_SECRET"))
+        .ok()?
+        .to_string();
+    Some(OAuthProviderConfig {
+        id,
+        display_name,
+        issuer,
+        authorization_endpoint,
+        token_endpoint,
+        userinfo_endpoint,
+        scopes,
+        client_id,
+        client_secret,
+    })
+}
+
+async fn oauth_providers(_request: Request, context: RouteContext<()>) -> Result<Response> {
+    let providers = ["google", "microsoft", "github"]
+        .into_iter()
+        .filter_map(|id| oauth_provider(&context.env, id))
+        .map(|provider| {
+            json!({
+                "id": provider.id,
+                "displayName": provider.display_name,
+                "enabled": true,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(Response::from_json(&json!({"providers": providers}))?.with_headers(auth_headers()))
+}
+
+async fn oauth_start(mut request: Request, context: RouteContext<()>) -> Result<Response> {
+    let start: OAuthStartRequest = match request.json().await {
+        Ok(start) => start,
+        Err(_) => return error_response(400, "invalid_oauth_request", "provider is required"),
+    };
+    let Some(provider) = oauth_provider(&context.env, start.provider.trim()) else {
+        return error_response(400, "oauth_provider_unavailable", "该登录方式尚未配置");
+    };
+    if let Some(platform) = start.platform.as_deref()
+        && !matches!(
+            platform,
+            "desktop" | "macos" | "windows" | "linux" | "web" | "mobile"
+        )
+    {
+        return error_response(400, "invalid_oauth_platform", "unsupported OAuth platform");
+    }
+    let device_id = normalize_device_id(start.device_id.as_deref())?;
+    let attempt_id = Uuid::new_v4().to_string();
+    let state = format!("mos_{}", Uuid::new_v4().simple());
+    let state_hash = format!("{:x}", Sha256::digest(state.as_bytes()));
+    let code_verifier = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(Sha256::digest(code_verifier.as_bytes()));
+    let now = now_seconds();
+    let expires_at = now + OAUTH_ATTEMPT_SECONDS;
+    let callback = format!(
+        "{}/api/auth/oauth/callback",
+        context
+            .env
+            .var("AUTH_PUBLIC_BASE_URL")?
+            .to_string()
+            .trim_end_matches('/')
+    );
+    let mut authorization_url = Url::parse(provider.authorization_endpoint)
+        .map_err(|error| worker::Error::RustError(error.to_string()))?;
+    authorization_url
+        .query_pairs_mut()
+        .append_pair("client_id", &provider.client_id)
+        .append_pair("redirect_uri", &callback)
+        .append_pair("response_type", "code")
+        .append_pair("scope", provider.scopes)
+        .append_pair("state", &state)
+        .append_pair("code_challenge", &code_challenge)
+        .append_pair("code_challenge_method", "S256");
+    if provider.id != "github" {
+        authorization_url
+            .query_pairs_mut()
+            .append_pair("prompt", "select_account");
+    }
+    let database = context.env.d1(ACCOUNT_DATABASE_BINDING)?;
+    worker::query!(
+        &database,
+        "INSERT INTO account_oauth_attempts
+         (attempt_id, state_hash, code_verifier, provider, device_id, status, created_at, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7)",
+        &attempt_id,
+        &state_hash,
+        &code_verifier,
+        provider.id,
+        &device_id,
+        now,
+        expires_at
+    )?
+    .run()
+    .await?;
+    Ok(Response::from_json(&json!({
+        "attemptId": attempt_id,
+        "provider": provider.id,
+        "authorizationUrl": authorization_url.as_str(),
+        "expiresAt": expires_at,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+async fn oauth_poll(_request: Request, context: RouteContext<()>) -> Result<Response> {
+    let attempt_id = route_identifier(&context, "attempt_id")?;
+    let database = context.env.d1(ACCOUNT_DATABASE_BINDING)?;
+    let row = worker::query!(
+        &database,
+        "SELECT attempt_id, provider, device_id, code_verifier, status, session_json, expires_at, delivered_at
+         FROM account_oauth_attempts WHERE attempt_id = ?1 LIMIT 1",
+        attempt_id
+    )?
+    .first::<OAuthAttemptRow>(None)
+    .await?;
+    let Some(row) = row else {
+        return error_response(404, "oauth_attempt_missing", "登录链接不存在或已失效");
+    };
+    let now = now_seconds();
+    if row.expires_at <= now && row.status == "pending" {
+        worker::query!(
+            &database,
+            "UPDATE account_oauth_attempts SET status = 'expired' WHERE attempt_id = ?1",
+            &row.attempt_id
+        )?
+        .run()
+        .await?;
+        return Response::from_json(&json!({"status": "expired", "provider": row.provider}));
+    }
+    if row.status != "completed" {
+        return Response::from_json(&json!({"status": row.status, "provider": row.provider}));
+    }
+    if row.delivered_at.is_some() {
+        return error_response(410, "oauth_session_delivered", "登录结果已经领取");
+    }
+    let Some(session_json) = row.session_json else {
+        return error_response(410, "oauth_session_missing", "登录结果已经失效");
+    };
+    let session: Value = serde_json::from_str(&session_json)
+        .map_err(|error| worker::Error::RustError(error.to_string()))?;
+    worker::query!(
+        &database,
+        "UPDATE account_oauth_attempts SET session_json = NULL, delivered_at = ?1
+         WHERE attempt_id = ?2 AND delivered_at IS NULL",
+        now,
+        &row.attempt_id
+    )?
+    .run()
+    .await?;
+    Response::from_json(&json!({
+        "status": "completed",
+        "provider": row.provider,
+        "session": session,
+    }))
+}
+
+async fn oauth_callback(request: Request, context: RouteContext<()>) -> Result<Response> {
+    let url = request.url()?;
+    let query = url
+        .query_pairs()
+        .collect::<std::collections::HashMap<_, _>>();
+    let Some(state) = query.get("state").map(|value| value.as_ref()) else {
+        return oauth_result_page(false, "登录状态缺失，请返回应用重试");
+    };
+    let state_hash = format!("{:x}", Sha256::digest(state.as_bytes()));
+    let database = context.env.d1(ACCOUNT_DATABASE_BINDING)?;
+    let attempt = worker::query!(
+        &database,
+        "SELECT attempt_id, provider, device_id, code_verifier, status, session_json, expires_at, delivered_at
+         FROM account_oauth_attempts WHERE state_hash = ?1 LIMIT 1",
+        &state_hash
+    )?
+    .first::<OAuthAttemptRow>(None)
+    .await?;
+    let Some(attempt) = attempt else {
+        return oauth_result_page(false, "登录状态无效，请返回应用重试");
+    };
+    if attempt.status != "pending" || attempt.expires_at <= now_seconds() {
+        return oauth_result_page(false, "登录链接已失效，请返回应用重试");
+    }
+    if query.contains_key("error") {
+        worker::query!(
+            &database,
+            "UPDATE account_oauth_attempts SET status = 'cancelled' WHERE attempt_id = ?1",
+            &attempt.attempt_id
+        )?
+        .run()
+        .await?;
+        return oauth_result_page(false, "登录已取消，可以关闭此窗口");
+    }
+    let Some(code) = query.get("code").map(|value| value.as_ref()) else {
+        return oauth_result_page(false, "授权码缺失，请返回应用重试");
+    };
+    let Some(provider) = oauth_provider(&context.env, &attempt.provider) else {
+        return oauth_result_page(false, "该登录方式当前不可用");
+    };
+    let callback = format!(
+        "{}/api/auth/oauth/callback",
+        context
+            .env
+            .var("AUTH_PUBLIC_BASE_URL")?
+            .to_string()
+            .trim_end_matches('/')
+    );
+    let access_token =
+        oauth_exchange_code(&provider, code, &callback, &attempt.code_verifier).await?;
+    let profile = oauth_fetch_profile(&provider, &access_token).await?;
+    let user = oauth_resolve_user(&database, &provider, &profile).await?;
+    let session = create_account_session_value(
+        &database,
+        &context.env,
+        &user,
+        &attempt.device_id,
+        &format!("oauth_{}", provider.id),
+    )
+    .await?;
+    let now = now_seconds();
+    worker::query!(
+        &database,
+        "UPDATE account_oauth_attempts
+         SET status = 'completed', session_json = ?1, completed_at = ?2
+         WHERE attempt_id = ?3 AND status = 'pending'",
+        session.to_string(),
+        now,
+        &attempt.attempt_id
+    )?
+    .run()
+    .await?;
+    oauth_result_page(true, "登录成功，可以关闭此窗口并返回大乘")
+}
+
+async fn oauth_exchange_code(
+    provider: &OAuthProviderConfig,
+    code: &str,
+    callback: &str,
+    code_verifier: &str,
+) -> Result<String> {
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("client_id", &provider.client_id)
+        .append_pair("client_secret", &provider.client_secret)
+        .append_pair("code", code)
+        .append_pair("redirect_uri", callback)
+        .append_pair("grant_type", "authorization_code")
+        .append_pair("code_verifier", code_verifier)
+        .finish();
+    let headers = Headers::new();
+    headers.set("Content-Type", "application/x-www-form-urlencoded")?;
+    headers.set("Accept", "application/json")?;
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post)
+        .with_headers(headers)
+        .with_body(Some(wasm_bindgen::JsValue::from_str(&body)));
+    let outbound = Request::new_with_init(provider.token_endpoint, &init)?;
+    let mut response = Fetch::Request(outbound).send().await?;
+    if !(200..300).contains(&response.status_code()) {
+        return Err(worker::Error::RustError(
+            "OAuth token exchange failed".into(),
+        ));
+    }
+    let token: Value = response.json().await?;
+    token
+        .get("access_token")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| worker::Error::RustError("OAuth access token missing".into()))
+}
+
+async fn oauth_fetch_json(url: &str, access_token: &str) -> Result<Value> {
+    let mut request = Request::new(url, Method::Get)?;
+    request
+        .headers_mut()?
+        .set("Authorization", &format!("Bearer {access_token}"))?;
+    request.headers_mut()?.set("Accept", "application/json")?;
+    request
+        .headers_mut()?
+        .set("User-Agent", "Fabushi-Auth-Broker")?;
+    let mut response = Fetch::Request(request).send().await?;
+    if !(200..300).contains(&response.status_code()) {
+        return Err(worker::Error::RustError(
+            "OAuth profile request failed".into(),
+        ));
+    }
+    response.json().await
+}
+
+async fn oauth_fetch_profile(
+    provider: &OAuthProviderConfig,
+    access_token: &str,
+) -> Result<OAuthIdentityProfile> {
+    let profile = oauth_fetch_json(provider.userinfo_endpoint, access_token).await?;
+    let subject = profile
+        .get("sub")
+        .or_else(|| profile.get("id"))
+        .and_then(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| value.as_i64().map(|id| id.to_string()))
+        })
+        .ok_or_else(|| worker::Error::RustError("OAuth subject missing".into()))?;
+    let mut email = profile
+        .get("email")
+        .or_else(|| profile.get("mail"))
+        .or_else(|| profile.get("userPrincipalName"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let mut email_verified = profile
+        .get("email_verified")
+        .and_then(Value::as_bool)
+        .unwrap_or(provider.id == "microsoft");
+    if provider.id == "github" {
+        let emails = oauth_fetch_json("https://api.github.com/user/emails", access_token).await?;
+        if let Some(primary) = emails.as_array().and_then(|items| {
+            items.iter().find(|item| {
+                item.get("primary").and_then(Value::as_bool) == Some(true)
+                    && item.get("verified").and_then(Value::as_bool) == Some(true)
+            })
+        }) {
+            email = primary
+                .get("email")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            email_verified = email.is_some();
+        }
+    }
+    Ok(OAuthIdentityProfile {
+        issuer: provider.issuer.to_string(),
+        subject,
+        email,
+        email_verified,
+        display_name: profile
+            .get("name")
+            .or_else(|| profile.get("login"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        avatar_url: profile
+            .get("picture")
+            .or_else(|| profile.get("avatar_url"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+async fn oauth_resolve_user(
+    database: &worker::D1Database,
+    provider: &OAuthProviderConfig,
+    profile: &OAuthIdentityProfile,
+) -> Result<AccountUserRow> {
+    let identity = worker::query!(
+        database,
+        "SELECT user_id FROM account_identities WHERE issuer = ?1 AND subject = ?2 LIMIT 1",
+        &profile.issuer,
+        &profile.subject
+    )?
+    .first::<OAuthIdentityRow>(None)
+    .await?;
+    let now = now_seconds();
+    let user_id = if let Some(identity) = identity {
+        worker::query!(
+            database,
+            "UPDATE account_identities SET email = ?1, email_verified = ?2,
+             display_name = ?3, avatar_url = ?4, last_login_at = ?5
+             WHERE issuer = ?6 AND subject = ?7",
+            &profile.email,
+            i64::from(profile.email_verified),
+            &profile.display_name,
+            &profile.avatar_url,
+            now,
+            &profile.issuer,
+            &profile.subject
+        )?
+        .run()
+        .await?;
+        identity.user_id
+    } else {
+        if !profile.email_verified {
+            return Err(worker::Error::RustError(
+                "OAuth provider did not return a verified email".into(),
+            ));
+        }
+        let email = profile
+            .email
+            .as_deref()
+            .ok_or_else(|| worker::Error::RustError("OAuth email missing".into()))?;
+        let existing = lookup_login_user(database, email).await?;
+        let user_id = if let Some(user) = existing {
+            user.id.to_string()
+        } else {
+            let max = worker::query!(database, "SELECT MAX(id) AS max_id FROM users")
+                .first::<MaxUserIdRow>(None)
+                .await?
+                .and_then(|row| row.max_id)
+                .unwrap_or(10_000);
+            let id = max + 1;
+            let subject_slug = profile
+                .subject
+                .chars()
+                .filter(|character| character.is_ascii_alphanumeric())
+                .take(12)
+                .collect::<String>();
+            let username = format!(
+                "{}_{}_{}",
+                provider.id,
+                subject_slug,
+                &Uuid::new_v4().simple().to_string()[..6]
+            );
+            let created_at = Date::now().to_string();
+            worker::query!(
+                database,
+                "INSERT INTO users
+                 (id, user_no, username, email, nickname, avatar, password_hash, salt,
+                  iterations, algo, email_verified, membership_type, created_at)
+                 VALUES (?1, ?1, ?2, ?3, ?4, ?5, '', '', 0, '', 1, 'trial', ?6)",
+                id,
+                &username,
+                email,
+                &profile.display_name,
+                &profile.avatar_url,
+                &created_at
+            )?
+            .run()
+            .await?;
+            worker::query!(
+                database,
+                "INSERT OR IGNORE INTO email_username_mapping (email, username, user_id)
+                 VALUES (?1, ?2, ?3)",
+                email,
+                &username,
+                id
+            )?
+            .run()
+            .await?;
+            id.to_string()
+        };
+        worker::query!(
+            database,
+            "INSERT INTO account_identities
+             (identity_id, user_id, provider, issuer, subject, email, email_verified,
+              display_name, avatar_url, created_at, last_login_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8, ?9, ?9)",
+            Uuid::new_v4().to_string(),
+            &user_id,
+            provider.id,
+            &profile.issuer,
+            &profile.subject,
+            &profile.email,
+            &profile.display_name,
+            &profile.avatar_url,
+            now
+        )?
+        .run()
+        .await?;
+        user_id
+    };
+    lookup_account_user_by_id(database, &user_id)
+        .await?
+        .ok_or_else(|| worker::Error::RustError("OAuth account missing".into()))
+}
+
+async fn create_account_session_value(
+    database: &worker::D1Database,
+    env: &Env,
+    user: &AccountUserRow,
+    device_id: &str,
+    event_type: &str,
+) -> Result<Value> {
+    let now = now_seconds();
+    let session_id = Uuid::new_v4().to_string();
+    let family_id = Uuid::new_v4().to_string();
+    let refresh_token = new_refresh_token();
+    let refresh_hash = hash_refresh_token(&refresh_token);
+    let refresh_expires_at = now + REFRESH_TOKEN_SECONDS;
+    let (access_token, access_expires_at, access_jti) =
+        issue_account_access_token(env, &user.id.to_string(), device_id, &session_id, now)?;
+    database
+        .batch(vec![
+            worker::query!(
+                database,
+                "INSERT INTO account_sessions
+                 (session_id, refresh_family_id, user_id, device_id, current_refresh_token_hash,
+                  created_at, last_used_at, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)",
+                &session_id,
+                &family_id,
+                user.id.to_string(),
+                device_id,
+                &refresh_hash,
+                now,
+                refresh_expires_at
+            )?,
+            worker::query!(
+                database,
+                "INSERT INTO account_refresh_tokens
+                 (token_hash, session_id, generation, state, issued_at, expires_at)
+                 VALUES (?1, ?2, 0, 'active', ?3, ?4)",
+                &refresh_hash,
+                &session_id,
+                now,
+                refresh_expires_at
+            )?,
+            worker::query!(
+                database,
+                "INSERT INTO account_auth_events
+                 (event_id, user_id, session_id, event_type, occurred_at, details_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                Uuid::new_v4().to_string(),
+                user.id.to_string(),
+                &session_id,
+                event_type,
+                now,
+                json!({"accessJti": access_jti}).to_string()
+            )?,
+        ])
+        .await?;
+    Ok(json!({
+        "accessToken": access_token,
+        "refreshToken": refresh_token,
+        "tokenType": "Bearer",
+        "expiresIn": ACCESS_TOKEN_SECONDS,
+        "accessTokenExpiresAt": access_expires_at,
+        "refreshTokenExpiresAt": refresh_expires_at,
+        "sessionId": session_id,
+        "deviceId": device_id,
+        "username": user.username,
+        "userId": user.id,
+        "userNo": user.user_no.unwrap_or(user.id),
+        "user": serialize_account_user(user),
+    }))
+}
+
+fn oauth_result_page(success: bool, message: &str) -> Result<Response> {
+    let color = if success { "#63dfb0" } else { "#ff8f99" };
+    Response::from_html(format!(
+        "<!doctype html><meta charset=utf-8><title>大乘登录</title><style>body{{margin:0;display:grid;place-items:center;min-height:100vh;background:#11141b;color:#f7f8fb;font:15px system-ui}}main{{width:min(360px,80vw);padding:36px;border:1px solid #303643;border-radius:20px;background:#1b1f28;text-align:center}}b{{display:grid;place-items:center;width:52px;height:52px;margin:auto;border-radius:15px;background:#6559e8;font-size:24px}}h1{{font-size:20px}}p{{color:{color};line-height:1.6}}</style><main><b>乘</b><h1>大乘账号</h1><p>{message}</p></main><script>setTimeout(()=>window.close(),1800)</script>"
+    ))
 }
 
 async fn refresh_access_token(mut request: Request, context: RouteContext<()>) -> Result<Response> {
@@ -1142,9 +2072,12 @@ async fn marketplace_release_publish(
     }
     let source_json = serde_json::to_string(&source)
         .map_err(|error| worker::Error::RustError(error.to_string()))?;
-    let release_manifest_json = serde_json::to_string(&release_manifest)
+    let release_manifest_bytes = canonical_json_bytes(&release_manifest)
         .map_err(|error| worker::Error::RustError(error.to_string()))?;
-    let release_manifest_sha256 = format!("{:x}", Sha256::digest(release_manifest_json.as_bytes()));
+    let release_manifest_json = String::from_utf8(release_manifest_bytes)
+        .map_err(|error| worker::Error::RustError(error.to_string()))?;
+    let release_manifest_sha256 = canonical_json_sha256(&release_manifest)
+        .map_err(|error| worker::Error::RustError(error.to_string()))?;
     let package = match form.get("package") {
         Some(FormEntry::File(file)) => file.bytes().await?,
         _ => {

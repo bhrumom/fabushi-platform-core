@@ -303,6 +303,15 @@ impl MahayanaWebRuntime {
                     progress,
                 }
             }
+            RuntimeCommand::McpServers
+            | RuntimeCommand::McpApps
+            | RuntimeCommand::McpOauthLogin { .. }
+            | RuntimeCommand::McpOauthLogout { .. }
+            | RuntimeCommand::McpRefresh => {
+                return Err(JsValue::from_str(
+                    "native MCP account management is unavailable in the WebAssembly runtime",
+                ));
+            }
             RuntimeCommand::ConversationHistory {
                 conversation_id,
                 limit,

@@ -6,6 +6,7 @@ use crossbeam_channel::Sender;
 use fabushi_official_miniapps::OfficialMiniAppEngine;
 use fabushi_official_miniapps::app_definition;
 use fabushi_official_miniapps::home_html;
+use mahayana_agent::AgentActivityStatus;
 use mahayana_agent::AgentBackend;
 use mahayana_agent::AgentError;
 use mahayana_agent::AgentEvent;
@@ -33,6 +34,7 @@ use mahayana_core::MessageRole;
 use mahayana_core::OperationId;
 use mahayana_core::PluginCommandDescriptor;
 use mahayana_core::RUNTIME_ABI_VERSION;
+use mahayana_core::RuntimeActivityStatus;
 use mahayana_core::RuntimeCommand;
 use mahayana_core::RuntimeConfig;
 use mahayana_core::RuntimeEvent;
@@ -53,6 +55,7 @@ use tokio::sync::Mutex as AsyncMutex;
 pub struct RuntimeBuilder {
     config: RuntimeConfig,
     providers: ProviderRegistry,
+    agent_backend: Option<Arc<dyn AgentBackend>>,
 }
 
 impl RuntimeBuilder {
@@ -60,6 +63,7 @@ impl RuntimeBuilder {
         Self {
             config,
             providers: ProviderRegistry::default(),
+            agent_backend: None,
         }
     }
 
@@ -71,12 +75,20 @@ impl RuntimeBuilder {
         Ok(self)
     }
 
-    pub fn with_agent_backend(self, backend: Arc<dyn AgentBackend>) -> Result<Self, RuntimeError> {
-        self.with_provider(Arc::new(AgentConversationProvider::new(backend)))
+    pub fn with_agent_backend(
+        mut self,
+        backend: Arc<dyn AgentBackend>,
+    ) -> Result<Self, RuntimeError> {
+        self.providers
+            .register(Arc::new(AgentConversationProvider::new(Arc::clone(
+                &backend,
+            ))))?;
+        self.agent_backend = Some(backend);
+        Ok(self)
     }
 
     pub fn build(self) -> Result<MahayanaRuntime, RuntimeError> {
-        MahayanaRuntime::new(self.config, self.providers)
+        MahayanaRuntime::new(self.config, self.providers, self.agent_backend)
     }
 
     /// Starts an Agent backend on the same Tokio runtime that the long-lived
@@ -110,17 +122,21 @@ impl RuntimeBuilder {
         let backend = async_runtime
             .block_on(create_backend())
             .map_err(|error| RuntimeError::AgentInitialization(error.to_string()))?;
-        let builder = self.with_provider(Arc::new(AgentConversationProvider::new(Arc::clone(
-            &backend,
-        ))))?;
+        let builder = self.with_agent_backend(Arc::clone(&backend))?;
         let builder = configure(builder, backend)?;
-        MahayanaRuntime::new_with_async_runtime(builder.config, builder.providers, async_runtime)
+        MahayanaRuntime::new_with_async_runtime(
+            builder.config,
+            builder.providers,
+            builder.agent_backend,
+            async_runtime,
+        )
     }
 }
 
 pub struct MahayanaRuntime {
     config: RuntimeConfig,
     providers: Arc<ProviderRegistry>,
+    agent_backend: Option<Arc<dyn AgentBackend>>,
     async_runtime: tokio::runtime::Runtime,
     event_tx: Sender<RuntimeEvent>,
     event_rx: Receiver<RuntimeEvent>,
@@ -131,14 +147,19 @@ pub struct MahayanaRuntime {
 }
 
 impl MahayanaRuntime {
-    fn new(config: RuntimeConfig, providers: ProviderRegistry) -> Result<Self, RuntimeError> {
+    fn new(
+        config: RuntimeConfig,
+        providers: ProviderRegistry,
+        agent_backend: Option<Arc<dyn AgentBackend>>,
+    ) -> Result<Self, RuntimeError> {
         let async_runtime = create_async_runtime()?;
-        Self::new_with_async_runtime(config, providers, async_runtime)
+        Self::new_with_async_runtime(config, providers, agent_backend, async_runtime)
     }
 
     fn new_with_async_runtime(
         config: RuntimeConfig,
         providers: ProviderRegistry,
+        agent_backend: Option<Arc<dyn AgentBackend>>,
         async_runtime: tokio::runtime::Runtime,
     ) -> Result<Self, RuntimeError> {
         if config.remote_agent_enabled {
@@ -159,6 +180,7 @@ impl MahayanaRuntime {
         let runtime = Self {
             config,
             providers: Arc::new(providers),
+            agent_backend,
             async_runtime,
             event_tx,
             event_rx,
@@ -318,6 +340,84 @@ impl MahayanaRuntime {
                     tool,
                     result: outcome.result,
                     progress,
+                })
+            }
+            RuntimeCommand::McpServers => {
+                let backend = self.agent_backend.as_ref().ok_or_else(|| {
+                    RuntimeError::AgentBackend("no agent backend is available".into())
+                })?;
+                let data = self
+                    .async_runtime
+                    .block_on(backend.list_mcp_servers())
+                    .map_err(|error| RuntimeError::AgentBackend(error.to_string()))?;
+                Ok(RuntimeResponse::McpServers { data })
+            }
+            RuntimeCommand::McpApps => {
+                let backend = self.agent_backend.as_ref().ok_or_else(|| {
+                    RuntimeError::AgentBackend("no agent backend is available".into())
+                })?;
+                let data = self
+                    .async_runtime
+                    .block_on(backend.list_connector_apps())
+                    .map_err(|error| RuntimeError::AgentBackend(error.to_string()))?;
+                Ok(RuntimeResponse::McpApps { data })
+            }
+            RuntimeCommand::McpOauthLogin { server } => {
+                let backend = self.agent_backend.as_ref().ok_or_else(|| {
+                    RuntimeError::AgentBackend("no agent backend is available".into())
+                })?;
+                let authorization_url = self
+                    .async_runtime
+                    .block_on(backend.mcp_oauth_login(&server))
+                    .map_err(|error| RuntimeError::AgentBackend(error.to_string()))?;
+                Ok(RuntimeResponse::McpOauth {
+                    server,
+                    authorization_url: Some(authorization_url),
+                    removed: false,
+                })
+            }
+            RuntimeCommand::McpOauthLogout { server } => {
+                let backend = self.agent_backend.as_ref().ok_or_else(|| {
+                    RuntimeError::AgentBackend("no agent backend is available".into())
+                })?;
+                let removed = self
+                    .async_runtime
+                    .block_on(backend.mcp_oauth_logout(&server))
+                    .map_err(|error| RuntimeError::AgentBackend(error.to_string()))?;
+                self.async_runtime
+                    .block_on(backend.refresh_mcp_servers())
+                    .map_err(|error| RuntimeError::AgentBackend(error.to_string()))?;
+                Ok(RuntimeResponse::McpOauth {
+                    server,
+                    authorization_url: None,
+                    removed,
+                })
+            }
+            RuntimeCommand::McpRefresh => {
+                let backend = self.agent_backend.as_ref().ok_or_else(|| {
+                    RuntimeError::AgentBackend("no agent backend is available".into())
+                })?;
+                self.async_runtime
+                    .block_on(backend.refresh_mcp_servers())
+                    .map_err(|error| RuntimeError::AgentBackend(error.to_string()))?;
+                Ok(RuntimeResponse::McpRefreshed)
+            }
+            RuntimeCommand::McpToolCall {
+                server,
+                tool,
+                arguments,
+            } => {
+                let backend = self.agent_backend.as_ref().ok_or_else(|| {
+                    RuntimeError::AgentBackend("no agent backend is available".into())
+                })?;
+                let result = self
+                    .async_runtime
+                    .block_on(backend.call_mcp_tool(&server, &tool, arguments))
+                    .map_err(|error| RuntimeError::AgentBackend(error.to_string()))?;
+                Ok(RuntimeResponse::McpToolResult {
+                    server,
+                    tool,
+                    result,
                 })
             }
             RuntimeCommand::ConversationHistory {
@@ -669,6 +769,18 @@ impl AgentEventSink for AgentEventBridge {
                 total: 0,
                 message,
             },
+            AgentEvent::Activity { activity } => RuntimeEvent::AgentActivity {
+                operation_id: self.operation_id.clone(),
+                step_id: activity.step_id,
+                kind: activity.kind,
+                title: activity.title,
+                detail: activity.detail,
+                status: match activity.status {
+                    AgentActivityStatus::Running => RuntimeActivityStatus::Running,
+                    AgentActivityStatus::Completed => RuntimeActivityStatus::Completed,
+                    AgentActivityStatus::Failed => RuntimeActivityStatus::Failed,
+                },
+            },
             AgentEvent::ApprovalRequested {
                 approval_id,
                 title,
@@ -708,6 +820,8 @@ pub enum RuntimeError {
     Initialization(String),
     #[error("Agent backend initialization failed: {0}")]
     AgentInitialization(String),
+    #[error("Agent backend request failed: {0}")]
+    AgentBackend(String),
     #[error("remote Agent gateways are forbidden in embedded runtime builds")]
     RemoteAgentForbidden,
     #[error("remote model provider support was not compiled")]

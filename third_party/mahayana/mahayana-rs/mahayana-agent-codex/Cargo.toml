@@ -17,6 +17,7 @@ codex-exec-server.workspace = true
 codex-feedback.workspace = true
 codex-model-provider-info.workspace = true
 codex-protocol.workspace = true
+codex-rmcp-client.workspace = true
 codex-utils-absolute-path.workspace = true
 mahayana-agent.workspace = true
 mahayana-conversation.workspace = true

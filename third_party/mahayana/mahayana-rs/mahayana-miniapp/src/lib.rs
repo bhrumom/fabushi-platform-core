@@ -1,6 +1,7 @@
 //! Mini-app peers backed by the same embedded Agent as the Codex contact.
 
 use async_trait::async_trait;
+use mahayana_agent::AgentActivityStatus;
 use mahayana_agent::AgentBackend;
 use mahayana_agent::AgentError;
 use mahayana_agent::AgentEvent;
@@ -25,6 +26,7 @@ use mahayana_core::MessageRole;
 use mahayana_core::OperationId;
 use mahayana_core::PeerKind;
 use mahayana_core::PluginCommandDescriptor;
+use mahayana_core::RuntimeActivityStatus;
 use mahayana_core::RuntimeEvent;
 use mahayana_miniapp_protocol::ChatDisposition;
 use mahayana_miniapp_protocol::FeedItemKind;
@@ -1091,6 +1093,18 @@ impl AgentEventSink for MiniAppEventBridge {
                 progress: 0,
                 total: 0,
                 message,
+            },
+            AgentEvent::Activity { activity } => RuntimeEvent::AgentActivity {
+                operation_id: self.operation_id.clone(),
+                step_id: activity.step_id,
+                kind: activity.kind,
+                title: activity.title,
+                detail: activity.detail,
+                status: match activity.status {
+                    AgentActivityStatus::Running => RuntimeActivityStatus::Running,
+                    AgentActivityStatus::Completed => RuntimeActivityStatus::Completed,
+                    AgentActivityStatus::Failed => RuntimeActivityStatus::Failed,
+                },
             },
             AgentEvent::ApprovalRequested {
                 approval_id,

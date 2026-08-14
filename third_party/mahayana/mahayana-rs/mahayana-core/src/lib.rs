@@ -240,6 +240,23 @@ pub enum RuntimeCommand {
         #[serde(default)]
         arguments: Value,
     },
+    #[serde(rename = "mahayana.mcp.servers")]
+    McpServers,
+    #[serde(rename = "mahayana.mcp.apps")]
+    McpApps,
+    #[serde(rename = "mahayana.mcp.oauth.login")]
+    McpOauthLogin { server: String },
+    #[serde(rename = "mahayana.mcp.oauth.logout")]
+    McpOauthLogout { server: String },
+    #[serde(rename = "mahayana.mcp.refresh")]
+    McpRefresh,
+    #[serde(rename = "mahayana.mcp.tool.call")]
+    McpToolCall {
+        server: String,
+        tool: String,
+        #[serde(default)]
+        arguments: Value,
+    },
     #[serde(rename = "mahayana.conversation.history")]
     ConversationHistory {
         #[serde(rename = "conversationId")]
@@ -321,6 +338,26 @@ pub enum RuntimeResponse {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         progress: Vec<Value>,
     },
+    #[serde(rename = "mahayana.mcp.servers")]
+    McpServers { data: Vec<Value> },
+    #[serde(rename = "mahayana.mcp.apps")]
+    McpApps { data: Vec<Value> },
+    #[serde(rename = "mahayana.mcp.oauth")]
+    McpOauth {
+        server: String,
+        #[serde(rename = "authorizationUrl")]
+        authorization_url: Option<String>,
+        #[serde(default)]
+        removed: bool,
+    },
+    #[serde(rename = "mahayana.mcp.refreshed")]
+    McpRefreshed,
+    #[serde(rename = "mahayana.mcp.tool.result")]
+    McpToolResult {
+        server: String,
+        tool: String,
+        result: Value,
+    },
     #[serde(rename = "mahayana.conversation.history")]
     History { data: Vec<Message> },
     #[serde(rename = "mahayana.operation.accepted")]
@@ -377,6 +414,14 @@ pub struct ModelTokenUsageSnapshot {
     pub model_context_window: Option<i64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeActivityStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "@type")]
 pub enum RuntimeEvent {
@@ -421,6 +466,17 @@ pub enum RuntimeEvent {
         progress: u64,
         total: u64,
         message: String,
+    },
+    #[serde(rename = "mahayana.agent.activity")]
+    AgentActivity {
+        #[serde(rename = "operationId")]
+        operation_id: OperationId,
+        #[serde(rename = "stepId")]
+        step_id: String,
+        kind: String,
+        title: String,
+        detail: Option<String>,
+        status: RuntimeActivityStatus,
     },
     #[serde(rename = "mahayana.operation.completed")]
     OperationCompleted {

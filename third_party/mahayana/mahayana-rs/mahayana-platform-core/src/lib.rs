@@ -1,11 +1,14 @@
 //! Runtime-neutral contracts shared by Mahayana hosts and platform services.
 
+mod canonical_json;
 mod commerce;
 mod extension_manifest;
 mod identity;
 mod miniapp_identity;
 mod usage;
 
+pub use canonical_json::canonical_json_bytes;
+pub use canonical_json::canonical_json_sha256;
 pub use commerce::Currency;
 pub use commerce::Entitlement;
 pub use commerce::EntitlementStatus;

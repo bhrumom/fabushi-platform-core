@@ -3,7 +3,7 @@ name = "mahayana-ffi"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Stable C/JSON ABI for the embedded Mahayana Runtime."
+description = "Stable C/JSON compatibility ABI for the embedded Mahayana Host."
 publish = false
 
 [lib]
@@ -18,41 +18,19 @@ doctest = false
 
 [features]
 default = ["desktop-full", "local-only"]
-desktop-full = [
-    "mahayana-runtime-core/desktop-full",
-    "dep:codex-protocol",
-    "dep:mahayana-agent-codex",
-]
-mobile-embedded = [
-    "mahayana-runtime-core/mobile-embedded",
-    "dep:codex-protocol",
-    "dep:mahayana-agent-codex",
-]
-linux-shared = [
-    "mahayana-runtime-core/mobile-embedded",
-    "dep:codex-protocol",
-]
-web-wasm = ["mahayana-runtime-core/web-wasm"]
-local-only = ["mahayana-runtime-core/local-only"]
-remote-model-provider = ["mahayana-runtime-core/remote-model-provider"]
-telemetry = ["mahayana-runtime-core/telemetry"]
+desktop-full = ["mahayana-host/desktop-full"]
+mobile-embedded = ["mahayana-host/mobile-embedded"]
+linux-shared = ["mahayana-host/linux-shared"]
+web-wasm = ["mahayana-host/web-wasm"]
+local-only = ["mahayana-host/local-only"]
+remote-model-provider = ["mahayana-host/remote-model-provider"]
+telemetry = ["mahayana-host/telemetry"]
 
 [dependencies]
-async-trait.workspace = true
-codex-protocol = { workspace = true, optional = true }
-fabushi-official-miniapps.workspace = true
 fabushi-telegram-runtime = { path = "../providers/telegram-runtime" }
-mahayana-agent.workspace = true
-mahayana-agent-codex = { path = "../mahayana-agent-codex", optional = true }
-mahayana-conversation.workspace = true
 mahayana-core.workspace = true
-mahayana-miniapp.workspace = true
-mahayana-platform-core.workspace = true
+mahayana-host = { workspace = true, default-features = false }
 mahayana-product = { package = "mahayana-platform-client", path = "../mahayana-product" }
-mahayana-runtime-core = { package = "mahayana-runtime", path = "../mahayana-runtime", default-features = false }
-mahayana-social.workspace = true
-mahayana-telegram.workspace = true
 once_cell.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true

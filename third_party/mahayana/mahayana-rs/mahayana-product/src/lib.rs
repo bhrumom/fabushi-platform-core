@@ -6,12 +6,32 @@ use codex_secrets::SecretName;
 use codex_secrets::SecretScope;
 use codex_secrets::SecretsBackendKind;
 use codex_secrets::SecretsManager;
+use mahayana_host_protocol::BotSummary;
+use mahayana_host_protocol::ConnectorAccountSummary;
+use mahayana_host_protocol::ConnectorStatus;
+use mahayana_host_protocol::ConnectorSummary;
+use mahayana_host_protocol::ConnectorToolSummary;
+use mahayana_host_protocol::ConnectorTransport;
+use mahayana_host_protocol::DraftAction;
+use mahayana_host_protocol::DraftSendState;
+use mahayana_host_protocol::FeatureCommand;
+use mahayana_host_protocol::ListenerIntegrationSummary;
+use mahayana_host_protocol::ListenerPlatform;
+use mahayana_host_protocol::MessageDraft;
+use mahayana_host_protocol::SkillPublishState;
+use mahayana_host_protocol::SkillSource;
+use mahayana_host_protocol::SkillSummary;
+use mahayana_host_protocol::SkillTeamSummary;
+use mahayana_host_protocol::UpdateDisabledReason;
+use mahayana_host_protocol::UpdateState;
 use mahayana_platform_core::AccountUsageStatus;
 use mahayana_platform_core::Currency;
 use mahayana_platform_core::DelegatedTokenRequest;
 use mahayana_platform_core::Entitlement;
 use mahayana_platform_core::PurchaseRequest;
 use mahayana_platform_core::Quote;
+use mahayana_platform_core::canonical_json_bytes;
+use mahayana_platform_core::canonical_json_sha256;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Map;
@@ -24,6 +44,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 const DEFAULT_API_BASE_URL: &str = "https://api.ombhrum.com";
 const MAHAYANA_ACCOUNT_SESSION_SECRET: &str = "MAHAYANA_ACCOUNT_SESSION";
@@ -61,6 +83,334 @@ pub struct PurchasePage {
     pub next_cursor: Option<String>,
 }
 
+const PRODUCT_SURFACE_STATE_SCHEMA: u32 = 1;
+const PRODUCT_SURFACE_STATE_FILENAME: &str = "product-surface.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProductSurfaceState {
+    schema_version: u32,
+    sequence: u64,
+    connectors: Vec<ConnectorSummary>,
+    skills: Vec<SkillSummary>,
+    skill_teams: Vec<SkillTeamSummary>,
+    bots: Vec<BotSummary>,
+    listeners: Vec<ListenerIntegrationSummary>,
+    update_state: UpdateState,
+}
+
+impl Default for ProductSurfaceState {
+    fn default() -> Self {
+        Self {
+            schema_version: PRODUCT_SURFACE_STATE_SCHEMA,
+            sequence: 0,
+            connectors: default_surface_connectors(),
+            skills: default_surface_skills(),
+            skill_teams: Vec::new(),
+            bots: default_surface_bots(),
+            listeners: default_surface_listeners(),
+            // The desktop bundle currently has no signed updater endpoint or
+            // updater plugin. Report the same explicit disabled state used by
+            // recovered Grok Bot lab/unpackaged builds instead of pretending a
+            // network update check succeeded.
+            update_state: UpdateState::Disabled {
+                reason: UpdateDisabledReason::NotPackaged,
+            },
+        }
+    }
+}
+
+fn surface_connector_tool(id: &str, name: &str, description: &str) -> ConnectorToolSummary {
+    ConnectorToolSummary {
+        id: id.into(),
+        name: name.into(),
+        description: description.into(),
+        enabled: true,
+        requires_approval: Some(true),
+    }
+}
+
+fn surface_connector(
+    id: &str,
+    display_name: &str,
+    description: &str,
+    transport: ConnectorTransport,
+    tools: Vec<ConnectorToolSummary>,
+) -> ConnectorSummary {
+    ConnectorSummary {
+        id: id.into(),
+        display_name: display_name.into(),
+        description: description.into(),
+        status: ConnectorStatus::Disconnected,
+        is_team: false,
+        can_add_account: transport != ConnectorTransport::Command,
+        transport,
+        source: Some("Mahayana / Codex MCP".into()),
+        teammate_count: None,
+        accounts: Vec::new(),
+        tools,
+    }
+}
+
+fn default_surface_connectors() -> Vec<ConnectorSummary> {
+    vec![
+        surface_connector(
+            "gmail",
+            "Gmail",
+            "Search, read, draft, label, and manage email through the installed Gmail MCP plugin.",
+            ConnectorTransport::Http,
+            vec![
+                surface_connector_tool("search", "Search mail", "Search messages and threads."),
+                surface_connector_tool(
+                    "draft",
+                    "Draft mail",
+                    "Create an email draft for user approval.",
+                ),
+                surface_connector_tool("send", "Send mail", "Send an approved email draft."),
+            ],
+        ),
+        surface_connector(
+            "github",
+            "GitHub",
+            "Repositories, pull requests, issues, comments, and CI.",
+            ConnectorTransport::Http,
+            vec![
+                surface_connector_tool(
+                    "read_repository",
+                    "Read repository",
+                    "Read repository files and metadata.",
+                ),
+                surface_connector_tool(
+                    "create_issue",
+                    "Create issue",
+                    "Create and update GitHub issues.",
+                ),
+                surface_connector_tool(
+                    "comment_pull_request",
+                    "Comment on pull request",
+                    "Post review comments on pull requests.",
+                ),
+            ],
+        ),
+        surface_connector(
+            "slack",
+            "Slack",
+            "Messages, mentions, reactions, and approved drafts.",
+            ConnectorTransport::Http,
+            vec![
+                surface_connector_tool(
+                    "search_messages",
+                    "Search messages",
+                    "Search workspace messages and threads.",
+                ),
+                surface_connector_tool(
+                    "post_message",
+                    "Post message",
+                    "Send an approved message or thread reply.",
+                ),
+                surface_connector_tool(
+                    "add_reaction",
+                    "Add reaction",
+                    "Add a reaction to a message.",
+                ),
+            ],
+        ),
+        surface_connector(
+            "teams",
+            "Microsoft Teams",
+            "Teams messages, mentions, channels, and approved drafts.",
+            ConnectorTransport::Http,
+            vec![
+                surface_connector_tool(
+                    "search_messages",
+                    "Search messages",
+                    "Search Teams channels and chats.",
+                ),
+                surface_connector_tool(
+                    "post_message",
+                    "Post message",
+                    "Send an approved Teams message.",
+                ),
+            ],
+        ),
+        surface_connector(
+            "linear",
+            "Linear",
+            "Issues, comments, status changes, and projects.",
+            ConnectorTransport::Http,
+            vec![
+                surface_connector_tool(
+                    "read_issues",
+                    "Read issues",
+                    "Read Linear issues and projects.",
+                ),
+                surface_connector_tool(
+                    "update_issue",
+                    "Update issue",
+                    "Update issue state, assignee, and fields.",
+                ),
+            ],
+        ),
+        surface_connector(
+            "sentry",
+            "Sentry",
+            "Errors, regressions, releases, and issue ownership.",
+            ConnectorTransport::Http,
+            vec![
+                surface_connector_tool(
+                    "read_issues",
+                    "Read issues",
+                    "Read Sentry issues and events.",
+                ),
+                surface_connector_tool(
+                    "resolve_issue",
+                    "Resolve issue",
+                    "Resolve or assign a Sentry issue.",
+                ),
+            ],
+        ),
+        surface_connector(
+            "pagerduty",
+            "PagerDuty",
+            "Incidents, acknowledgements, responders, and escalation.",
+            ConnectorTransport::Http,
+            vec![
+                surface_connector_tool(
+                    "read_incidents",
+                    "Read incidents",
+                    "Read incident details and timelines.",
+                ),
+                surface_connector_tool(
+                    "acknowledge_incident",
+                    "Acknowledge incident",
+                    "Acknowledge an incident after approval.",
+                ),
+            ],
+        ),
+        surface_connector(
+            "git",
+            "Git",
+            "Local commits, branches, and repository state.",
+            ConnectorTransport::Command,
+            vec![
+                surface_connector_tool(
+                    "read_status",
+                    "Read status",
+                    "Read local repository status.",
+                ),
+                surface_connector_tool(
+                    "read_history",
+                    "Read history",
+                    "Read commit and branch history.",
+                ),
+            ],
+        ),
+    ]
+}
+
+fn default_surface_skills() -> Vec<SkillSummary> {
+    vec![SkillSummary {
+        id: "skill-research-brief".into(),
+        name: "Research brief".into(),
+        description: "Turn verified sources into a concise research brief.".into(),
+        use_when: "Use when a task needs sourced research and a decision-ready summary.".into(),
+        instructions:
+            "Verify sources, distinguish facts from inference, and end with actionable conclusions."
+                .into(),
+        source: SkillSource::Private,
+        publish_state: SkillPublishState::Local,
+        owner_agent_id: Some("mahayana-assistant".into()),
+        team_id: None,
+        team_name: None,
+        read_only: Some(false),
+        updated_at_ms: 0,
+    }]
+}
+
+fn default_surface_bots() -> Vec<BotSummary> {
+    vec![
+        BotSummary {
+            id: "mahayana-assistant".into(),
+            name: "大乘助手".into(),
+            description: "General-purpose Mahayana assistant.".into(),
+            hidden: false,
+            avatar: None,
+            conversation_id: Some("codex:agent:assistant".into()),
+        },
+        BotSummary {
+            id: "research-bot".into(),
+            name: "Research Bot".into(),
+            description: "Source verification and research synthesis.".into(),
+            hidden: false,
+            avatar: None,
+            conversation_id: Some("codex:agent:research".into()),
+        },
+        BotSummary {
+            id: "incident-bot".into(),
+            name: "Incident Bot".into(),
+            description: "Incident triage and operational coordination.".into(),
+            hidden: true,
+            avatar: None,
+            conversation_id: Some("codex:agent:incident".into()),
+        },
+    ]
+}
+
+fn surface_listener(
+    platform: ListenerPlatform,
+    display_name: &str,
+    blurb: &str,
+) -> ListenerIntegrationSummary {
+    ListenerIntegrationSummary {
+        platform,
+        display_name: display_name.into(),
+        blurb: blurb.into(),
+        is_connected: platform == ListenerPlatform::Git,
+        account_label: (platform == ListenerPlatform::Git).then(|| "Local repository".into()),
+        error: None,
+    }
+}
+
+fn default_surface_listeners() -> Vec<ListenerIntegrationSummary> {
+    vec![
+        surface_listener(
+            ListenerPlatform::Github,
+            "GitHub",
+            "Watch repository PRs, comments, issues, and CI.",
+        ),
+        surface_listener(
+            ListenerPlatform::Git,
+            "Git",
+            "Wake routines on local repository activity.",
+        ),
+        surface_listener(
+            ListenerPlatform::Slack,
+            "Slack",
+            "Wake routines on messages, mentions, and reactions.",
+        ),
+        surface_listener(
+            ListenerPlatform::Teams,
+            "Microsoft Teams",
+            "Wake routines on Teams activity.",
+        ),
+        surface_listener(
+            ListenerPlatform::Linear,
+            "Linear",
+            "Wake routines on issue and project activity.",
+        ),
+        surface_listener(
+            ListenerPlatform::Sentry,
+            "Sentry",
+            "Wake routines on issue and regression activity.",
+        ),
+        surface_listener(
+            ListenerPlatform::Pagerduty,
+            "PagerDuty",
+            "Wake routines on incident activity.",
+        ),
+    ]
+}
+
 /// First-party product API client shared by the CLI and native application
 /// shells. Authentication is stored once by Rust so every surface observes the
 /// same Mahayana account session.
@@ -69,7 +419,11 @@ pub struct MahayanaProductClient {
     api_base_url: String,
     /// Stable Mahayana home anchor used to locate Codex encrypted secrets.
     session_path: PathBuf,
+    /// Shared non-secret product state used by CLI and native application shells.
+    surface_state_path: PathBuf,
+    skills_root: PathBuf,
     secrets_manager: SecretsManager,
+    managed_secrets: SecretsManager,
 }
 
 impl std::fmt::Debug for MahayanaProductClient {
@@ -78,6 +432,7 @@ impl std::fmt::Debug for MahayanaProductClient {
             .debug_struct("MahayanaProductClient")
             .field("api_base_url", &self.api_base_url)
             .field("legacy_session_path", &self.session_path)
+            .field("surface_state_path", &self.surface_state_path)
             .finish_non_exhaustive()
     }
 }
@@ -89,13 +444,42 @@ impl Default for MahayanaProductClient {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_API_BASE_URL.to_string());
         let home = default_mahayana_home();
-        Self::new(api_base_url, home.join("session.json"))
+        Self::new_with_surface_state_path(
+            api_base_url,
+            home.join("session.json"),
+            home.join(PRODUCT_SURFACE_STATE_FILENAME),
+        )
     }
 }
 
 /// Shared Mahayana data directory used by the signed application and CLI.
 /// Platform runtimes should derive their own subdirectories from this path so
 /// account state and Codex conversations never split across host surfaces.
+pub fn default_product_surface_state_path() -> PathBuf {
+    default_mahayana_home().join(PRODUCT_SURFACE_STATE_FILENAME)
+}
+
+fn default_codex_skills_root() -> PathBuf {
+    let codex_home = env::var_os("CODEX_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
+        .unwrap_or_else(|| PathBuf::from(".codex"));
+    codex_home.join("skills")
+}
+
+fn safe_skill_directory_name(skill_id: &str) -> Result<String, ProductError> {
+    let value = skill_id.trim();
+    if value.is_empty()
+        || !value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        })
+    {
+        return Err(ProductError::InvalidParameter("skillId"));
+    }
+    Ok(value.to_string())
+}
+
 pub fn default_mahayana_home() -> PathBuf {
     if let Some(path) = env::var_os("MAHAYANA_HOME")
         .filter(|value| !value.is_empty())
@@ -126,28 +510,112 @@ pub fn default_mahayana_home() -> PathBuf {
 impl MahayanaProductClient {
     pub fn new(api_base_url: impl Into<String>, session_path: impl Into<PathBuf>) -> Self {
         let session_path = session_path.into();
+        let surface_state_path = session_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .join(PRODUCT_SURFACE_STATE_FILENAME);
+        Self::new_with_surface_state_path(api_base_url, session_path, surface_state_path)
+    }
+
+    pub fn new_with_surface_state_path(
+        api_base_url: impl Into<String>,
+        session_path: impl Into<PathBuf>,
+        surface_state_path: impl Into<PathBuf>,
+    ) -> Self {
+        let session_path = session_path.into();
         let mahayana_home = session_path
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
-        Self {
+        let client = Self {
             api_base_url: api_base_url.into().trim_end_matches('/').to_string(),
             session_path,
+            surface_state_path: surface_state_path.into(),
+            skills_root: default_codex_skills_root(),
             secrets_manager: SecretsManager::new_with_namespace(
-                mahayana_home,
+                mahayana_home.clone(),
                 SecretsBackendKind::Local,
                 LocalSecretsNamespace::MahayanaAuth,
             ),
-        }
+            managed_secrets: SecretsManager::new_with_namespace(
+                mahayana_home,
+                SecretsBackendKind::Local,
+                LocalSecretsNamespace::ManagedSecrets,
+            ),
+        };
+        client.import_legacy_session_if_needed();
+        client
     }
 
     pub fn api_base_url(&self) -> &str {
         &self.api_base_url
     }
 
+    /// Returns a previously stored first-party requested secret without ever
+    /// serializing it through the renderer/product command response. Callers
+    /// must already know the opaque request id that created the secret.
+    pub fn managed_secret(&self, secret_request_id: &str) -> Result<Option<String>, ProductError> {
+        let name = managed_secret_name(secret_request_id)?;
+        self.managed_secrets
+            .get(&SecretScope::Global, &name)
+            .map_err(secrets_error)
+    }
+
+    /// Revokes a first-party requested secret from the encrypted managed
+    /// secrets namespace. The returned boolean indicates whether a value was
+    /// present before revocation.
+    pub fn revoke_managed_secret(&self, secret_request_id: &str) -> Result<bool, ProductError> {
+        let name = managed_secret_name(secret_request_id)?;
+        self.managed_secrets
+            .delete(&SecretScope::Global, &name)
+            .map_err(secrets_error)
+    }
+
     pub fn session_path(&self) -> &Path {
         &self.session_path
+    }
+
+    pub fn skills_root(&self) -> &Path {
+        &self.skills_root
+    }
+
+    fn persist_private_skill(&self, skill: &SkillSummary) -> Result<(), ProductError> {
+        let dir_name = safe_skill_directory_name(&skill.id)?;
+        let directory = self.skills_root.join(dir_name);
+        std::fs::create_dir_all(&directory).map_err(|error| {
+            ProductError::State(format!(
+                "create skill directory {}: {error}",
+                directory.display()
+            ))
+        })?;
+        let name = serde_json::to_string(&skill.name)
+            .map_err(|error| ProductError::State(format!("encode skill name: {error}")))?;
+        let description = serde_json::to_string(
+            &format!("{} {}", skill.description.trim(), skill.use_when.trim())
+                .trim()
+                .to_string(),
+        )
+        .map_err(|error| ProductError::State(format!("encode skill description: {error}")))?;
+        let contents = format!(
+            "---\nname: {name}\ndescription: {description}\n---\n\n{}\n",
+            skill.instructions.trim()
+        );
+        std::fs::write(directory.join("SKILL.md"), contents)
+            .map_err(|error| ProductError::State(format!("write skill {}: {error}", skill.id)))
+    }
+
+    fn remove_private_skill(&self, skill_id: &str) -> Result<(), ProductError> {
+        let directory = self.skills_root.join(safe_skill_directory_name(skill_id)?);
+        match std::fs::remove_dir_all(&directory) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(ProductError::State(format!(
+                "remove skill directory {}: {error}",
+                directory.display()
+            ))),
+        }
     }
 
     /// Stores the environment-provisioned smoke-test credential in the same
@@ -359,6 +827,11 @@ impl MahayanaProductClient {
         if !actual_sha256.eq_ignore_ascii_case(package_sha256) {
             return Err(ProductError::InvalidParameter("packageSha256"));
         }
+        let release_manifest_json = String::from_utf8(
+            canonical_json_bytes(release_manifest)
+                .map_err(|error| ProductError::Configuration(error.to_string()))?,
+        )
+        .map_err(|error| ProductError::Configuration(error.to_string()))?;
         let token = self.authorization_token(&Value::Null)?;
         let package_part = reqwest::blocking::multipart::Part::bytes(package.to_vec())
             .file_name(format!("{plugin_id}-{version}.tar.gz"));
@@ -378,11 +851,7 @@ impl MahayanaProductClient {
                 serde_json::to_string(source)
                     .map_err(|error| ProductError::Configuration(error.to_string()))?,
             )
-            .text(
-                "releaseManifest",
-                serde_json::to_string(release_manifest)
-                    .map_err(|error| ProductError::Configuration(error.to_string()))?,
-            )
+            .text("releaseManifest", release_manifest_json)
             .part("package", package_part);
         let client = http_client()?;
         decode_response(
@@ -510,11 +979,472 @@ impl MahayanaProductClient {
         self.authorization_token(&Value::Null)
     }
 
+    fn load_surface_state(&self) -> Result<ProductSurfaceState, ProductError> {
+        let mut state = match std::fs::read(&self.surface_state_path) {
+            Ok(bytes) => {
+                serde_json::from_slice::<ProductSurfaceState>(&bytes).map_err(|error| {
+                    ProductError::State(format!("decode product surface state: {error}"))
+                })?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                ProductSurfaceState::default()
+            }
+            Err(error) => {
+                return Err(ProductError::State(format!(
+                    "read {}: {error}",
+                    self.surface_state_path.display()
+                )));
+            }
+        };
+        if state.schema_version != PRODUCT_SURFACE_STATE_SCHEMA {
+            state = ProductSurfaceState::default();
+        }
+        for connector in default_surface_connectors() {
+            if !state.connectors.iter().any(|item| item.id == connector.id) {
+                state.connectors.push(connector);
+            }
+        }
+        for bot in default_surface_bots() {
+            if !state.bots.iter().any(|item| item.id == bot.id) {
+                state.bots.push(bot);
+            }
+        }
+        for integration in default_surface_listeners() {
+            if !state
+                .listeners
+                .iter()
+                .any(|item| item.platform == integration.platform)
+            {
+                state.listeners.push(integration);
+            }
+        }
+        Ok(state)
+    }
+
+    fn save_surface_state(&self, state: &ProductSurfaceState) -> Result<(), ProductError> {
+        if let Some(parent) = self.surface_state_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                ProductError::State(format!("create {}: {error}", parent.display()))
+            })?;
+        }
+        let temp = self
+            .surface_state_path
+            .with_extension(format!("json.{}.tmp", std::process::id()));
+        let bytes = serde_json::to_vec_pretty(state).map_err(|error| {
+            ProductError::State(format!("encode product surface state: {error}"))
+        })?;
+        std::fs::write(&temp, bytes)
+            .map_err(|error| ProductError::State(format!("write {}: {error}", temp.display())))?;
+        std::fs::rename(&temp, &self.surface_state_path).map_err(|error| {
+            let _ = std::fs::remove_file(&temp);
+            ProductError::State(format!(
+                "commit {}: {error}",
+                self.surface_state_path.display()
+            ))
+        })
+    }
+
+    fn execute_surface_command(
+        &self,
+        request_type: &str,
+        request: &Value,
+    ) -> Result<Value, ProductError> {
+        if request_type == "mahayana.marketplace.list" {
+            return self.marketplace_browse(
+                request.get("query").and_then(Value::as_str),
+                request
+                    .get("platform")
+                    .and_then(Value::as_str)
+                    .or(Some("desktop")),
+            );
+        }
+        let command: FeatureCommand = serde_json::from_value(request.clone()).map_err(|error| {
+            ProductError::State(format!("decode product surface command: {error}"))
+        })?;
+        let mut state = self.load_surface_state()?;
+        let mut changed = false;
+        let response = match command {
+            FeatureCommand::ConnectorList { .. } => json!({"connectors": state.connectors}),
+            FeatureCommand::ConnectorConnect { connector_id, .. } => {
+                let connector = state
+                    .connectors
+                    .iter_mut()
+                    .find(|connector| connector.id == connector_id)
+                    .ok_or_else(|| {
+                        ProductError::State(format!("unknown connector: {connector_id}"))
+                    })?;
+                if connector.transport == ConnectorTransport::Command {
+                    connector.status = ConnectorStatus::Connected;
+                    changed = true;
+                    json!({"connector": connector})
+                } else {
+                    connector.status = ConnectorStatus::AuthRequired;
+                    changed = true;
+                    json!({"connector": connector, "requiresOAuth": true})
+                }
+            }
+            FeatureCommand::ConnectorRenameAccount {
+                connector_id,
+                account_id,
+                label,
+                ..
+            } => {
+                let label = label.trim();
+                if label.is_empty() {
+                    return Err(ProductError::State(
+                        "account label must not be empty".into(),
+                    ));
+                }
+                let connector = state
+                    .connectors
+                    .iter_mut()
+                    .find(|connector| connector.id == connector_id)
+                    .ok_or_else(|| {
+                        ProductError::State(format!("unknown connector: {connector_id}"))
+                    })?;
+                if !connector
+                    .accounts
+                    .iter()
+                    .any(|account| account.id == account_id)
+                    && account_id.starts_with(&format!("mcp:{connector_id}"))
+                {
+                    connector.accounts.push(ConnectorAccountSummary {
+                        id: account_id.clone(),
+                        label: connector.display_name.clone(),
+                        status: ConnectorStatus::Connected,
+                        email: None,
+                        team_managed: Some(false),
+                        error: None,
+                    });
+                }
+                let account = connector
+                    .accounts
+                    .iter_mut()
+                    .find(|account| account.id == account_id)
+                    .ok_or_else(|| {
+                        ProductError::State(format!("unknown connector account: {account_id}"))
+                    })?;
+                if account.team_managed == Some(true) {
+                    return Err(ProductError::State(
+                        "team-managed accounts cannot be renamed".into(),
+                    ));
+                }
+                account.label = label.to_string();
+                changed = true;
+                json!({"connector": connector})
+            }
+            FeatureCommand::ConnectorRemoveAccount {
+                connector_id,
+                account_id,
+                ..
+            } => {
+                let connector = state
+                    .connectors
+                    .iter_mut()
+                    .find(|connector| connector.id == connector_id)
+                    .ok_or_else(|| {
+                        ProductError::State(format!("unknown connector: {connector_id}"))
+                    })?;
+                if connector
+                    .accounts
+                    .iter()
+                    .any(|account| account.id == account_id && account.team_managed == Some(true))
+                {
+                    return Err(ProductError::State(
+                        "team-managed accounts cannot be removed".into(),
+                    ));
+                }
+                let before = connector.accounts.len();
+                connector
+                    .accounts
+                    .retain(|account| account.id != account_id);
+                if connector.accounts.len() == before
+                    && !account_id.starts_with(&format!("mcp:{connector_id}"))
+                {
+                    return Err(ProductError::State(format!(
+                        "unknown connector account: {account_id}"
+                    )));
+                }
+                if connector.accounts.is_empty() {
+                    connector.status = ConnectorStatus::Disconnected;
+                }
+                changed = true;
+                json!({"connector": connector})
+            }
+            FeatureCommand::ConnectorSetToolEnabled {
+                connector_id,
+                tool_id,
+                enabled,
+                ..
+            } => {
+                let connector = state
+                    .connectors
+                    .iter_mut()
+                    .find(|connector| connector.id == connector_id)
+                    .ok_or_else(|| {
+                        ProductError::State(format!("unknown connector: {connector_id}"))
+                    })?;
+                if !connector.tools.iter().any(|tool| tool.id == tool_id) {
+                    connector.tools.push(ConnectorToolSummary {
+                        id: tool_id.clone(),
+                        name: tool_id.clone(),
+                        description: "Discovered from the live MCP server.".into(),
+                        enabled,
+                        requires_approval: Some(true),
+                    });
+                } else if let Some(tool) =
+                    connector.tools.iter_mut().find(|tool| tool.id == tool_id)
+                {
+                    tool.enabled = enabled;
+                }
+                changed = true;
+                json!({"connector": connector})
+            }
+            FeatureCommand::SkillList { agent_id, .. } => {
+                let skills = state
+                    .skills
+                    .iter()
+                    .filter(|skill| {
+                        agent_id.as_ref().is_none_or(|agent_id| {
+                            skill
+                                .owner_agent_id
+                                .as_ref()
+                                .is_none_or(|owner| owner == agent_id)
+                        })
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                json!({"skills": skills, "teams": state.skill_teams})
+            }
+            FeatureCommand::SkillUpsert {
+                id,
+                name,
+                description,
+                use_when,
+                instructions,
+                owner_agent_id,
+                ..
+            } => {
+                let name = name.trim();
+                let use_when = use_when.trim();
+                if name.is_empty() || use_when.is_empty() || instructions.trim().is_empty() {
+                    return Err(ProductError::State(
+                        "skill name, useWhen, and instructions are required".into(),
+                    ));
+                }
+                let id = id.unwrap_or_else(|| {
+                    state.sequence += 1;
+                    format!("skill-{}-{}", surface_now_millis(), state.sequence)
+                });
+                let existing = state.skills.iter().position(|skill| skill.id == id);
+                if existing.is_some_and(|index| state.skills[index].read_only == Some(true)) {
+                    return Err(ProductError::State(
+                        "managed skills cannot be edited".into(),
+                    ));
+                }
+                let previous = existing.map(|index| state.skills[index].clone());
+                let skill = SkillSummary {
+                    id: id.clone(),
+                    name: name.to_string(),
+                    description: description.trim().to_string(),
+                    use_when: use_when.to_string(),
+                    instructions,
+                    source: previous
+                        .as_ref()
+                        .map_or(SkillSource::Private, |skill| skill.source),
+                    publish_state: previous
+                        .as_ref()
+                        .map_or(SkillPublishState::Local, |skill| skill.publish_state),
+                    owner_agent_id,
+                    team_id: previous.as_ref().and_then(|skill| skill.team_id.clone()),
+                    team_name: previous.as_ref().and_then(|skill| skill.team_name.clone()),
+                    read_only: previous.as_ref().and_then(|skill| skill.read_only),
+                    updated_at_ms: surface_now_millis(),
+                };
+                self.persist_private_skill(&skill)?;
+                if let Some(index) = existing {
+                    state.skills[index] = skill.clone();
+                } else {
+                    state.skills.push(skill.clone());
+                }
+                changed = true;
+                json!({"action": if previous.is_some() {"updated"} else {"created"}, "skill": skill})
+            }
+            FeatureCommand::SkillDelete { id, .. } => {
+                let index = state
+                    .skills
+                    .iter()
+                    .position(|skill| skill.id == id)
+                    .ok_or_else(|| ProductError::State(format!("unknown skill: {id}")))?;
+                if state.skills[index].read_only == Some(true)
+                    || state.skills[index].publish_state == SkillPublishState::Managed
+                {
+                    return Err(ProductError::State(
+                        "managed skills cannot be deleted".into(),
+                    ));
+                }
+                let skill = state.skills.remove(index);
+                self.remove_private_skill(&skill.id)?;
+                changed = true;
+                json!({"skill": skill})
+            }
+            FeatureCommand::SkillPublish { id, team_id, .. } => {
+                let team = state
+                    .skill_teams
+                    .iter()
+                    .find(|team| team.id == team_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        ProductError::State(
+                            "no publishable Mahayana team is available for this account".into(),
+                        )
+                    })?;
+                let skill = state
+                    .skills
+                    .iter_mut()
+                    .find(|skill| skill.id == id)
+                    .ok_or_else(|| ProductError::State(format!("unknown skill: {id}")))?;
+                if skill.description.trim().is_empty() {
+                    return Err(ProductError::State(
+                        "add a skill description before publishing".into(),
+                    ));
+                }
+                skill.source = SkillSource::Team;
+                skill.publish_state = SkillPublishState::Published;
+                skill.team_id = Some(team.id);
+                skill.team_name = Some(team.name);
+                skill.updated_at_ms = surface_now_millis();
+                changed = true;
+                json!({"skill": skill})
+            }
+            FeatureCommand::SkillUnpublish { id, .. } => {
+                let skill = state
+                    .skills
+                    .iter_mut()
+                    .find(|skill| skill.id == id)
+                    .ok_or_else(|| ProductError::State(format!("unknown skill: {id}")))?;
+                if skill.publish_state == SkillPublishState::Managed {
+                    return Err(ProductError::State(
+                        "managed skills cannot be unpublished".into(),
+                    ));
+                }
+                skill.source = SkillSource::Private;
+                skill.publish_state = SkillPublishState::Local;
+                skill.team_id = None;
+                skill.team_name = None;
+                skill.updated_at_ms = surface_now_millis();
+                changed = true;
+                json!({"skill": skill})
+            }
+            FeatureCommand::SkillSync { id, .. } => {
+                let skill = state
+                    .skills
+                    .iter_mut()
+                    .find(|skill| skill.id == id)
+                    .ok_or_else(|| ProductError::State(format!("unknown skill: {id}")))?;
+                if skill.team_id.is_none() {
+                    return Err(ProductError::State(
+                        "only published skills can be synced".into(),
+                    ));
+                }
+                skill.publish_state = SkillPublishState::Synced;
+                skill.updated_at_ms = surface_now_millis();
+                changed = true;
+                json!({"skill": skill})
+            }
+            FeatureCommand::BotList { .. } => json!({"bots": state.bots}),
+            FeatureCommand::BotSetHidden { id, hidden, .. } => {
+                let bot = state
+                    .bots
+                    .iter_mut()
+                    .find(|bot| bot.id == id)
+                    .ok_or_else(|| ProductError::State(format!("unknown bot: {id}")))?;
+                bot.hidden = hidden;
+                changed = true;
+                json!({"bot": bot})
+            }
+            FeatureCommand::DraftResolve { draft, action, .. } => {
+                validate_surface_draft(&draft)?;
+                let status = match action {
+                    DraftAction::Discard => DraftSendState::Discarded,
+                    DraftAction::Send => {
+                        return Err(ProductError::State(
+                            "draft sending requires a connected Gmail or Slack MCP runtime".into(),
+                        ));
+                    }
+                };
+                json!({"draftId": draft.id(), "status": status})
+            }
+            FeatureCommand::SecretProvide {
+                secret_request_id,
+                value,
+                ..
+            } => {
+                if value.is_empty() {
+                    return Err(ProductError::State("secret value must not be empty".into()));
+                }
+                let name = managed_secret_name(&secret_request_id)?;
+                self.managed_secrets
+                    .set(&SecretScope::Global, &name, &value)
+                    .map_err(secrets_error)?;
+                // Never echo the secret or its encrypted storage key. The
+                // opaque request id is the only renderer-visible handle.
+                json!({"provided": true, "secretRequestId": secret_request_id})
+            }
+            FeatureCommand::ListenerList { .. } => json!({"integrations": state.listeners}),
+            FeatureCommand::ListenerConnect { platform, .. } => {
+                if platform != ListenerPlatform::Git {
+                    return Err(ProductError::State(
+                        "listener connection requires the matching MCP OAuth flow".into(),
+                    ));
+                }
+                let integration = state
+                    .listeners
+                    .iter_mut()
+                    .find(|integration| integration.platform == platform)
+                    .ok_or_else(|| ProductError::State("unsupported listener platform".into()))?;
+                integration.is_connected = true;
+                integration.account_label = Some("Local repository".into());
+                integration.error = None;
+                changed = true;
+                json!({"integration": integration})
+            }
+            FeatureCommand::UpdateStatus { .. } => json!({"state": state.update_state}),
+            FeatureCommand::UpdateCheck { .. } => json!({"state": state.update_state}),
+            FeatureCommand::UpdateInstall { .. } => {
+                return Err(ProductError::State(
+                    "this Fabushi build is not packaged with a desktop updater".into(),
+                ));
+            }
+            _ => {
+                return Err(ProductError::UnsupportedRequest(request_type.to_string()));
+            }
+        };
+        if changed {
+            self.save_surface_state(&state)?;
+        }
+        Ok(response)
+    }
+
     pub fn execute(&self, request_type: &str, request: &Value) -> Result<Value, ProductError> {
+        if request_type.starts_with("mahayana.connector.")
+            || request_type.starts_with("mahayana.skill.")
+            || request_type.starts_with("mahayana.bot.")
+            || request_type.starts_with("mahayana.draft.")
+            || request_type.starts_with("mahayana.secret.")
+            || request_type.starts_with("mahayana.listener.")
+            || request_type.starts_with("mahayana.update.")
+            || request_type == "mahayana.marketplace.list"
+        {
+            return self.execute_surface_command(request_type, request);
+        }
         match request_type {
             "mahayana.auth.status" => self.auth_status(request),
             "mahayana.auth.session.restore" => self.restore_session(),
             "mahayana.auth.password.login" => self.password_login(request),
+            "mahayana.auth.oauth.providers" => self.oauth_providers(),
+            "mahayana.auth.oauth.start" => self.oauth_start(request),
+            "mahayana.auth.oauth.poll" => self.oauth_poll(request),
             "mahayana.auth.register" => self.register(request),
             "mahayana.auth.verification.send" => self.verification_send(request),
             "mahayana.auth.password.forgot" => self.password_forgot(request),
@@ -639,6 +1569,43 @@ impl MahayanaProductClient {
         typed_session(response, "password", true)
     }
 
+    fn oauth_providers(&self) -> Result<Value, ProductError> {
+        let response = self.get_json("/api/auth/oauth/providers", &[], None)?;
+        Ok(response.get("providers").cloned().unwrap_or(response))
+    }
+
+    fn oauth_start(&self, request: &Value) -> Result<Value, ProductError> {
+        let provider = required_identifier(request, "provider")?;
+        self.post_json(
+            "/api/auth/oauth/start",
+            json!({
+                "provider": provider,
+                "platform": optional_string(request, "platform").unwrap_or("desktop"),
+                "deviceId": optional_string(request, "deviceId"),
+            }),
+            None,
+        )
+    }
+
+    fn oauth_poll(&self, request: &Value) -> Result<Value, ProductError> {
+        let attempt_id = required_identifier(request, "attemptId")?;
+        let response =
+            self.get_json(&format!("/api/auth/oauth/attempts/{attempt_id}"), &[], None)?;
+        if response.get("status").and_then(Value::as_str) != Some("completed") {
+            return Ok(response);
+        }
+        let session = response.get("session").unwrap_or(&response);
+        let provider = response
+            .get("provider")
+            .and_then(Value::as_str)
+            .unwrap_or("oauth");
+        self.store_login_response(session, provider)?;
+        Ok(json!({
+            "status": "completed",
+            "auth": typed_session(session.clone(), provider, true)?,
+        }))
+    }
+
     fn register(&self, request: &Value) -> Result<Value, ProductError> {
         self.post_json(
             "/api/auth/register",
@@ -704,8 +1671,6 @@ impl MahayanaProductClient {
     /// cross the Rust ABI into Flutter or another host shell.
     fn restore_session(&self) -> Result<Value, ProductError> {
         let session = self.required_session()?;
-        self.active_session_token(session)?;
-        let session = self.required_session()?;
         let mut output = session.as_object().cloned().unwrap_or_default();
         strip_credentials(&mut output);
         output.insert(
@@ -715,6 +1680,31 @@ impl MahayanaProductClient {
         output.insert("loggedIn".to_string(), Value::Bool(true));
         output.insert("sessionStored".to_string(), Value::Bool(true));
         Ok(Value::Object(output))
+    }
+
+    /// Import the pre-Secret-Store JSON once. Legacy credentials remain
+    /// readable only here and are normalized before entering the encrypted
+    /// Mahayana auth namespace; no token alias is accepted by normal APIs.
+    fn import_legacy_session_if_needed(&self) {
+        if !matches!(self.load_session(), Ok(None)) {
+            return;
+        }
+        let Ok(contents) = std::fs::read_to_string(&self.session_path) else {
+            return;
+        };
+        let Ok(mut session) = serde_json::from_str::<Value>(&contents) else {
+            return;
+        };
+        let Some(object) = session.as_object_mut() else {
+            return;
+        };
+        if object.get("accessToken").is_none() {
+            let Some(token) = object.remove("token").filter(Value::is_string) else {
+                return;
+            };
+            object.insert("accessToken".to_string(), token);
+        }
+        let _ = self.save_session(&session);
     }
 
     fn alipay_complete(&self, request: &Value) -> Result<Value, ProductError> {
@@ -1161,7 +2151,7 @@ fn verify_marketplace_deployment_once(
         return Err("release manifest exceeds 256 KiB".into());
     }
     let expected_release_bytes =
-        serde_json::to_vec(release_manifest).map_err(|error| error.to_string())?;
+        canonical_json_bytes(release_manifest).map_err(|error| error.to_string())?;
     if release_bytes.as_ref() != expected_release_bytes.as_slice() {
         return Err("deployed release manifest differs from the source-bound manifest".into());
     }
@@ -1206,9 +2196,8 @@ fn validate_marketplace_site_manifest(
     source: &Value,
     release_manifest: &Value,
 ) -> Result<(), String> {
-    let release_manifest_bytes =
-        serde_json::to_vec(release_manifest).map_err(|error| error.to_string())?;
-    let release_manifest_sha256 = format!("{:x}", sha2::Sha256::digest(&release_manifest_bytes));
+    let release_manifest_sha256 =
+        canonical_json_sha256(release_manifest).map_err(|error| error.to_string())?;
     let matches = manifest.get("schemaVersion").and_then(Value::as_u64) == Some(2)
         && manifest.get("pluginId").and_then(Value::as_str) == Some(plugin_id)
         && manifest.get("version").and_then(Value::as_str) == Some(version)
@@ -1328,6 +2317,15 @@ fn account_session_secret_name() -> Result<SecretName, ProductError> {
     SecretName::new(MAHAYANA_ACCOUNT_SESSION_SECRET).map_err(secrets_error)
 }
 
+fn managed_secret_name(secret_request_id: &str) -> Result<SecretName, ProductError> {
+    let id = secret_request_id.trim();
+    if id.is_empty() {
+        return Err(ProductError::InvalidParameter("secretRequestId"));
+    }
+    let digest = sha2::Sha256::digest(id.as_bytes());
+    SecretName::new(&format!("MAHAYANA_REQUESTED_SECRET_{digest:X}")).map_err(secrets_error)
+}
+
 fn merge_refreshed_session(session: Value, response: Value, access_token: &str) -> Value {
     let mut updated = session.as_object().cloned().unwrap_or_default();
     if let Some(response) = response.as_object() {
@@ -1376,13 +2374,52 @@ fn jwt_expiration_seconds(token: &str) -> Option<i64> {
         .map(|expires_at| expires_at.timestamp())
 }
 
+fn surface_now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
+
 fn now_seconds() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
         .try_into()
         .unwrap_or(i64::MAX)
+}
+
+fn validate_surface_draft(draft: &MessageDraft) -> Result<(), ProductError> {
+    match draft {
+        MessageDraft::Email {
+            to, subject, body, ..
+        } => {
+            if to.is_empty()
+                || to
+                    .iter()
+                    .any(|recipient| !recipient.contains('@') || recipient.trim().is_empty())
+            {
+                return Err(ProductError::State(
+                    "email draft requires valid recipients".into(),
+                ));
+            }
+            if subject.trim().is_empty() || body.trim().is_empty() {
+                return Err(ProductError::State(
+                    "email draft requires a subject and body".into(),
+                ));
+            }
+        }
+        MessageDraft::Slack { target, body, .. } => {
+            if target.trim().is_empty() || body.trim().is_empty() {
+                return Err(ProductError::State(
+                    "Slack draft requires a target and body".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn secrets_error(error: anyhow::Error) -> ProductError {
@@ -1564,6 +2601,7 @@ pub enum ProductError {
     NotLoggedIn,
     SessionExpired,
     Session(String),
+    State(String),
     Transport(String),
     HttpStatus { status: u16, message: String },
     Response(String),
@@ -1590,6 +2628,7 @@ impl std::fmt::Display for ProductError {
                 "大乘登录已过期且没有可轮换的 refresh token，请重新运行 mahayana login"
             ),
             Self::Session(error) => write!(formatter, "Mahayana account session failed: {error}"),
+            Self::State(error) => write!(formatter, "Mahayana product state failed: {error}"),
             Self::Transport(error) => {
                 write!(formatter, "Mahayana product API transport failed: {error}")
             }
@@ -1722,15 +2761,9 @@ mod tests {
             "runtime": "independent-worker-or-pages",
             "source": {"provider":"github","repository":"bhrumom/fabushi"},
             "releaseManifestPath": "/mahayana/release-manifest.json",
-            "releaseManifestSha256": format!(
-                "{:x}",
-                sha2::Sha256::digest(
-                    serde_json::to_vec(&json!({
-                        "protocol": "mahayana.multi-artifact-release.v1"
-                    }))
-                    .unwrap()
-                )
-            ),
+            "releaseManifestSha256": canonical_json_sha256(&json!({
+                "protocol": "mahayana.multi-artifact-release.v1"
+            })).unwrap(),
         });
         let source = json!({"provider":"github","repository":"bhrumom/fabushi"});
         let release_manifest = json!({"protocol":"mahayana.multi-artifact-release.v1"});
@@ -1824,6 +2857,71 @@ mod tests {
         assert!(session.get("token").is_none());
         assert!(session.get("accessToken").is_none());
         assert!(session.get("refreshToken").is_none());
+    }
+
+    #[test]
+    fn managed_secret_names_are_stable_and_never_embed_request_ids() {
+        let name = managed_secret_name("secret-request-sensitive-value").expect("secret name");
+        let rendered = name.as_str();
+        assert!(rendered.starts_with("MAHAYANA_REQUESTED_SECRET_"));
+        assert!(!rendered.contains("sensitive"));
+        assert_eq!(
+            managed_secret_name("secret-request-sensitive-value").expect("stable secret name"),
+            name
+        );
+        assert_eq!(
+            managed_secret_name("  "),
+            Err(ProductError::InvalidParameter("secretRequestId"))
+        );
+    }
+
+    #[test]
+    fn private_skills_are_written_as_real_codex_skill_files() {
+        let unique = format!(
+            "mahayana-skill-test-{}-{}",
+            std::process::id(),
+            surface_now_millis()
+        );
+        let root = std::env::temp_dir().join(unique);
+        let skill = SkillSummary {
+            id: "skill-real-runtime".into(),
+            name: "Real runtime skill".into(),
+            description: "Runs against the real Codex skill loader.".into(),
+            use_when: "Use when testing skill persistence.".into(),
+            instructions: "Perform the requested action and report the result.".into(),
+            source: SkillSource::Private,
+            publish_state: SkillPublishState::Local,
+            owner_agent_id: None,
+            team_id: None,
+            team_name: None,
+            read_only: None,
+            updated_at_ms: surface_now_millis(),
+        };
+        let client = MahayanaProductClient::new_with_surface_state_path(
+            "https://example.invalid",
+            root.join("session.json"),
+            root.join("product-surface.json"),
+        );
+        let client = MahayanaProductClient {
+            skills_root: root.join("codex-skills"),
+            ..client
+        };
+        client.persist_private_skill(&skill).expect("persist skill");
+        let contents = std::fs::read_to_string(
+            client
+                .skills_root()
+                .join("skill-real-runtime")
+                .join("SKILL.md"),
+        )
+        .expect("read persisted skill");
+        assert!(contents.contains("name: \"Real runtime skill\""));
+        assert!(contents.contains("Use when testing skill persistence."));
+        assert!(contents.contains("Perform the requested action"));
+        client
+            .remove_private_skill(&skill.id)
+            .expect("remove skill");
+        assert!(!client.skills_root().join("skill-real-runtime").exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

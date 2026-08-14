@@ -1,12 +1,16 @@
 [workspace]
 members = [
+    "../../../apps/fabushi-tauri/src-tauri",
     "mahayana-cli",
     "mahayana-agent",
     "mahayana-agent-codex",
     "mahayana-agent-responses",
     "mahayana-conversation",
     "mahayana-core",
+    "mahayana-feature-host",
     "mahayana-ffi",
+    "mahayana-host",
+    "mahayana-host-protocol",
     "mahayana-model",
     "mahayana-miniapp-bridge",
     "mahayana-miniapp-protocol",
@@ -51,6 +55,7 @@ codex-feedback = { path = "../codex-rs/feedback" }
 codex-login = { path = "../codex-rs/login" }
 codex-model-provider-info = { path = "../codex-rs/model-provider-info" }
 codex-protocol = { path = "../codex-rs/protocol" }
+codex-rmcp-client = { path = "../codex-rs/rmcp-client" }
 codex-secrets = { path = "../codex-rs/secrets" }
 codex-tui = { path = "../codex-rs/tui" }
 codex-utils-absolute-path = { path = "../codex-rs/utils/absolute-path" }
@@ -61,6 +66,9 @@ mahayana-agent = { path = "mahayana-agent" }
 mahayana-agent-responses = { path = "mahayana-agent-responses" }
 mahayana-conversation = { path = "mahayana-conversation" }
 mahayana-core = { path = "mahayana-core" }
+mahayana-feature-host = { path = "mahayana-feature-host", default-features = false }
+mahayana-host = { path = "mahayana-host", default-features = false }
+mahayana-host-protocol = { path = "mahayana-host-protocol" }
 mahayana-model = { path = "mahayana-model" }
 mahayana-miniapp-bridge = { path = "mahayana-miniapp-bridge" }
 mahayana-miniapp-protocol = { path = "mahayana-miniapp-protocol" }
@@ -100,13 +108,25 @@ web-sys = { version = "=0.3.103", features = [
     "WorkerGlobalScope",
 ] }
 
+# Developer profiles are intentionally incremental. Release packaging keeps its
+# own size-optimized profile below; PR checks must not pay that cost.
 [profile.dev]
 debug = 0
-incremental = false
+incremental = true
+codegen-units = 256
 
 [profile.test]
 debug = 0
-incremental = false
+incremental = true
+codegen-units = 256
+
+# Fast GitHub Actions profile. Restored target caches can reuse incremental
+# artifacts while retaining the assertions and overflow checks from `test`.
+[profile.ci]
+inherits = "test"
+debug = 0
+incremental = true
+codegen-units = 256
 
 # Native applications ship the Runtime as one embedded library. Keep that
 # library small enough for mobile stores while preserving the audited crate
