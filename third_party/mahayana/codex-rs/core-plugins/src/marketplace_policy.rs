@@ -202,11 +202,75 @@ impl AllowedMarketplaceSource {
     }
 }
 
+fn marketplace_user_config(
+    config_layer_stack: &ConfigLayerStack,
+    codex_home: &Path,
+) -> Option<toml::Value> {
+    let user_config = config_layer_stack.effective_user_config();
+    let has_user_plugin_state = user_config.as_ref().is_some_and(|config| {
+        config
+            .get("marketplaces")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|marketplaces| !marketplaces.is_empty())
+            || config
+                .get("plugins")
+                .and_then(toml::Value::as_table)
+                .is_some_and(|plugins| !plugins.is_empty())
+    });
+    if has_user_plugin_state {
+        return user_config;
+    }
+
+    // Embedded Mahayana deliberately sets `ignore_user_config` so model/auth,
+    // conversation, and unrelated user settings never leak into the isolated
+    // Runtime. The disabled user layer may still appear as an empty layer, so
+    // fall back when it contains no actual plugin state. A marketplace install
+    // writes Codex's standard local marketplace/plugin registration to this
+    // Runtime's private config.toml. Project only those two plugin-state tables;
+    // all other config keys remain ignored.
+    let config_path = codex_home.join("config.toml");
+    let contents = match std::fs::read_to_string(&config_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return user_config,
+        Err(error) => {
+            tracing::warn!(
+                path = %config_path.display(),
+                error = %error,
+                "failed to read isolated Codex marketplace config"
+            );
+            return user_config;
+        }
+    };
+    let config = match toml::from_str::<toml::Value>(&contents) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(
+                path = %config_path.display(),
+                error = %error,
+                "failed to parse isolated Codex marketplace config"
+            );
+            return user_config;
+        }
+    };
+    let table = config.as_table()?;
+    let mut projected = toml::map::Map::new();
+    for key in ["marketplaces", "plugins"] {
+        if let Some(value) = table.get(key) {
+            projected.insert(key.to_string(), value.clone());
+        }
+    }
+    if projected.is_empty() {
+        user_config
+    } else {
+        Some(toml::Value::Table(projected))
+    }
+}
+
 pub(crate) fn project_effective_user_config(
     config_layer_stack: &ConfigLayerStack,
     codex_home: &Path,
 ) -> Option<toml::Value> {
-    let mut user_config = config_layer_stack.effective_user_config()?;
+    let mut user_config = marketplace_user_config(config_layer_stack, codex_home)?;
     let policy = MarketplacePolicy::from_requirements(config_layer_stack.requirements());
     if !policy.is_restricted() {
         return Some(user_config);
@@ -246,7 +310,7 @@ pub fn allowed_configured_marketplace_names(
     config_layer_stack: &ConfigLayerStack,
     codex_home: &Path,
 ) -> HashSet<String> {
-    let Some(user_config) = config_layer_stack.effective_user_config() else {
+    let Some(user_config) = marketplace_user_config(config_layer_stack, codex_home) else {
         return HashSet::new();
     };
     let policy = MarketplacePolicy::from_requirements(config_layer_stack.requirements());

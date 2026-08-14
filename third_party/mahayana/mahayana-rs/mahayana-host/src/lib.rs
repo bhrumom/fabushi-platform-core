@@ -34,6 +34,9 @@ use mahayana_runtime_core::RuntimeError;
 use mahayana_social::MahayanaSocialConversationProvider;
 use mahayana_telegram::TelegramConversationProvider;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -216,8 +219,16 @@ fn build_runtime(
         });
     // Runtime construction is intentionally network-free. Remote marketplace
     // discovery belongs to an explicit product refresh command, not process
-    // startup or every unit test. Official bundled MiniApps are merged below.
-    let configured_mini_apps = create.mini_apps.clone();
+    // startup or every unit test. Valid locally installed repository plugins
+    // are safe to discover from disk before official bundled MiniApps are merged.
+    let inherit_installed_plugins = create.inherit_installed_plugins.unwrap_or(
+        matches!(runtime_config.build_profile, BuildProfile::DesktopFull) && !cfg!(test),
+    );
+    let configured_mini_apps = merge_installed_mini_apps(
+        create.mini_apps.clone(),
+        create.cwd.as_deref(),
+        inherit_installed_plugins,
+    );
     let mini_apps = merge_official_mini_apps(configured_mini_apps);
     let session_token = product_client.session_token().ok();
     let mut builder = RuntimeBuilder::new(runtime_config.clone());
@@ -274,9 +285,7 @@ fn build_runtime(
             .ok_or_else(|| HostError::new("Dacheng Responses base URL is required"))?;
         let settings = CodexAgentConfig {
             codex_home,
-            inherit_installed_plugins: create.inherit_installed_plugins.unwrap_or(
-                matches!(runtime_config.build_profile, BuildProfile::DesktopFull) && !cfg!(test),
-            ),
+            inherit_installed_plugins,
             cwd,
             workspace_roots,
             model: runtime_config.model.model.clone(),
@@ -326,6 +335,79 @@ fn build_runtime(
         .with_provider(Arc::new(miniapp))?
         .build()
         .map_err(HostError::from)
+}
+
+fn merge_installed_mini_apps(
+    mut configured: Vec<MiniAppDefinition>,
+    cwd: Option<&Path>,
+    inherit_installed_plugins: bool,
+) -> Vec<MiniAppDefinition> {
+    if !inherit_installed_plugins {
+        return configured;
+    }
+    let Some(cwd) = cwd else {
+        return configured;
+    };
+    let marketplace_path = cwd.join(".agents/plugins/marketplace.json");
+    let Ok(source) = fs::read_to_string(marketplace_path) else {
+        return configured;
+    };
+    let Ok(marketplace) = serde_json::from_str::<serde_json::Value>(&source) else {
+        return configured;
+    };
+    let mut known = configured
+        .iter()
+        .map(|definition| definition.plugin_id.clone())
+        .collect::<BTreeSet<_>>();
+    let Some(entries) = marketplace
+        .get("plugins")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return configured;
+    };
+    for entry in entries {
+        if entry
+            .pointer("/source/source")
+            .and_then(serde_json::Value::as_str)
+            != Some("local")
+            || entry
+                .pointer("/policy/installation")
+                .and_then(serde_json::Value::as_str)
+                == Some("NOT_AVAILABLE")
+        {
+            continue;
+        }
+        let Some(plugin_id) = entry
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+        else {
+            continue;
+        };
+        if known.contains(plugin_id) {
+            continue;
+        }
+        let manifest_path = cwd
+            .join(".agents/plugins/plugins")
+            .join(plugin_id)
+            .join(".codex-plugin/plugin.json");
+        let Ok(manifest_source) = fs::read_to_string(manifest_path) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&manifest_source) else {
+            continue;
+        };
+        if manifest.get("name").and_then(serde_json::Value::as_str) != Some(plugin_id) {
+            continue;
+        }
+        known.insert(plugin_id.to_string());
+        configured.push(MiniAppDefinition {
+            plugin_id: plugin_id.to_string(),
+            title: plugin_id.to_string(),
+            pinned: false,
+        });
+    }
+    configured
 }
 
 fn merge_official_mini_apps(
