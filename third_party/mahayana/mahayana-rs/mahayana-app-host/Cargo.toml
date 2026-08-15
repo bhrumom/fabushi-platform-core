@@ -1,0 +1,29 @@
+[package]
+name = "mahayana-app-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "mahayana-app-host"
+path = "src/main.rs"
+
+[dependencies]
+mahayana-js-runtime.workspace = true
+mahayana-plugin-runtime.workspace = true
+mahayana-product.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
+mahayana-core.workspace = true
+mahayana-feature-host = { workspace = true, features = ["desktop-full"] }
+mahayana-host.workspace = true
+mahayana-host-protocol.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"

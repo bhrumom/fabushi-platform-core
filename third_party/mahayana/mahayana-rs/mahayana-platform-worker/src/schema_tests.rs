@@ -17,6 +17,19 @@ fn listener_relay_migration_contains_durable_registration_and_event_tables() {
 }
 
 #[test]
+fn remote_computer_migration_keeps_control_plane_separate_from_desktop_data() {
+    assert_eq!(
+        validate_remote_computer_schema(REMOTE_COMPUTER_SCHEMA_V6),
+        Ok(())
+    );
+    assert!(REMOTE_COMPUTER_SCHEMA_V6.contains("remote_computer_sessions"));
+    assert!(REMOTE_COMPUTER_SCHEMA_V6.contains("remote_computer_signals"));
+    assert!(REMOTE_COMPUTER_SCHEMA_V6.contains("device_secret_hash TEXT NOT NULL"));
+    assert!(!REMOTE_COMPUTER_SCHEMA_V6.contains("screenshot_data"));
+    assert!(!REMOTE_COMPUTER_SCHEMA_V6.contains("input_payload"));
+}
+
+#[test]
 fn account_auth_migration_contains_rotating_session_state() {
     assert_eq!(validate_account_auth_schema(ACCOUNT_AUTH_SCHEMA_V2), Ok(()));
 }

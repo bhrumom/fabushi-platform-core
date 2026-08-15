@@ -270,6 +270,8 @@ pub enum RuntimeCommand {
         text: String,
         #[serde(rename = "clientMessageId")]
         client_message_id: Option<String>,
+        #[serde(default)]
+        hidden: bool,
     },
     #[serde(rename = "mahayana.operation.interrupt")]
     Interrupt {
@@ -477,6 +479,8 @@ pub enum RuntimeEvent {
         title: String,
         detail: Option<String>,
         status: RuntimeActivityStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<serde_json::Value>,
     },
     #[serde(rename = "mahayana.operation.completed")]
     OperationCompleted {
@@ -525,6 +529,7 @@ mod tests {
             conversation_id: ConversationId(CODEX_ASSISTANT_CONVERSATION_ID.to_string()),
             text: "你好".to_string(),
             client_message_id: Some("client-1".to_string()),
+            hidden: false,
         };
         let json = serde_json::to_value(command).expect("serialize command");
         assert_eq!(json["@type"], "mahayana.conversation.send");

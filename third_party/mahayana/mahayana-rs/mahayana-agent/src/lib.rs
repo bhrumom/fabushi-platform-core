@@ -27,6 +27,10 @@ pub struct AgentActivity {
     pub title: String,
     pub detail: Option<String>,
     pub status: AgentActivityStatus,
+    /// Original structured provider item when available. Product hosts use this
+    /// for rich surfaces such as subagent/task state without reverse-parsing
+    /// presentation strings. Generic backends may leave it absent.
+    pub metadata: Option<Value>,
 }
 
 #[derive(Debug, Clone)]

@@ -250,7 +250,7 @@ impl MahayanaRuntime {
                 }
                 let conversation_id = capability.conversation_id;
                 let operation_id =
-                    self.start_message(conversation_id.clone(), text, client_message_id)?;
+                    self.start_message(conversation_id.clone(), text, client_message_id, false)?;
                 Ok(RuntimeResponse::CapabilityAccepted {
                     capability_id: capability.id,
                     conversation_id,
@@ -434,8 +434,9 @@ impl MahayanaRuntime {
                 conversation_id,
                 text,
                 client_message_id,
+                hidden,
             } => Ok(RuntimeResponse::Accepted {
-                operation_id: self.start_message(conversation_id, text, client_message_id)?,
+                operation_id: self.start_message(conversation_id, text, client_message_id, hidden)?,
             }),
             RuntimeCommand::Interrupt { operation_id } => {
                 let provider_key = lock(&self.operations)?
@@ -508,6 +509,7 @@ impl MahayanaRuntime {
         conversation_id: ConversationId,
         text: String,
         client_message_id: Option<String>,
+        hidden: bool,
     ) -> Result<OperationId, RuntimeError> {
         if text.trim().is_empty() {
             return Err(RuntimeError::EmptyMessage);
@@ -521,6 +523,7 @@ impl MahayanaRuntime {
             operation_id: operation_id.clone(),
             text,
             client_message_id,
+            hidden,
         };
         let sink: SharedConversationEventSink = Arc::new(RuntimeEventSink {
             provider_key,
@@ -684,10 +687,12 @@ impl ConversationProvider for AgentConversationProvider {
             created_at_ms: now_ms(),
             metadata: Value::Null,
         };
-        self.history
-            .lock()
-            .map_err(|_| ConversationError::Provider("history mutex poisoned".to_string()))?
-            .push(user_message);
+        if !request.hidden {
+            self.history
+                .lock()
+                .map_err(|_| ConversationError::Provider("history mutex poisoned".to_string()))?
+                .push(user_message);
+        }
         let agent_sink: SharedAgentEventSink = Arc::new(AgentEventBridge {
             conversation_id: request.conversation_id.clone(),
             operation_id: request.operation_id.clone(),
@@ -780,6 +785,7 @@ impl AgentEventSink for AgentEventBridge {
                     AgentActivityStatus::Completed => RuntimeActivityStatus::Completed,
                     AgentActivityStatus::Failed => RuntimeActivityStatus::Failed,
                 },
+                metadata: activity.metadata,
             },
             AgentEvent::ApprovalRequested {
                 approval_id,
@@ -957,6 +963,7 @@ mod tests {
                 conversation_id: ConversationId(CODEX_ASSISTANT_CONVERSATION_ID.to_string()),
                 text: "你好".to_string(),
                 client_message_id: None,
+                hidden: false,
             })
             .expect("send message");
         let RuntimeResponse::Accepted { operation_id } = response else {

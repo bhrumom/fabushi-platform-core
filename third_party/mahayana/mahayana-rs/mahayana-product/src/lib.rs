@@ -333,24 +333,36 @@ fn default_surface_bots() -> Vec<BotSummary> {
             id: "mahayana-assistant".into(),
             name: "大乘助手".into(),
             description: "General-purpose Mahayana assistant.".into(),
+            title: String::new(),
             hidden: false,
             avatar: None,
+            avatar_shape: None,
+            avatar_color: None,
+            notifications_enabled: true,
             conversation_id: Some("codex:agent:assistant".into()),
         },
         BotSummary {
             id: "research-bot".into(),
             name: "Research Bot".into(),
             description: "Source verification and research synthesis.".into(),
+            title: String::new(),
             hidden: false,
             avatar: None,
+            avatar_shape: None,
+            avatar_color: None,
+            notifications_enabled: true,
             conversation_id: Some("codex:agent:research".into()),
         },
         BotSummary {
             id: "incident-bot".into(),
             name: "Incident Bot".into(),
             description: "Incident triage and operational coordination.".into(),
+            title: String::new(),
             hidden: true,
             avatar: None,
+            avatar_shape: None,
+            avatar_color: None,
+            notifications_enabled: true,
             conversation_id: Some("codex:agent:incident".into()),
         },
     ]
@@ -861,6 +873,50 @@ impl MahayanaProductClient {
                 .bearer_auth(token)
                 .multipart(form)
                 .send(),
+        )
+    }
+
+    pub fn publish_external_plugin(
+        &self,
+        plugin_id: &str,
+        version: &str,
+        display_name: &str,
+        description: &str,
+        platforms: &[String],
+        source: &Value,
+        release_manifest: &Value,
+    ) -> Result<Value, ProductError> {
+        let plugin_id = safe_path_identifier(plugin_id, "pluginId")?;
+        let version = safe_marketplace_version(version)?;
+        let platforms = platforms
+            .iter()
+            .map(|platform| {
+                if matches!(
+                    platform.as_str(),
+                    "cli" | "desktop" | "mobile" | "web" | "ios" | "android"
+                ) {
+                    Ok(platform.clone())
+                } else {
+                    Err(ProductError::InvalidParameter("platforms"))
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if platforms.is_empty() {
+            return Err(ProductError::InvalidParameter("platforms"));
+        }
+        let token = self.authorization_token(&Value::Null)?;
+        self.post_json(
+            "/v1/marketplace/external-releases",
+            json!({
+                "pluginId": plugin_id,
+                "version": version,
+                "displayName": non_empty(display_name, "displayName")?,
+                "description": description,
+                "platforms": platforms,
+                "source": source,
+                "releaseManifest": release_manifest,
+            }),
+            Some(&token),
         )
     }
 
@@ -1507,6 +1563,153 @@ impl MahayanaProductClient {
                     body["clientRequestId"] = Value::String(client_request_id.to_string());
                 }
                 self.authorized_post(request, "/api/social/messages", body)
+            }
+            "mahayana.remote.computers.list" => {
+                self.authorized_get(request, "/v1/computers", &[])
+            }
+            "mahayana.remote.computer.register" => {
+                let device_id = required_identifier(request, "deviceId")?;
+                let label = required_string(request, "label")?;
+                let device_secret = required_string(request, "deviceSecret")?;
+                self.authorized_post(
+                    request,
+                    "/v1/computers/register",
+                    json!({"deviceId": device_id, "label": label, "deviceSecret": device_secret}),
+                )
+            }
+            "mahayana.remote.computer.heartbeat" => {
+                let device_id = required_identifier(request, "deviceId")?;
+                let device_secret = required_string(request, "deviceSecret")?;
+                self.authorized_post(
+                    request,
+                    "/v1/computers/heartbeat",
+                    json!({"deviceId": device_id, "deviceSecret": device_secret}),
+                )
+            }
+            "mahayana.remote.computer.pair" => {
+                let pairing_code = required_string(request, "pairingCode")?;
+                let label = required_string(request, "label")?;
+                self.authorized_post(
+                    request,
+                    "/v1/computers/pair",
+                    json!({"pairingCode": pairing_code, "label": label}),
+                )
+            }
+            "mahayana.remote.computer.clients" => {
+                let device_id = required_identifier(request, "deviceId")?;
+                self.authorized_get(
+                    request,
+                    &format!("/v1/computers/{device_id}/clients"),
+                    &[],
+                )
+            }
+            "mahayana.remote.computer.client.revoke" => {
+                let device_id = required_identifier(request, "deviceId")?;
+                let client_id = required_identifier(request, "clientId")?;
+                self.authorized_post(
+                    request,
+                    &format!("/v1/computers/{device_id}/clients/{client_id}/revoke"),
+                    json!({}),
+                )
+            }
+            "mahayana.remote.computer.sessions" => {
+                let device_id = required_identifier(request, "deviceId")?;
+                let device_secret = required_string(request, "deviceSecret")?;
+                self.authorized_post(
+                    request,
+                    &format!("/v1/computers/{device_id}/sessions/list"),
+                    json!({"deviceSecret": device_secret}),
+                )
+            }
+            "mahayana.remote.computer.session.create" => {
+                let device_id = required_identifier(request, "deviceId")?;
+                let client_id = required_identifier(request, "clientId")?;
+                self.authorized_post(
+                    request,
+                    &format!("/v1/computers/{device_id}/sessions"),
+                    json!({"clientId": client_id}),
+                )
+            }
+            "mahayana.remote.computer.session.activate" => {
+                let device_id = required_identifier(request, "deviceId")?;
+                let session_id = required_identifier(request, "sessionId")?;
+                let device_secret = required_string(request, "deviceSecret")?;
+                self.authorized_post(
+                    request,
+                    &format!("/v1/computers/{device_id}/sessions/{session_id}/activate"),
+                    json!({"deviceSecret": device_secret}),
+                )
+            }
+            "mahayana.remote.computer.session.close" => {
+                let device_id = required_identifier(request, "deviceId")?;
+                let session_id = required_identifier(request, "sessionId")?;
+                let role = required_identifier(request, "role")?;
+                let mut body = json!({"role": role});
+                if let Some(device_secret) = optional_string(request, "deviceSecret") {
+                    body["deviceSecret"] = Value::String(device_secret.to_string());
+                }
+                if let Some(client_id) = optional_string(request, "clientId") {
+                    body["clientId"] = Value::String(client_id.to_string());
+                }
+                if let Some(mobile_token) = optional_string(request, "mobileToken") {
+                    body["mobileToken"] = Value::String(mobile_token.to_string());
+                }
+                self.authorized_post(
+                    request,
+                    &format!("/v1/computers/{device_id}/sessions/{session_id}/close"),
+                    body,
+                )
+            }
+            "mahayana.remote.computer.signal" => {
+                let device_id = required_identifier(request, "deviceId")?;
+                let session_id = required_identifier(request, "sessionId")?;
+                let sender_role = required_identifier(request, "senderRole")?;
+                let kind = required_identifier(request, "kind")?;
+                let payload = request.get("payload").cloned().unwrap_or(Value::Null);
+                let mut body = json!({
+                    "sessionId": session_id,
+                    "senderRole": sender_role,
+                    "kind": kind,
+                    "payload": payload,
+                });
+                if let Some(device_secret) = optional_string(request, "deviceSecret") {
+                    body["deviceSecret"] = Value::String(device_secret.to_string());
+                }
+                if let Some(client_id) = optional_string(request, "clientId") {
+                    body["clientId"] = Value::String(client_id.to_string());
+                }
+                if let Some(mobile_token) = optional_string(request, "mobileToken") {
+                    body["mobileToken"] = Value::String(mobile_token.to_string());
+                }
+                self.authorized_post(
+                    request,
+                    &format!("/v1/computers/{device_id}/signals"),
+                    body,
+                )
+            }
+            "mahayana.remote.computer.signals.drain" => {
+                let device_id = required_identifier(request, "deviceId")?;
+                let session_id = required_identifier(request, "sessionId")?;
+                let receiver_role = required_identifier(request, "receiverRole")?;
+                let mut body = json!({
+                    "sessionId": session_id,
+                    "receiverRole": receiver_role,
+                    "afterSignalId": request.get("afterSignalId").and_then(Value::as_i64),
+                });
+                if let Some(device_secret) = optional_string(request, "deviceSecret") {
+                    body["deviceSecret"] = Value::String(device_secret.to_string());
+                }
+                if let Some(client_id) = optional_string(request, "clientId") {
+                    body["clientId"] = Value::String(client_id.to_string());
+                }
+                if let Some(mobile_token) = optional_string(request, "mobileToken") {
+                    body["mobileToken"] = Value::String(mobile_token.to_string());
+                }
+                self.authorized_post(
+                    request,
+                    &format!("/v1/computers/{device_id}/signals/drain"),
+                    body,
+                )
             }
             "mahayana.miniapps.registry" => self.miniapp_registry(request),
             other => Err(ProductError::UnsupportedRequest(other.to_string())),

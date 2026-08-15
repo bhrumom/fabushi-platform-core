@@ -1,0 +1,21 @@
+[package]
+name = "mahayana-computer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Consent-gated local desktop capture and input executor shared by Mahayana AI and remote clients."
+publish = false
+
+[lib]
+doctest = false
+
+[dependencies]
+base64 = "0.22"
+mahayana-host-protocol.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+core-foundation-sys = "0.8"
+core-graphics = { version = "0.25", features = ["highsierra"] }
+foreign-types = "0.5"

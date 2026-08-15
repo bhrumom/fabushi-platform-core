@@ -4307,6 +4307,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "convert_case"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "affbf0190ed2caf063e3def54ff444b449371d55c58e513a95ab98eca50adb49"
+dependencies = [
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "cookie"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7539,6 +7548,11 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "hashlink"
@@ -9179,8 +9193,10 @@ dependencies = [
  "codex-rmcp-client",
  "codex-utils-absolute-path",
  "mahayana-agent",
+ "mahayana-computer",
  "mahayana-conversation",
  "mahayana-core",
+ "mahayana-host-protocol",
  "mahayana-platform-core",
  "mahayana-plugin-host",
  "openssl-sys",
@@ -9200,6 +9216,23 @@ dependencies = [
  "serde_json",
  "tokio",
  "ureq 2.12.1",
+]
+
+[[package]]
+name = "mahayana-app-host"
+version = "0.1.0"
+dependencies = [
+ "jni",
+ "mahayana-core",
+ "mahayana-feature-host",
+ "mahayana-host",
+ "mahayana-host-protocol",
+ "mahayana-js-runtime",
+ "mahayana-plugin-runtime",
+ "mahayana-product",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -9223,6 +9256,7 @@ dependencies = [
  "mahayana-platform-client",
  "mahayana-platform-core",
  "mahayana-plugin-host",
+ "mahayana-plugin-runtime",
  "ratatui",
  "rpassword",
  "serde_json",
@@ -9231,6 +9265,19 @@ dependencies = [
  "unicode-width 0.2.1",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "mahayana-computer"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "core-foundation 0.10.1",
+ "core-foundation-sys",
+ "core-graphics",
+ "foreign-types 0.5.0",
+ "mahayana-host-protocol",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -9258,13 +9305,18 @@ dependencies = [
 name = "mahayana-feature-host"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
+ "mahayana-computer",
  "mahayana-core",
  "mahayana-host",
  "mahayana-host-protocol",
  "serde",
  "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
@@ -9309,6 +9361,23 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "mahayana-js-runtime"
+version = "0.1.0"
+dependencies = [
+ "mahayana-plugin-runtime",
+ "reqwest 0.12.28",
+ "rquickjs",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -9419,6 +9488,27 @@ dependencies = [
  "pretty_assertions",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "mahayana-plugin-runtime"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "flate2",
+ "mahayana-platform-core",
+ "reqwest 0.12.28",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha1 0.10.6",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.18",
+ "url",
+ "uuid",
+ "zip",
 ]
 
 [[package]]
@@ -12170,6 +12260,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
 
 [[package]]
+name = "relative-path"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bca40a312222d8ba74837cb474edef44b37f561da5f773981007a10bbaa992b0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "reqwest"
 version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12358,6 +12457,54 @@ dependencies = [
  "libc",
  "rtoolbox",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rquickjs"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e04e4eedfb060b503b5f0a2644abb890b0b3620d3fb674f9455f230014964e4"
+dependencies = [
+ "rquickjs-core",
+ "rquickjs-macro",
+]
+
+[[package]]
+name = "rquickjs-core"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16e4f499ac5b943d97ee6dbc44f23c2c10426f420f7d2f1793d6318911b6608c"
+dependencies = [
+ "hashbrown 0.17.1",
+ "relative-path",
+ "rquickjs-sys",
+]
+
+[[package]]
+name = "rquickjs-macro"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3cbcc8219b70ee2faa08d5339f47f15741cba2ce0cb9640e8495f2ab51293f50"
+dependencies = [
+ "convert_case 0.11.0",
+ "fnv",
+ "ident_case",
+ "indexmap 2.14.0",
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "rquickjs-core",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "rquickjs-sys"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a13ac243b86a74120814ef7e9e30ad5a2c1199b7b9963b1cf7c84e4cdc1cad99"
+dependencies = [
+ "bindgen",
+ "cc",
 ]
 
 [[package]]

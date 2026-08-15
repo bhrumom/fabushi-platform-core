@@ -19,6 +19,7 @@ pub struct SendMessageRequest {
     pub operation_id: OperationId,
     pub text: String,
     pub client_message_id: Option<String>,
+    pub hidden: bool,
 }
 
 #[derive(Debug, Clone)]

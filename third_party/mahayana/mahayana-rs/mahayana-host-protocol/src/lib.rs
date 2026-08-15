@@ -3,6 +3,8 @@
 
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::Value;
+use std::collections::BTreeMap;
 
 pub const HOST_PROTOCOL_VERSION: &str = "1";
 
@@ -55,6 +57,55 @@ pub struct AttachmentContext {
     pub mime_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentStored {
+    pub id: String,
+    pub agent_id: String,
+    pub name: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    pub size_bytes: u64,
+    pub hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentTextResult {
+    pub path: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    pub truncated: bool,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentChunkResult {
+    pub path: String,
+    pub bytes_base64: String,
+    pub total_size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentImageResult {
+    pub path: String,
+    pub data_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -198,11 +249,480 @@ pub struct BotSummary {
     pub id: String,
     pub name: String,
     pub description: String,
+    #[serde(default)]
+    pub title: String,
     pub hidden: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_shape: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_color: Option<String>,
+    #[serde(default = "default_true")]
+    pub notifications_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum GroupSpeaker {
+    User {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    Member {
+        id: String,
+        name: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupMessage {
+    pub id: String,
+    pub speaker: GroupSpeaker,
+    pub content: String,
+    pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupSummary {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub member_ids: Vec<String>,
+    #[serde(default)]
+    pub messages: Vec<GroupMessage>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentPeerMessage {
+    pub id: String,
+    pub from_agent_id: String,
+    pub from_agent_name: String,
+    pub target_id: String,
+    pub target_name: String,
+    pub text: String,
+    pub priority: bool,
+    pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentBroadcastResult {
+    pub total: usize,
+    pub scheduled: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SubagentStatus {
+    Running,
+    Done,
+    Error,
+    Aborted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentSummary {
+    pub id: String,
+    pub parent_agent_id: String,
+    pub subagent_type: String,
+    pub title: String,
+    pub status: SubagentStatus,
+    pub started_at_ms: i64,
+    pub updated_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AsyncTaskKind {
+    Subagent,
+    Shell,
+    CloudAgent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AsyncTaskStatus {
+    Running,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AsyncTaskSummary {
+    pub kind: AsyncTaskKind,
+    pub id: String,
+    pub parent_agent_id: String,
+    pub label: String,
+    pub status: AsyncTaskStatus,
+    pub started_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_type: Option<String>,
+}
+
+pub const TEACH_MAX_DURATION_MS: i64 = 10 * 60 * 1000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TeachEntryPoint {
+    ScreenHover,
+    ComposerMenu,
+    FullscreenTitleBar,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeachRecordingStatus {
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<i64>,
+    pub max_duration_ms: i64,
+}
+
+impl Default for TeachRecordingStatus {
+    fn default() -> Self {
+        Self {
+            state: "idle".into(),
+            agent_id: None,
+            started_at_ms: None,
+            max_duration_ms: TEACH_MAX_DURATION_MS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeachRecordingResult {
+    pub agent_id: String,
+    pub video_path: String,
+    pub started_at_ms: i64,
+    pub ended_at_ms: i64,
+    pub duration_ms: i64,
+    pub saved: bool,
+}
+
+pub const COMPUTER_MAX_WAIT_MS: u64 = 30_000;
+pub const COMPUTER_MAX_ACTIONS_PER_CALL: usize = 10;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ComputerControlOrigin {
+    LocalUi,
+    RemoteMobile,
+    Ai,
+}
+
+impl Default for ComputerControlOrigin {
+    fn default() -> Self {
+        Self::LocalUi
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ComputerActionKind {
+    Screenshot,
+    Click,
+    Move,
+    Drag,
+    Type,
+    Key,
+    Scroll,
+    Wait,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ComputerMouseButton {
+    Left,
+    Right,
+    Middle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ComputerScrollDirection {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerPoint {
+    pub x: i32,
+    pub y: i32,
+}
+
+/// Grok-compatible computer action envelope. Fields intentionally stay flat so
+/// the exact same payload can be produced by the model tool, desktop UI, and a
+/// paired phone without translation-specific semantics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerAction {
+    pub action: ComputerActionKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x2: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y2: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<Vec<ComputerPoint>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub button: Option<ComputerMouseButton>,
+    #[serde(rename = "count", alias = "clickCount", default, skip_serializing_if = "Option::is_none")]
+    pub click_count: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<ComputerScrollDirection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount: Option<i32>,
+    #[serde(rename = "durationMs", alias = "waitMs", default, skip_serializing_if = "Option::is_none")]
+    pub wait_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerStatus {
+    pub platform: String,
+    pub available: bool,
+    pub capture_supported: bool,
+    pub input_supported: bool,
+    pub accessibility_granted: bool,
+    pub screen_recording_granted: bool,
+    pub local_execution_enabled: bool,
+    pub route_egress_locally: bool,
+    pub remote_control_enabled: bool,
+    pub ai_control_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerSnapshot {
+    pub captured_at_ms: i64,
+    pub data_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerActionResult {
+    pub origin: ComputerControlOrigin,
+    pub actions_executed: usize,
+    pub snapshot: ComputerSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryKind {
+    Profile,
+    Log,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryRecord {
+    pub id: String,
+    pub content: String,
+    pub created_at: i64,
+    pub kind: MemoryKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum TrayAction {
+    OpenUrl { label: String, url: String },
+    SwitchModel,
+    DashboardAction {
+        label: String,
+        action: String,
+        args: BTreeMap<String, String>,
+        #[serde(rename = "successMessage", default, skip_serializing_if = "Option::is_none")]
+        success_message: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrayErrorKind {
+    ProviderOverloaded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorTray {
+    pub kind: String,
+    pub id: String,
+    pub agent_id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    pub created_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<TrayErrorKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actions: Option<Vec<TrayAction>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedupe_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AutoReviewBehavior {
+    Allow,
+    Ask,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoReviewRule {
+    pub id: String,
+    pub behavior: AutoReviewBehavior,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LocalToolPermission {
+    Never,
+    Ask,
+    Always,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductHostSettings {
+    pub notifications: bool,
+    pub auto_update_when_idle: bool,
+    pub local_execution: bool,
+    pub route_egress_locally: bool,
+    pub security_keys: bool,
+    pub webauthn_proxy_enabled: bool,
+    pub local_tool_permission: LocalToolPermission,
+    /// Remote control is opt-in because it exposes the user's real desktop to
+    /// paired clients. Pairing still requires an authenticated device session.
+    #[serde(default)]
+    pub remote_control_enabled: bool,
+    /// The local Agent may use the same Computer executor as a paired phone.
+    #[serde(default = "default_true")]
+    pub ai_computer_control_enabled: bool,
+    #[serde(default)]
+    pub auto_review_rules: Vec<AutoReviewRule>,
+}
+
+impl Default for ProductHostSettings {
+    fn default() -> Self {
+        Self {
+            notifications: true,
+            auto_update_when_idle: true,
+            local_execution: true,
+            route_egress_locally: false,
+            security_keys: false,
+            webauthn_proxy_enabled: false,
+            local_tool_permission: LocalToolPermission::Ask,
+            remote_control_enabled: false,
+            ai_computer_control_enabled: true,
+            auto_review_rules: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkflowSource {
+    Workflow,
+    Managed,
+    Plugin,
+    Automation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowTrigger {
+    pub schedule: String,
+    pub is_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowSummary {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub body: String,
+    pub trigger: Option<WorkflowTrigger>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<String>,
+    pub source: WorkflowSource,
+    pub plugin_id: Option<String>,
+    pub published_by_current_user: bool,
+    pub is_enabled_for_agent: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_model_invocation: Option<bool>,
+    pub schedule_description: Option<String>,
+    pub created_at: i64,
+    pub last_run_at: Option<i64>,
+    pub next_run_at: Option<i64>,
+    #[serde(default)]
+    pub helper_scripts: Vec<String>,
+    pub file_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchMessageMatch {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub conversation_id: String,
+    pub entry_id: String,
+    pub role: MessageRole,
+    pub timestamp_ms: i64,
+    pub snippet: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchMediaMatch {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub path: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    pub size_bytes: u64,
+    pub timestamp_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -607,12 +1127,503 @@ pub enum FeatureCommand {
         #[serde(rename = "requestId")]
         request_id: String,
     },
+    #[serde(rename = "bot.create")]
+    BotCreate {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        name: String,
+        #[serde(default)]
+        description: String,
+        #[serde(default)]
+        title: String,
+        #[serde(rename = "avatarShape", default, skip_serializing_if = "Option::is_none")]
+        avatar_shape: Option<String>,
+        #[serde(rename = "avatarColor", default, skip_serializing_if = "Option::is_none")]
+        avatar_color: Option<String>,
+    },
+    #[serde(rename = "bot.update")]
+    BotUpdate {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(rename = "avatarShape", default, skip_serializing_if = "Option::is_none")]
+        avatar_shape: Option<String>,
+        #[serde(rename = "avatarColor", default, skip_serializing_if = "Option::is_none")]
+        avatar_color: Option<String>,
+        #[serde(rename = "notificationsEnabled", default, skip_serializing_if = "Option::is_none")]
+        notifications_enabled: Option<bool>,
+    },
+    #[serde(rename = "bot.clone")]
+    BotClone {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        id: String,
+    },
+    #[serde(rename = "bot.delete")]
+    BotDelete {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        id: String,
+    },
     #[serde(rename = "bot.setHidden")]
     BotSetHidden {
         #[serde(rename = "requestId")]
         request_id: String,
         id: String,
         hidden: bool,
+    },
+    #[serde(rename = "group.list")]
+    GroupList {
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
+    #[serde(rename = "group.create")]
+    GroupCreate {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        name: String,
+        #[serde(default)]
+        description: String,
+        #[serde(rename = "memberIds")]
+        member_ids: Vec<String>,
+    },
+    #[serde(rename = "group.update")]
+    GroupUpdate {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(rename = "memberIds", default, skip_serializing_if = "Option::is_none")]
+        member_ids: Option<Vec<String>>,
+    },
+    #[serde(rename = "group.delete")]
+    GroupDelete {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        id: String,
+    },
+    #[serde(rename = "group.send")]
+    GroupSend {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        id: String,
+        text: String,
+    },
+    #[serde(rename = "agent.send")]
+    AgentSend {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "fromAgentId")]
+        from_agent_id: String,
+        #[serde(rename = "targetId")]
+        target_id: String,
+        text: String,
+        #[serde(default)]
+        priority: bool,
+    },
+    #[serde(rename = "agent.broadcast")]
+    AgentBroadcast {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "targetIds", default, skip_serializing_if = "Option::is_none")]
+        target_ids: Option<Vec<String>>,
+        message: String,
+    },
+    #[serde(rename = "agent.peerHistory")]
+    AgentPeerHistory {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        #[serde(default = "default_peer_history_limit")]
+        limit: usize,
+    },
+    #[serde(rename = "subagent.list")]
+    SubagentList {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+    },
+    #[serde(rename = "asyncTask.list")]
+    AsyncTaskList {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+    },
+    #[serde(rename = "teach.status")]
+    TeachStatus {
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
+    #[serde(rename = "teach.start")]
+    TeachStart {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        #[serde(rename = "entryPoint")]
+        entry_point: TeachEntryPoint,
+    },
+    #[serde(rename = "teach.stop")]
+    TeachStop {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        save: bool,
+    },
+    #[serde(rename = "computer.status")]
+    ComputerStatus {
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
+    #[serde(rename = "computer.screenshot")]
+    ComputerScreenshot {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(default)]
+        origin: ComputerControlOrigin,
+        #[serde(rename = "sessionId", default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
+    #[serde(rename = "computer.action")]
+    ComputerAction {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(default)]
+        origin: ComputerControlOrigin,
+        #[serde(rename = "agentId", default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
+        #[serde(rename = "sessionId", default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        action: ComputerAction,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        then: Vec<ComputerAction>,
+    },
+    #[serde(rename = "remoteComputer.register")]
+    RemoteComputerRegister {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "deviceId")]
+        device_id: String,
+        label: String,
+    },
+    #[serde(rename = "remoteComputer.heartbeat")]
+    RemoteComputerHeartbeat {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "deviceId")]
+        device_id: String,
+    },
+    #[serde(rename = "remoteComputer.clients")]
+    RemoteComputerClients {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "deviceId")]
+        device_id: String,
+    },
+    #[serde(rename = "remoteComputer.clientRevoke")]
+    RemoteComputerClientRevoke {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "deviceId")]
+        device_id: String,
+        #[serde(rename = "clientId")]
+        client_id: String,
+    },
+    #[serde(rename = "remoteComputer.sessions")]
+    RemoteComputerSessions {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "deviceId")]
+        device_id: String,
+    },
+    #[serde(rename = "remoteComputer.sessionActivate")]
+    RemoteComputerSessionActivate {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "deviceId")]
+        device_id: String,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+    },
+    #[serde(rename = "remoteComputer.sessionClose")]
+    RemoteComputerSessionClose {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "deviceId")]
+        device_id: String,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+    },
+    #[serde(rename = "remoteComputer.signal")]
+    RemoteComputerSignal {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "deviceId")]
+        device_id: String,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        kind: String,
+        payload: Value,
+    },
+    #[serde(rename = "remoteComputer.signalDrain")]
+    RemoteComputerSignalDrain {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "deviceId")]
+        device_id: String,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(rename = "afterSignalId", default)]
+        after_signal_id: i64,
+    },
+    #[serde(rename = "memory.list")]
+    MemoryList {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        #[serde(default = "default_memory_limit")]
+        limit: usize,
+    },
+    #[serde(rename = "memory.add")]
+    MemoryAdd {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        content: String,
+        kind: MemoryKind,
+    },
+    #[serde(rename = "memory.remove")]
+    MemoryRemove {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        id: String,
+    },
+    #[serde(rename = "memory.clear")]
+    MemoryClear {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+    },
+    #[serde(rename = "tray.list")]
+    TrayList {
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
+    #[serde(rename = "tray.dismiss")]
+    TrayDismiss {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        id: String,
+    },
+    #[serde(rename = "tray.clear")]
+    TrayClear {
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
+    #[serde(rename = "tray.clearForAgent")]
+    TrayClearForAgent {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+    },
+    #[serde(rename = "workflow.list")]
+    WorkflowList {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+    },
+    #[serde(rename = "workflow.upsert")]
+    WorkflowUpsert {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        name: String,
+        #[serde(default)]
+        description: String,
+        body: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger: Option<WorkflowTrigger>,
+        #[serde(rename = "sourceRef", default, skip_serializing_if = "Option::is_none")]
+        source_ref: Option<String>,
+    },
+    #[serde(rename = "workflow.setEnabled")]
+    WorkflowSetEnabled {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        id: String,
+        enabled: bool,
+    },
+    #[serde(rename = "workflow.delete")]
+    WorkflowDelete {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        id: String,
+    },
+    #[serde(rename = "workflow.run")]
+    WorkflowRun {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        id: String,
+    },
+    #[serde(rename = "workflow.importMarkdown")]
+    WorkflowImportMarkdown {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        markdown: String,
+        #[serde(rename = "fallbackName", default, skip_serializing_if = "Option::is_none")]
+        fallback_name: Option<String>,
+    },
+    #[serde(rename = "workflow.importLiveSource")]
+    WorkflowImportLiveSource {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        source: String,
+        #[serde(rename = "fallbackName", default, skip_serializing_if = "Option::is_none")]
+        fallback_name: Option<String>,
+    },
+    #[serde(rename = "attachment.upload")]
+    AttachmentUpload {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        filename: String,
+        #[serde(rename = "mimeType", default, skip_serializing_if = "Option::is_none")]
+        mime_type: Option<String>,
+        #[serde(rename = "bytesBase64")]
+        bytes_base64: String,
+    },
+    #[serde(rename = "attachment.readText")]
+    AttachmentReadText {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        path: String,
+    },
+    #[serde(rename = "attachment.readChunk")]
+    AttachmentReadChunk {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        path: String,
+        offset: u64,
+        length: u64,
+    },
+    #[serde(rename = "attachment.readImage")]
+    AttachmentReadImage {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        path: String,
+    },
+    #[serde(rename = "search.messages")]
+    SearchMessages {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        query: String,
+        #[serde(default = "default_search_limit")]
+        limit: usize,
+    },
+    #[serde(rename = "search.media")]
+    SearchMedia {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(default)]
+        query: String,
+        #[serde(default = "default_search_limit")]
+        limit: usize,
+    },
+    #[serde(rename = "mcp.list")]
+    McpList {
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
+    #[serde(rename = "mcp.apps")]
+    McpApps {
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
+    #[serde(rename = "mcp.oauthLogin")]
+    McpOauthLogin {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        server: String,
+    },
+    #[serde(rename = "mcp.oauthLogout")]
+    McpOauthLogout {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        server: String,
+    },
+    #[serde(rename = "mcp.refresh")]
+    McpRefresh {
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
+    #[serde(rename = "mcp.toolCall")]
+    McpToolCall {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        server: String,
+        tool: String,
+        #[serde(default)]
+        arguments: Value,
+    },
+    #[serde(rename = "settings.get")]
+    SettingsGet {
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
+    #[serde(rename = "settings.update")]
+    SettingsUpdate {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        settings: ProductHostSettings,
+    },
+    #[serde(rename = "audit.list")]
+    AuditList {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        #[serde(default = "default_audit_limit")]
+        limit: usize,
     },
     #[serde(rename = "draft.resolve")]
     DraftResolve {
@@ -695,7 +1706,66 @@ impl FeatureCommand {
             | Self::SkillUnpublish { request_id, .. }
             | Self::SkillSync { request_id, .. }
             | Self::BotList { request_id }
+            | Self::BotCreate { request_id, .. }
+            | Self::BotUpdate { request_id, .. }
+            | Self::BotClone { request_id, .. }
+            | Self::BotDelete { request_id, .. }
             | Self::BotSetHidden { request_id, .. }
+            | Self::GroupList { request_id }
+            | Self::GroupCreate { request_id, .. }
+            | Self::GroupUpdate { request_id, .. }
+            | Self::GroupDelete { request_id, .. }
+            | Self::GroupSend { request_id, .. }
+            | Self::AgentSend { request_id, .. }
+            | Self::AgentBroadcast { request_id, .. }
+            | Self::AgentPeerHistory { request_id, .. }
+            | Self::SubagentList { request_id, .. }
+            | Self::AsyncTaskList { request_id, .. }
+            | Self::TeachStatus { request_id }
+            | Self::TeachStart { request_id, .. }
+            | Self::TeachStop { request_id, .. }
+            | Self::ComputerStatus { request_id }
+            | Self::ComputerScreenshot { request_id, .. }
+            | Self::ComputerAction { request_id, .. }
+            | Self::RemoteComputerRegister { request_id, .. }
+            | Self::RemoteComputerHeartbeat { request_id, .. }
+            | Self::RemoteComputerClients { request_id, .. }
+            | Self::RemoteComputerClientRevoke { request_id, .. }
+            | Self::RemoteComputerSessions { request_id, .. }
+            | Self::RemoteComputerSessionActivate { request_id, .. }
+            | Self::RemoteComputerSessionClose { request_id, .. }
+            | Self::RemoteComputerSignal { request_id, .. }
+            | Self::RemoteComputerSignalDrain { request_id, .. }
+            | Self::MemoryList { request_id, .. }
+            | Self::MemoryAdd { request_id, .. }
+            | Self::MemoryRemove { request_id, .. }
+            | Self::MemoryClear { request_id, .. }
+            | Self::TrayList { request_id }
+            | Self::TrayDismiss { request_id, .. }
+            | Self::TrayClear { request_id }
+            | Self::TrayClearForAgent { request_id, .. }
+            | Self::WorkflowList { request_id, .. }
+            | Self::WorkflowUpsert { request_id, .. }
+            | Self::WorkflowSetEnabled { request_id, .. }
+            | Self::WorkflowDelete { request_id, .. }
+            | Self::WorkflowRun { request_id, .. }
+            | Self::WorkflowImportMarkdown { request_id, .. }
+            | Self::WorkflowImportLiveSource { request_id, .. }
+            | Self::AttachmentUpload { request_id, .. }
+            | Self::AttachmentReadText { request_id, .. }
+            | Self::AttachmentReadChunk { request_id, .. }
+            | Self::AttachmentReadImage { request_id, .. }
+            | Self::SearchMessages { request_id, .. }
+            | Self::SearchMedia { request_id, .. }
+            | Self::McpList { request_id }
+            | Self::McpApps { request_id }
+            | Self::McpOauthLogin { request_id, .. }
+            | Self::McpOauthLogout { request_id, .. }
+            | Self::McpRefresh { request_id }
+            | Self::McpToolCall { request_id, .. }
+            | Self::SettingsGet { request_id }
+            | Self::SettingsUpdate { request_id, .. }
+            | Self::AuditList { request_id, .. }
             | Self::DraftResolve { request_id, .. }
             | Self::SecretProvide { request_id, .. }
             | Self::ListenerList { request_id }
@@ -711,6 +1781,22 @@ impl FeatureCommand {
 
 const fn default_true() -> bool {
     true
+}
+
+const fn default_memory_limit() -> usize {
+    1000
+}
+
+const fn default_search_limit() -> usize {
+    50
+}
+
+const fn default_peer_history_limit() -> usize {
+    200
+}
+
+const fn default_audit_limit() -> usize {
+    200
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -919,7 +2005,288 @@ pub enum HostEvent {
         bots: Vec<BotSummary>,
     },
     #[serde(rename = "bot.changed")]
-    BotChanged { timestamp: String, bot: BotSummary },
+    BotChanged {
+        timestamp: String,
+        action: String,
+        bot: BotSummary,
+    },
+    #[serde(rename = "group.listed")]
+    GroupListed {
+        timestamp: String,
+        groups: Vec<GroupSummary>,
+    },
+    #[serde(rename = "group.changed")]
+    GroupChanged {
+        timestamp: String,
+        action: String,
+        group: GroupSummary,
+    },
+    #[serde(rename = "group.delta")]
+    GroupDelta {
+        timestamp: String,
+        #[serde(rename = "groupId")]
+        group_id: String,
+        #[serde(rename = "memberId")]
+        member_id: String,
+        #[serde(rename = "memberName")]
+        member_name: String,
+        #[serde(rename = "operationId")]
+        operation_id: String,
+        delta: String,
+    },
+    #[serde(rename = "agent.peerMessage")]
+    AgentPeerMessageChanged {
+        timestamp: String,
+        message: AgentPeerMessage,
+    },
+    #[serde(rename = "agent.peerHistory")]
+    AgentPeerHistoryListed {
+        timestamp: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        messages: Vec<AgentPeerMessage>,
+    },
+    #[serde(rename = "agent.broadcasted")]
+    AgentBroadcasted {
+        timestamp: String,
+        result: AgentBroadcastResult,
+    },
+    #[serde(rename = "agent.backgroundStarted")]
+    AgentBackgroundStarted {
+        timestamp: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        #[serde(rename = "agentName")]
+        agent_name: String,
+        #[serde(rename = "operationId")]
+        operation_id: String,
+        source: String,
+    },
+    #[serde(rename = "agent.backgroundDelta")]
+    AgentBackgroundDelta {
+        timestamp: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        #[serde(rename = "agentName")]
+        agent_name: String,
+        #[serde(rename = "operationId")]
+        operation_id: String,
+        source: String,
+        delta: String,
+    },
+    #[serde(rename = "agent.backgroundMessage")]
+    AgentBackgroundMessage {
+        timestamp: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        #[serde(rename = "agentName")]
+        agent_name: String,
+        #[serde(rename = "operationId")]
+        operation_id: String,
+        source: String,
+        text: String,
+    },
+    #[serde(rename = "agent.backgroundFinished")]
+    AgentBackgroundFinished {
+        timestamp: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        #[serde(rename = "agentName")]
+        agent_name: String,
+        #[serde(rename = "operationId")]
+        operation_id: String,
+        source: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    #[serde(rename = "subagent.listed")]
+    SubagentListed {
+        timestamp: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        subagents: Vec<SubagentSummary>,
+    },
+    #[serde(rename = "subagent.changed")]
+    SubagentChanged {
+        timestamp: String,
+        subagent: SubagentSummary,
+    },
+    #[serde(rename = "asyncTask.listed")]
+    AsyncTaskListed {
+        timestamp: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        tasks: Vec<AsyncTaskSummary>,
+    },
+    #[serde(rename = "asyncTask.changed")]
+    AsyncTaskChanged {
+        timestamp: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        tasks: Vec<AsyncTaskSummary>,
+    },
+    #[serde(rename = "teach.changed")]
+    TeachChanged {
+        timestamp: String,
+        status: TeachRecordingStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<TeachRecordingResult>,
+    },
+    #[serde(rename = "computer.status")]
+    ComputerStatusChanged {
+        timestamp: String,
+        #[serde(rename = "requestId")]
+        request_id: String,
+        status: ComputerStatus,
+    },
+    #[serde(rename = "computer.snapshot")]
+    ComputerSnapshotCaptured {
+        timestamp: String,
+        #[serde(rename = "requestId")]
+        request_id: String,
+        origin: ComputerControlOrigin,
+        snapshot: ComputerSnapshot,
+    },
+    #[serde(rename = "computer.result")]
+    ComputerActionCompleted {
+        timestamp: String,
+        #[serde(rename = "requestId")]
+        request_id: String,
+        result: ComputerActionResult,
+    },
+    #[serde(rename = "remoteComputer.changed")]
+    RemoteComputerChanged {
+        timestamp: String,
+        #[serde(rename = "requestId")]
+        request_id: String,
+        action: String,
+        data: Value,
+    },
+    #[serde(rename = "memory.listed")]
+    MemoryListed {
+        timestamp: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        memories: Vec<MemoryRecord>,
+        count: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        location: Option<String>,
+    },
+    #[serde(rename = "memory.changed")]
+    MemoryChanged {
+        timestamp: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        action: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        memory: Option<MemoryRecord>,
+    },
+    #[serde(rename = "tray.listed")]
+    TrayListed {
+        timestamp: String,
+        trays: Vec<ErrorTray>,
+    },
+    #[serde(rename = "tray.changed")]
+    TrayChanged {
+        timestamp: String,
+        action: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tray: Option<ErrorTray>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+    },
+    #[serde(rename = "workflow.listed")]
+    WorkflowListed {
+        timestamp: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        workflows: Vec<WorkflowSummary>,
+    },
+    #[serde(rename = "workflow.changed")]
+    WorkflowChanged {
+        timestamp: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        action: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workflow: Option<WorkflowSummary>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+    },
+    #[serde(rename = "attachment.stored")]
+    AttachmentStored {
+        timestamp: String,
+        attachment: AttachmentStored,
+    },
+    #[serde(rename = "attachment.text")]
+    AttachmentTextRead {
+        timestamp: String,
+        result: AttachmentTextResult,
+    },
+    #[serde(rename = "attachment.chunk")]
+    AttachmentChunkRead {
+        timestamp: String,
+        result: AttachmentChunkResult,
+    },
+    #[serde(rename = "attachment.image")]
+    AttachmentImageRead {
+        timestamp: String,
+        result: AttachmentImageResult,
+    },
+    #[serde(rename = "search.messages")]
+    SearchMessagesListed {
+        timestamp: String,
+        query: String,
+        matches: Vec<SearchMessageMatch>,
+    },
+    #[serde(rename = "search.media")]
+    SearchMediaListed {
+        timestamp: String,
+        query: String,
+        matches: Vec<SearchMediaMatch>,
+    },
+    #[serde(rename = "mcp.listed")]
+    McpListed {
+        timestamp: String,
+        servers: Vec<Value>,
+    },
+    #[serde(rename = "mcp.apps")]
+    McpAppsListed {
+        timestamp: String,
+        apps: Vec<Value>,
+    },
+    #[serde(rename = "mcp.oauth")]
+    McpOauthChanged {
+        timestamp: String,
+        server: String,
+        #[serde(rename = "authorizationUrl", default, skip_serializing_if = "Option::is_none")]
+        authorization_url: Option<String>,
+        #[serde(default)]
+        removed: bool,
+    },
+    #[serde(rename = "mcp.refreshed")]
+    McpRefreshed {
+        timestamp: String,
+    },
+    #[serde(rename = "mcp.toolResult")]
+    McpToolResult {
+        timestamp: String,
+        server: String,
+        tool: String,
+        result: Value,
+    },
+    #[serde(rename = "settings.changed")]
+    SettingsChanged {
+        timestamp: String,
+        settings: ProductHostSettings,
+    },
+    #[serde(rename = "audit.listed")]
+    AuditListed {
+        timestamp: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        records: Vec<Value>,
+    },
     #[serde(rename = "listener.listed")]
     ListenerListed {
         timestamp: String,
@@ -1088,6 +2455,44 @@ impl HostEvent {
             Self::SkillChanged { .. } => "skill.changed",
             Self::BotListed { .. } => "bot.listed",
             Self::BotChanged { .. } => "bot.changed",
+            Self::GroupListed { .. } => "group.listed",
+            Self::GroupChanged { .. } => "group.changed",
+            Self::GroupDelta { .. } => "group.delta",
+            Self::AgentPeerMessageChanged { .. } => "agent.peerMessage",
+            Self::AgentPeerHistoryListed { .. } => "agent.peerHistory",
+            Self::AgentBroadcasted { .. } => "agent.broadcasted",
+            Self::AgentBackgroundStarted { .. } => "agent.backgroundStarted",
+            Self::AgentBackgroundDelta { .. } => "agent.backgroundDelta",
+            Self::AgentBackgroundMessage { .. } => "agent.backgroundMessage",
+            Self::AgentBackgroundFinished { .. } => "agent.backgroundFinished",
+            Self::SubagentListed { .. } => "subagent.listed",
+            Self::SubagentChanged { .. } => "subagent.changed",
+            Self::AsyncTaskListed { .. } => "asyncTask.listed",
+            Self::AsyncTaskChanged { .. } => "asyncTask.changed",
+            Self::TeachChanged { .. } => "teach.changed",
+            Self::ComputerStatusChanged { .. } => "computer.status",
+            Self::ComputerSnapshotCaptured { .. } => "computer.snapshot",
+            Self::ComputerActionCompleted { .. } => "computer.result",
+            Self::RemoteComputerChanged { .. } => "remoteComputer.changed",
+            Self::MemoryListed { .. } => "memory.listed",
+            Self::MemoryChanged { .. } => "memory.changed",
+            Self::TrayListed { .. } => "tray.listed",
+            Self::TrayChanged { .. } => "tray.changed",
+            Self::WorkflowListed { .. } => "workflow.listed",
+            Self::WorkflowChanged { .. } => "workflow.changed",
+            Self::AttachmentStored { .. } => "attachment.stored",
+            Self::AttachmentTextRead { .. } => "attachment.text",
+            Self::AttachmentChunkRead { .. } => "attachment.chunk",
+            Self::AttachmentImageRead { .. } => "attachment.image",
+            Self::SearchMessagesListed { .. } => "search.messages",
+            Self::SearchMediaListed { .. } => "search.media",
+            Self::McpListed { .. } => "mcp.listed",
+            Self::McpAppsListed { .. } => "mcp.apps",
+            Self::McpOauthChanged { .. } => "mcp.oauth",
+            Self::McpRefreshed { .. } => "mcp.refreshed",
+            Self::McpToolResult { .. } => "mcp.toolResult",
+            Self::SettingsChanged { .. } => "settings.changed",
+            Self::AuditListed { .. } => "audit.listed",
             Self::ListenerListed { .. } => "listener.listed",
             Self::ListenerChanged { .. } => "listener.changed",
             Self::UpdateChanged { .. } => "update.changed",

@@ -1105,6 +1105,7 @@ impl AgentEventSink for MiniAppEventBridge {
                     AgentActivityStatus::Completed => RuntimeActivityStatus::Completed,
                     AgentActivityStatus::Failed => RuntimeActivityStatus::Failed,
                 },
+                metadata: activity.metadata,
             },
             AgentEvent::ApprovalRequested {
                 approval_id,

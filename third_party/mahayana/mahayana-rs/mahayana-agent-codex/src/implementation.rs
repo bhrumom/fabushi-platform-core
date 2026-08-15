@@ -94,6 +94,9 @@ use mahayana_core::MessageRole;
 use mahayana_core::ModelTokenUsage;
 use mahayana_core::ModelTokenUsageSnapshot;
 use mahayana_core::OperationId;
+use mahayana_host_protocol::ComputerAction;
+use mahayana_host_protocol::ComputerControlOrigin;
+use mahayana_host_protocol::LocalToolPermission;
 use mahayana_plugin_host::LocalPlugin;
 use mahayana_plugin_host::select_runtime_with_availability;
 use serde_json::Value;
@@ -106,6 +109,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Weak;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
@@ -449,6 +453,7 @@ enum ApprovalResponseKind {
     Permissions { requested: Value },
     LegacyExec,
     LegacyPatch,
+    ComputerDynamic { params: DynamicToolCallParams },
 }
 
 struct CodexAgentInner {
@@ -458,6 +463,7 @@ struct CodexAgentInner {
     next_request_id: AtomicI64,
     operations: Mutex<HashMap<OperationId, ActiveOperation>>,
     approvals: Mutex<HashMap<ApprovalId, PendingApproval>>,
+    computer_session_approved: AtomicBool,
     conversation_providers: Vec<Arc<dyn ConversationProvider>>,
 }
 
@@ -557,16 +563,86 @@ impl CodexAgentInner {
         }
     }
 
+    async fn resolve_dynamic_tool_response(
+        &self,
+        request_id: RequestId,
+        response: DynamicToolCallResponse,
+    ) -> Result<(), AgentError> {
+        let response = serde_json::to_value(response)
+            .map_err(|error| AgentError::Backend(error.to_string()))?;
+        self.requests
+            .resolve_server_request(request_id, response)
+            .await
+            .map_err(|error| AgentError::Backend(error.to_string()))
+    }
+
+    async fn handle_dynamic_tool_request(
+        &self,
+        request_id: RequestId,
+        params: DynamicToolCallParams,
+    ) -> Result<(), AgentError> {
+        if params.namespace.as_deref() == Some("mahayana") && params.tool == "computer" {
+            let policy = mahayana_computer::control_policy();
+            if !policy.local_execution_enabled || !policy.ai_control_enabled {
+                return self
+                    .resolve_dynamic_tool_response(
+                        request_id,
+                        dynamic_tool_error("AI computer control is disabled on this computer"),
+                    )
+                    .await;
+            }
+            if policy.local_tool_permission == LocalToolPermission::Never {
+                return self
+                    .resolve_dynamic_tool_response(
+                        request_id,
+                        dynamic_tool_error("AI local-tool permission is set to Never"),
+                    )
+                    .await;
+            }
+            let session_approved = self.computer_session_approved.load(Ordering::Relaxed);
+            if policy.local_tool_permission == LocalToolPermission::Ask && !session_approved {
+                let action = params
+                    .arguments
+                    .get("action")
+                    .and_then(Value::as_str)
+                    .unwrap_or("computer");
+                let description = params
+                    .arguments
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or("AI wants to interact with the user's computer");
+                let details = json!({
+                    "kind": "local-tool",
+                    "capability": "computer.control",
+                    "reason": description,
+                    "subject": format!("Computer · {action}"),
+                    "detail": params.arguments.to_string(),
+                    "location": "local",
+                    "proposedRule": "Allow AI computer control on this computer",
+                });
+                return self
+                    .remember_or_reject(
+                        request_id,
+                        ApprovalResponseKind::ComputerDynamic {
+                            params: params.clone(),
+                        },
+                        &params.thread_id,
+                        Some(&params.turn_id),
+                        "AI 请求控制这台电脑",
+                        details,
+                    )
+                    .await;
+            }
+        }
+        let response = self.execute_dynamic_tool(params).await;
+        self.resolve_dynamic_tool_response(request_id, response).await
+    }
+
     async fn handle_server_request(&self, request: ServerRequest) -> Result<(), AgentError> {
         match request {
             ServerRequest::DynamicToolCall { request_id, params } => {
-                let response = self.execute_dynamic_tool(params).await;
-                let response = serde_json::to_value(response)
-                    .map_err(|error| AgentError::Backend(error.to_string()))?;
-                self.requests
-                    .resolve_server_request(request_id, response)
-                    .await
-                    .map_err(|error| AgentError::Backend(error.to_string()))
+                self.handle_dynamic_tool_request(request_id, params).await
             }
             ServerRequest::CommandExecutionRequestApproval { request_id, params } => {
                 let details = serde_json::to_value(&params)
@@ -647,11 +723,121 @@ impl CodexAgentInner {
         }
     }
 
+    fn emit_computer_activity(
+        &self,
+        params: &DynamicToolCallParams,
+        status: AgentActivityStatus,
+        detail: Option<String>,
+    ) {
+        let Ok(Some(events)) = self.operation_sink(&params.thread_id, Some(&params.turn_id)) else {
+            return;
+        };
+        let action = params
+            .arguments
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("computer");
+        let _ = events.emit(AgentEvent::Activity {
+            activity: AgentActivity {
+                step_id: params.call_id.clone(),
+                kind: "computer".into(),
+                title: format!("Computer · {action}"),
+                detail,
+                status,
+                metadata: Some(json!({
+                    "type": "computerUse",
+                    "origin": "ai",
+                    "arguments": params.arguments,
+                })),
+            },
+        });
+    }
+
+    async fn execute_computer_dynamic_tool(
+        &self,
+        params: &DynamicToolCallParams,
+    ) -> DynamicToolCallResponse {
+        let mut primary_value = params.arguments.clone();
+        if let Some(object) = primary_value.as_object_mut() {
+            object.remove("then");
+        }
+        let primary = match serde_json::from_value::<ComputerAction>(primary_value) {
+            Ok(action) => action,
+            Err(error) => return dynamic_tool_error(&format!("invalid Computer action: {error}")),
+        };
+        let follow_ups = match params.arguments.get("then") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(value) => match serde_json::from_value::<Vec<ComputerAction>>(value.clone()) {
+                Ok(actions) => actions,
+                Err(error) => {
+                    return dynamic_tool_error(&format!("invalid Computer then sequence: {error}"));
+                }
+            },
+        };
+        let mut actions = Vec::with_capacity(1 + follow_ups.len());
+        actions.push(primary);
+        actions.extend(follow_ups);
+        self.emit_computer_activity(
+            params,
+            AgentActivityStatus::Running,
+            Some(params.arguments.to_string()),
+        );
+        let execute_actions = actions.clone();
+        let result = match tokio::task::spawn_blocking(move || {
+            mahayana_computer::execute(&execute_actions, ComputerControlOrigin::Ai)
+        })
+        .await
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => {
+                self.emit_computer_activity(
+                    params,
+                    AgentActivityStatus::Failed,
+                    Some(error.to_string()),
+                );
+                return dynamic_tool_error(&error.to_string());
+            }
+            Err(error) => {
+                self.emit_computer_activity(
+                    params,
+                    AgentActivityStatus::Failed,
+                    Some(error.to_string()),
+                );
+                return dynamic_tool_error(&format!("Computer executor stopped: {error}"));
+            }
+        };
+        self.emit_computer_activity(
+            params,
+            AgentActivityStatus::Completed,
+            Some(format!("{} action(s) completed", result.actions_executed)),
+        );
+        DynamicToolCallResponse {
+            content_items: vec![
+                DynamicToolCallOutputContentItem::InputText {
+                    text: json!({
+                        "ok": true,
+                        "actionsExecuted": result.actions_executed,
+                        "capturedAtMs": result.snapshot.captured_at_ms,
+                        "width": result.snapshot.width,
+                        "height": result.snapshot.height,
+                        "message": "Computer action ran on this user's computer. The image is the resulting screen."
+                    })
+                    .to_string(),
+                },
+                DynamicToolCallOutputContentItem::InputImage {
+                    image_url: result.snapshot.data_url,
+                },
+            ],
+            success: true,
+        }
+    }
+
     async fn execute_dynamic_tool(&self, params: DynamicToolCallParams) -> DynamicToolCallResponse {
         if params.namespace.as_deref() != Some("mahayana") {
             return dynamic_tool_error("不支持的工具命名空间");
         }
         let result = match params.tool.as_str() {
+            "computer" => return self.execute_computer_dynamic_tool(&params).await,
             "list_conversations" => {
                 let mut conversations = Vec::new();
                 for provider in &self.conversation_providers {
@@ -1244,6 +1430,7 @@ fn thread_item_activity(
         } else {
             requested_status
         },
+        metadata: Some(serialized),
     })
 }
 
@@ -1447,6 +1634,7 @@ impl CodexAgentBackend {
             next_request_id: AtomicI64::new(1),
             operations: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
+            computer_session_approved: AtomicBool::new(false),
             conversation_providers: settings.conversation_providers,
         });
         tokio::spawn(dispatch_events(client, Arc::downgrade(&inner)));
@@ -1563,12 +1751,34 @@ impl AgentBackend for CodexAgentBackend {
             .map_err(|_| AgentError::Backend("approval mutex poisoned".into()))?
             .remove(&resolution.approval_id)
             .ok_or_else(|| AgentError::ApprovalNotFound(resolution.approval_id.clone()))?;
-        let response = approval_response(pending.response_kind, resolution.decision);
-        self.inner
-            .requests
-            .resolve_server_request(pending.request_id, response)
-            .await
-            .map_err(|error| AgentError::Backend(error.to_string()))
+        match pending.response_kind {
+            ApprovalResponseKind::ComputerDynamic { params } => {
+                let response = match resolution.decision {
+                    ApprovalDecision::Accept | ApprovalDecision::AcceptForSession => {
+                        if resolution.decision == ApprovalDecision::AcceptForSession {
+                            self.inner
+                                .computer_session_approved
+                                .store(true, Ordering::Relaxed);
+                        }
+                        self.inner.execute_computer_dynamic_tool(&params).await
+                    }
+                    ApprovalDecision::Decline | ApprovalDecision::Cancel => {
+                        dynamic_tool_error("User declined AI computer control")
+                    }
+                };
+                self.inner
+                    .resolve_dynamic_tool_response(pending.request_id, response)
+                    .await
+            }
+            response_kind => {
+                let response = approval_response(response_kind, resolution.decision);
+                self.inner
+                    .requests
+                    .resolve_server_request(pending.request_id, response)
+                    .await
+                    .map_err(|error| AgentError::Backend(error.to_string()))
+            }
+        }
     }
 
     async fn list_mcp_servers(&self) -> Result<Vec<Value>, AgentError> {
@@ -2265,11 +2475,77 @@ fn executable_file(path: &Path) -> bool {
     true
 }
 
+fn computer_action_core_schema(include_screenshot: bool) -> Value {
+    let actions = if include_screenshot {
+        json!(["screenshot", "click", "move", "drag", "type", "key", "scroll", "wait"])
+    } else {
+        json!(["click", "move", "drag", "type", "key", "scroll", "wait"])
+    };
+    json!({
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": actions,
+                "description": "What to do on this user's computer. Every call returns one fresh screenshot after all actions finish."
+            },
+            "x": {"type": "integer", "description": "X pixel in display space, origin top-left. Omit for click/move/scroll to use the current cursor."},
+            "y": {"type": "integer", "description": "Y pixel in display space, origin top-left. Omit for click/move/scroll to use the current cursor."},
+            "x2": {"type": "integer", "description": "Drag end X when path is omitted."},
+            "y2": {"type": "integer", "description": "Drag end Y when path is omitted."},
+            "path": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}},
+                    "required": ["x", "y"],
+                    "additionalProperties": false
+                },
+                "description": "Ordered drag path. At least two points are required when used."
+            },
+            "text": {"type": "string", "description": "Unicode text for type."},
+            "key": {"type": "string", "description": "Key or chord such as Return, ctrl+a, command+l, Alt+Left."},
+            "button": {"type": "string", "enum": ["left", "right", "middle"], "description": "Mouse button for click or drag, default left."},
+            "count": {"type": "integer", "minimum": 1, "maximum": 3, "description": "Click count: 1, 2, or 3."},
+            "direction": {"type": "string", "enum": ["up", "down", "left", "right"], "description": "Scroll direction; runtime default down."},
+            "amount": {"type": "integer", "description": "Scroll amount in clicks, default 3."},
+            "durationMs": {"type": "integer", "minimum": 0, "maximum": 30000, "description": "Wait duration in milliseconds; runtime default 1000 and max 30000."},
+            "description": {"type": "string", "description": "Concise intended UI target and purpose, especially for click and drag."}
+        },
+        "required": ["action"],
+        "additionalProperties": false
+    })
+}
+
+fn computer_tool_schema() -> Value {
+    let mut schema = computer_action_core_schema(true);
+    let follow_up = computer_action_core_schema(false);
+    if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        properties.insert(
+            "then".into(),
+            json!({
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 9,
+                "items": follow_up,
+                "description": "Up to 9 known follow-up actions executed in order in this same call. Use separate calls when a later step depends on seeing the previous rendered screen."
+            }),
+        );
+    }
+    schema
+}
+
 fn mahayana_dynamic_tools() -> Vec<DynamicToolSpec> {
     vec![DynamicToolSpec::Namespace(DynamicToolNamespaceSpec {
         name: "mahayana".into(),
-        description: "操作 App 内置大乘 Runtime 的本地工作区与联系人会话。".into(),
+        description: "操作用户这台电脑、App 内置大乘 Runtime 的本地工作区与联系人会话。".into(),
         tools: vec![
+            DynamicToolNamespaceTool::Function(DynamicToolFunctionSpec {
+                name: "computer".into(),
+                description: "控制安装 Fabushi 的用户电脑。支持 screenshot、click、move、drag、type、key、scroll、wait；坐标原点在屏幕左上角。每次调用在全部动作结束后返回最终屏幕截图。只有在用户启用 AI 电脑控制并通过本机审批策略后才能执行。".into(),
+                input_schema: computer_tool_schema(),
+                defer_loading: false,
+            }),
             DynamicToolNamespaceTool::Function(DynamicToolFunctionSpec {
                 name: "list_conversations".into(),
                 description: "列出当前大乘 Runtime 中可供 Codex 接入的联系人会话。".into(),
@@ -2393,6 +2669,9 @@ fn approval_response(kind: ApprovalResponseKind, decision: ApprovalDecision) -> 
                 ApprovalDecision::Cancel => "abort",
             }
         }),
+        ApprovalResponseKind::ComputerDynamic { .. } => {
+            unreachable!("Computer dynamic approvals resolve by executing the suspended tool call")
+        }
     }
 }
 
@@ -2422,6 +2701,25 @@ mod tests {
             approval_response(ApprovalResponseKind::LegacyExec, ApprovalDecision::Cancel),
             json!({"decision": "abort"})
         );
+    }
+
+    #[test]
+    fn computer_tool_schema_matches_grok_batching_and_field_names() {
+        let schema = computer_tool_schema();
+        let properties = schema["properties"].as_object().expect("properties");
+        assert!(properties.contains_key("count"));
+        assert!(properties.contains_key("durationMs"));
+        assert!(!properties.contains_key("clickCount"));
+        assert!(!properties.contains_key("waitMs"));
+        let primary = properties["action"]["enum"].as_array().expect("primary actions");
+        assert!(primary.iter().any(|value| value == "screenshot"));
+        let follow_up = &properties["then"];
+        assert_eq!(follow_up["maxItems"], 9);
+        let follow_actions = follow_up["items"]["properties"]["action"]["enum"]
+            .as_array()
+            .expect("follow-up actions");
+        assert!(!follow_actions.iter().any(|value| value == "screenshot"));
+        assert_eq!(follow_actions.len(), 7);
     }
 
     #[test]
