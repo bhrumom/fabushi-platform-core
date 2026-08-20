@@ -441,6 +441,9 @@ pub struct MahayanaProductClient {
     session_path: PathBuf,
     /// Shared non-secret product state used by CLI and native application shells.
     surface_state_path: PathBuf,
+    /// Short-lived browser-login poll proofs live in caller-owned private files.
+    /// They never need OS keyring access and are removed on terminal auth states.
+    browser_login_poll_dir: PathBuf,
     skills_root: PathBuf,
     secrets_manager: SecretsManager,
     managed_secrets: SecretsManager,
@@ -560,10 +563,12 @@ impl MahayanaProductClient {
             .filter(|path| !path.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
+        let browser_login_poll_dir = mahayana_home.join("browser-login");
         let client = Self {
             api_base_url: api_base_url.into().trim_end_matches('/').to_string(),
             session_path,
             surface_state_path: surface_state_path.into(),
+            browser_login_poll_dir,
             skills_root: default_codex_skills_root(),
             secrets_manager: SecretsManager::new_with_namespace(
                 mahayana_home.clone(),
@@ -2334,6 +2339,13 @@ impl MahayanaProductClient {
         Ok(None)
     }
 
+    fn browser_login_poll_secret_path(&self, attempt_id: &str) -> Result<PathBuf, ProductError> {
+        let attempt_id = safe_path_identifier(attempt_id, "attemptId")?;
+        Ok(self
+            .browser_login_poll_dir
+            .join(format!("{attempt_id}.poll-secret")))
+    }
+
     fn save_browser_login_poll_secret(
         &self,
         attempt_id: &str,
@@ -2344,28 +2356,45 @@ impl MahayanaProductClient {
                 "browser login poll secret is invalid".into(),
             ));
         }
-        let name = browser_login_poll_secret_name(attempt_id)?;
-        self.managed_secrets
-            .set(&SecretScope::Global, &name, poll_secret)
-            .map_err(secrets_error)
+        let path = self.browser_login_poll_secret_path(attempt_id)?;
+        // This verifier is short-lived attempt state, not an account credential.
+        // Keeping it in a mode-0600 app-data file preserves secure browser-login
+        // resume without asking macOS Keychain to authorize a frequently changing
+        // helper binary. It never crosses the renderer or appears in a URL.
+        write_private_file(&path, poll_secret)
     }
 
     fn load_browser_login_poll_secret(
         &self,
         attempt_id: &str,
     ) -> Result<Option<String>, ProductError> {
-        let name = browser_login_poll_secret_name(attempt_id)?;
-        self.managed_secrets
-            .get(&SecretScope::Global, &name)
-            .map_err(secrets_error)
+        let path = self.browser_login_poll_secret_path(attempt_id)?;
+        match std::fs::read_to_string(&path) {
+            Ok(value) => {
+                let value = value.trim();
+                if value.len() < 32 || value.len() > 256 {
+                    return Err(ProductError::Session(
+                        "stored browser login poll secret is invalid".into(),
+                    ));
+                }
+                Ok(Some(value.to_string()))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(ProductError::Session(format!(
+                "read browser login poll state: {error}"
+            ))),
+        }
     }
 
     fn remove_browser_login_poll_secret(&self, attempt_id: &str) -> Result<(), ProductError> {
-        let name = browser_login_poll_secret_name(attempt_id)?;
-        self.managed_secrets
-            .delete(&SecretScope::Global, &name)
-            .map(|_| ())
-            .map_err(secrets_error)
+        let path = self.browser_login_poll_secret_path(attempt_id)?;
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(ProductError::Session(format!(
+                "remove browser login poll state: {error}"
+            ))),
+        }
     }
 
     fn save_session(&self, session: &Value) -> Result<(), ProductError> {
@@ -2653,11 +2682,6 @@ fn safe_test_account_token(value: &str) -> Result<&str, ProductError> {
     } else {
         Err(ProductError::InvalidParameter("testAccountToken"))
     }
-}
-
-fn browser_login_poll_secret_name(attempt_id: &str) -> Result<SecretName, ProductError> {
-    let attempt_id = safe_path_identifier(attempt_id, "attemptId")?;
-    managed_secret_name(&format!("browser-login-poll:{attempt_id}"))
 }
 
 fn account_session_secret_name() -> Result<SecretName, ProductError> {
@@ -3235,6 +3259,59 @@ mod tests {
         assert!(session.get("token").is_none());
         assert!(session.get("accessToken").is_none());
         assert!(session.get("refreshToken").is_none());
+    }
+
+    #[test]
+    fn browser_login_poll_secrets_use_private_files_without_keyring() {
+        let unique = format!(
+            "mahayana-browser-poll-test-{}-{}",
+            std::process::id(),
+            surface_now_millis()
+        );
+        let root = std::env::temp_dir().join(unique);
+        let client = MahayanaProductClient::new_with_surface_state_path(
+            "https://example.invalid",
+            root.join("session.json"),
+            root.join("product-surface.json"),
+        );
+        let attempt_id = "attempt-private-poll-1234";
+        let poll_secret = "p".repeat(64);
+
+        client
+            .save_browser_login_poll_secret(attempt_id, &poll_secret)
+            .expect("save poll secret");
+        let path = client
+            .browser_login_poll_secret_path(attempt_id)
+            .expect("poll path");
+        assert!(path.starts_with(root.join("browser-login")));
+        assert!(!path.starts_with(root.join("secrets")));
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read poll secret"),
+            poll_secret
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path)
+                    .expect("poll metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        assert_eq!(
+            client
+                .load_browser_login_poll_secret(attempt_id)
+                .expect("load poll secret"),
+            Some(poll_secret)
+        );
+        client
+            .remove_browser_login_poll_secret(attempt_id)
+            .expect("remove poll secret");
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
