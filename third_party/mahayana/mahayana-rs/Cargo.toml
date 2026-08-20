@@ -6,6 +6,8 @@ members = [
     "mahayana-agent-codex",
     "mahayana-agent-responses",
     "mahayana-app-host",
+    "mahayana-app-host-desktop",
+    "mahayana-app-host-mobile",
     "mahayana-conversation",
     "mahayana-core",
     "mahayana-computer",
@@ -85,7 +87,7 @@ mahayana-platform-core = { path = "mahayana-platform-core" }
 mahayana-plugin-host = { path = "mahayana-plugin-host" }
 mahayana-plugin-runtime = { path = "mahayana-plugin-runtime" }
 mahayana-js-runtime = { path = "mahayana-js-runtime" }
-mahayana-product = { path = "mahayana-product" }
+mahayana-product = { package = "mahayana-platform-client", path = "mahayana-product" }
 mahayana-runtime = { path = "mahayana-runtime" }
 mahayana-social = { path = "mahayana-social" }
 mahayana-telegram = { path = "mahayana-telegram" }

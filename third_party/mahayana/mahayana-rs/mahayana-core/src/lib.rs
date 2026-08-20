@@ -3,6 +3,7 @@
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -248,6 +249,21 @@ pub enum RuntimeCommand {
     McpOauthLogin { server: String },
     #[serde(rename = "mahayana.mcp.oauth.logout")]
     McpOauthLogout { server: String },
+    #[serde(rename = "mahayana.mcp.remove")]
+    McpRemove { server: String },
+    #[serde(rename = "mahayana.mcp.customInstructions")]
+    McpCustomInstructions,
+    #[serde(rename = "mahayana.mcp.setCustomInstructions")]
+    McpSetCustomInstructions {
+        server: String,
+        instructions: String,
+    },
+    #[serde(rename = "mahayana.mcp.setToolDisabled")]
+    McpSetToolDisabled {
+        server: String,
+        tool: String,
+        disabled: bool,
+    },
     #[serde(rename = "mahayana.mcp.refresh")]
     McpRefresh,
     #[serde(rename = "mahayana.mcp.tool.call")]
@@ -351,6 +367,19 @@ pub enum RuntimeResponse {
         authorization_url: Option<String>,
         #[serde(default)]
         removed: bool,
+    },
+    #[serde(rename = "mahayana.mcp.removed")]
+    McpRemoved { server: String, removed: bool },
+    #[serde(rename = "mahayana.mcp.customInstructions")]
+    McpCustomInstructions {
+        instructions: HashMap<String, String>,
+    },
+    #[serde(rename = "mahayana.mcp.customInstructionsUpdated")]
+    McpCustomInstructionsUpdated { server: String },
+    #[serde(rename = "mahayana.mcp.toolDisabledUpdated")]
+    McpToolDisabledUpdated {
+        server: String,
+        disabled_tools: Vec<String>,
     },
     #[serde(rename = "mahayana.mcp.refreshed")]
     McpRefreshed,

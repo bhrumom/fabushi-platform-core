@@ -9222,17 +9222,32 @@ dependencies = [
 name = "mahayana-app-host"
 version = "0.1.0"
 dependencies = [
- "jni",
  "mahayana-core",
  "mahayana-feature-host",
  "mahayana-host",
  "mahayana-host-protocol",
  "mahayana-js-runtime",
+ "mahayana-platform-client",
  "mahayana-plugin-runtime",
- "mahayana-product",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "mahayana-app-host-desktop"
+version = "0.1.0"
+dependencies = [
+ "mahayana-app-host",
+]
+
+[[package]]
+name = "mahayana-app-host-mobile"
+version = "0.1.0"
+dependencies = [
+ "jni 0.21.1",
+ "mahayana-app-host",
+ "serde_json",
 ]
 
 [[package]]
@@ -9508,7 +9523,7 @@ dependencies = [
  "thiserror 2.0.18",
  "url",
  "uuid",
- "zip",
+ "zip 2.4.2",
 ]
 
 [[package]]
@@ -12490,7 +12505,7 @@ dependencies = [
  "fnv",
  "ident_case",
  "indexmap 2.14.0",
- "proc-macro-crate",
+ "proc-macro-crate 3.4.0",
  "proc-macro2",
  "quote",
  "rquickjs-core",

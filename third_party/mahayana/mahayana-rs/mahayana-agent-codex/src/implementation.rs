@@ -58,7 +58,9 @@ use codex_config::McpServerTransportConfig;
 use codex_core::McpManager;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
+use codex_core::config::edit::ConfigEditsBuilder;
 use codex_core::config::find_codex_home;
+use codex_core::config::load_global_mcp_servers;
 use codex_core::plugin_workbench::mcp_app_orchestration_profile;
 use codex_core_plugins::PluginsManager;
 use codex_core_plugins::loader::load_plugin_mcp_servers;
@@ -636,7 +638,8 @@ impl CodexAgentInner {
             }
         }
         let response = self.execute_dynamic_tool(params).await;
-        self.resolve_dynamic_tool_response(request_id, response).await
+        self.resolve_dynamic_tool_response(request_id, response)
+            .await
     }
 
     async fn handle_server_request(&self, request: ServerRequest) -> Result<(), AgentError> {
@@ -1642,6 +1645,49 @@ impl CodexAgentBackend {
     }
 }
 
+fn mcp_custom_instructions_path(codex_home: &Path) -> PathBuf {
+    codex_home.join("fabushi-mcp-custom-instructions.json")
+}
+
+fn load_mcp_custom_instructions(codex_home: &Path) -> Result<HashMap<String, String>, AgentError> {
+    let path = mcp_custom_instructions_path(codex_home);
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(error) => {
+            return Err(AgentError::Backend(format!(
+                "failed to read MCP custom instructions: {error}"
+            )));
+        }
+    };
+    let mut instructions =
+        serde_json::from_str::<HashMap<String, String>>(&contents).map_err(|error| {
+            AgentError::Backend(format!("invalid MCP custom instructions: {error}"))
+        })?;
+    instructions
+        .retain(|server, instruction| !server.trim().is_empty() && !instruction.trim().is_empty());
+    Ok(instructions)
+}
+
+fn save_mcp_custom_instructions(
+    codex_home: &Path,
+    instructions: &HashMap<String, String>,
+) -> Result<(), AgentError> {
+    std::fs::create_dir_all(codex_home).map_err(|error| {
+        AgentError::Backend(format!("failed to create MCP settings directory: {error}"))
+    })?;
+    let path = mcp_custom_instructions_path(codex_home);
+    let temporary = path.with_extension("json.tmp");
+    let serialized = serde_json::to_vec_pretty(instructions).map_err(|error| {
+        AgentError::Backend(format!("serialize MCP custom instructions: {error}"))
+    })?;
+    std::fs::write(&temporary, serialized)
+        .map_err(|error| AgentError::Backend(format!("write MCP custom instructions: {error}")))?;
+    std::fs::rename(&temporary, &path)
+        .map_err(|error| AgentError::Backend(format!("commit MCP custom instructions: {error}")))?;
+    Ok(())
+}
+
 #[async_trait]
 impl AgentBackend for CodexAgentBackend {
     async fn start_thread(
@@ -1884,6 +1930,111 @@ impl AgentBackend for CodexAgentBackend {
         .map_err(|error| {
             AgentError::Backend(format!("failed to delete OAuth credentials: {error}"))
         })
+    }
+
+    async fn mcp_custom_instructions(&self) -> Result<HashMap<String, String>, AgentError> {
+        load_mcp_custom_instructions(&self.inner.config.codex_home)
+    }
+
+    async fn set_mcp_custom_instructions(
+        &self,
+        server: &str,
+        instructions: &str,
+    ) -> Result<(), AgentError> {
+        let server = server.trim();
+        if server.is_empty() || server.len() > 200 {
+            return Err(AgentError::Backend("invalid MCP server name".into()));
+        }
+        let instructions = instructions.trim();
+        if instructions.len() > 20_000 {
+            return Err(AgentError::Backend(
+                "MCP custom instructions exceed 20000 characters".into(),
+            ));
+        }
+        let mut settings = load_mcp_custom_instructions(&self.inner.config.codex_home)?;
+        if instructions.is_empty() {
+            settings.remove(server);
+        } else {
+            settings.insert(server.to_string(), instructions.to_string());
+        }
+        save_mcp_custom_instructions(&self.inner.config.codex_home, &settings)
+    }
+
+    async fn set_mcp_tool_disabled(
+        &self,
+        server: &str,
+        tool: &str,
+        disabled: bool,
+    ) -> Result<Vec<String>, AgentError> {
+        let server = server.trim();
+        let tool = tool.trim();
+        if server.is_empty() || server.len() > 200 || tool.is_empty() || tool.len() > 240 {
+            return Err(AgentError::Backend(
+                "invalid MCP server or tool name".into(),
+            ));
+        }
+        let codex_home = self.inner.config.codex_home.to_path_buf();
+        let mut servers = load_global_mcp_servers(&codex_home)
+            .await
+            .map_err(|error| AgentError::Backend(format!("failed to load MCP servers: {error}")))?;
+        let config = servers.get_mut(server).ok_or_else(|| {
+            AgentError::Backend(format!(
+                "MCP server is not a user-managed global configuration: {server}"
+            ))
+        })?;
+        let mut disabled_tools = config.disabled_tools.clone().unwrap_or_default();
+        if disabled {
+            if !disabled_tools.iter().any(|existing| existing == tool) {
+                disabled_tools.push(tool.to_string());
+            }
+        } else {
+            disabled_tools.retain(|existing| existing != tool);
+        }
+        disabled_tools.sort();
+        disabled_tools.dedup();
+        config.disabled_tools = (!disabled_tools.is_empty()).then(|| disabled_tools.clone());
+        ConfigEditsBuilder::new(&codex_home)
+            .replace_mcp_servers(&servers)
+            .apply()
+            .await
+            .map_err(|error| {
+                AgentError::Backend(format!("failed to persist MCP tool filter: {error}"))
+            })?;
+        self.refresh_mcp_servers().await?;
+        Ok(disabled_tools)
+    }
+
+    async fn remove_mcp_server(&self, server: &str) -> Result<bool, AgentError> {
+        let server = server.trim();
+        if server.is_empty() {
+            return Err(AgentError::Backend(
+                "MCP server name must not be empty".into(),
+            ));
+        }
+        let codex_home = self.inner.config.codex_home.to_path_buf();
+        let mut servers = load_global_mcp_servers(&codex_home)
+            .await
+            .map_err(|error| AgentError::Backend(format!("failed to load MCP servers: {error}")))?;
+        let Some(removed_config) = servers.remove(server) else {
+            return Ok(false);
+        };
+        ConfigEditsBuilder::new(&codex_home)
+            .replace_mcp_servers(&servers)
+            .apply()
+            .await
+            .map_err(|error| {
+                AgentError::Backend(format!("failed to persist MCP removal: {error}"))
+            })?;
+        if let McpServerTransportConfig::StreamableHttp { url, .. } = &removed_config.transport {
+            let _ = delete_oauth_tokens(
+                server,
+                url,
+                self.inner.config.mcp_oauth_credentials_store_mode,
+                self.inner.config.auth_keyring_backend_kind(),
+            );
+        }
+        self.refresh_mcp_servers().await?;
+        Ok(true)
     }
 
     async fn refresh_mcp_servers(&self) -> Result<(), AgentError> {
@@ -2477,7 +2628,16 @@ fn executable_file(path: &Path) -> bool {
 
 fn computer_action_core_schema(include_screenshot: bool) -> Value {
     let actions = if include_screenshot {
-        json!(["screenshot", "click", "move", "drag", "type", "key", "scroll", "wait"])
+        json!([
+            "screenshot",
+            "click",
+            "move",
+            "drag",
+            "type",
+            "key",
+            "scroll",
+            "wait"
+        ])
     } else {
         json!(["click", "move", "drag", "type", "key", "scroll", "wait"])
     };
@@ -2704,14 +2864,16 @@ mod tests {
     }
 
     #[test]
-    fn computer_tool_schema_matches_grok_batching_and_field_names() {
+    fn computer_tool_schema_preserves_batching_and_field_names() {
         let schema = computer_tool_schema();
         let properties = schema["properties"].as_object().expect("properties");
         assert!(properties.contains_key("count"));
         assert!(properties.contains_key("durationMs"));
         assert!(!properties.contains_key("clickCount"));
         assert!(!properties.contains_key("waitMs"));
-        let primary = properties["action"]["enum"].as_array().expect("primary actions");
+        let primary = properties["action"]["enum"]
+            .as_array()
+            .expect("primary actions");
         assert!(primary.iter().any(|value| value == "screenshot"));
         let follow_up = &properties["then"];
         assert_eq!(follow_up["maxItems"], 9);

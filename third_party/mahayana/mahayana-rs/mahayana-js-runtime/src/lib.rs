@@ -1209,11 +1209,19 @@ pub fn discover_deepseek_bundle(root: &Path) -> Result<Vec<DeepSeekBundleEntry>,
             .and_then(Value::as_str)
             .map(|value| root.join(value.trim_start_matches("./")))
             .filter(|path| path.is_file())
-            .or_else(|| root.join("cordis.patch.yml").is_file().then(|| root.join("cordis.patch.yml")))
+            .or_else(|| {
+                root.join("cordis.patch.yml")
+                    .is_file()
+                    .then(|| root.join("cordis.patch.yml"))
+            })
     } else {
-        root.join("cordis.patch.yml").is_file().then(|| root.join("cordis.patch.yml"))
+        root.join("cordis.patch.yml")
+            .is_file()
+            .then(|| root.join("cordis.patch.yml"))
     };
-    let Some(patch) = patch else { return Ok(Vec::new()); };
+    let Some(patch) = patch else {
+        return Ok(Vec::new());
+    };
     if !patch.starts_with(&root) {
         return Err(JsRuntimeError::InvalidPlugin(
             "DeepSeek bundle patch escapes plugin root".into(),
@@ -1230,7 +1238,11 @@ pub fn discover_deepseek_bundle(root: &Path) -> Result<Vec<DeepSeekBundleEntry>,
     Ok(entries)
 }
 
-fn collect_bundle_entries(value: &Value, hint: Option<&str>, output: &mut Vec<DeepSeekBundleEntry>) {
+fn collect_bundle_entries(
+    value: &Value,
+    hint: Option<&str>,
+    output: &mut Vec<DeepSeekBundleEntry>,
+) {
     match value {
         Value::Array(items) => {
             for (index, item) in items.iter().enumerate() {
@@ -1262,8 +1274,14 @@ fn collect_bundle_entries(value: &Value, hint: Option<&str>, output: &mut Vec<De
                 output.push(DeepSeekBundleEntry {
                     id,
                     name: name.to_string(),
-                    config: map.get("config").cloned().unwrap_or_else(|| serde_json::json!({})),
-                    disabled: map.get("disabled").and_then(Value::as_bool).unwrap_or(false),
+                    config: map
+                        .get("config")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({})),
+                    disabled: map
+                        .get("disabled")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
                     inject,
                 });
                 return;
@@ -1400,13 +1418,18 @@ pub fn scan_package_compatibility(root: &Path) -> Result<CompatibilityReport, Js
     for module in modules {
         match module.as_str() {
             "node:path" | "node:events" | "node:buffer" | "node:process" | "node:os"
-            | "node:url" | "node:util" | "node:assert" | "node:querystring"
-            | "node:crypto" => supported_modules.push(module),
+            | "node:url" | "node:util" | "node:assert" | "node:querystring" | "node:crypto" => {
+                supported_modules.push(module)
+            }
             "node:fs" | "node:fs/promises" | "node:http" | "node:https" => {
                 capability_required_modules.push(module)
             }
-            "node:child_process" | "node:worker_threads" | "node:net" | "node:tls"
-            | "node:dgram" | "node:cluster" => desktop_only_modules.push(module),
+            "node:child_process"
+            | "node:worker_threads"
+            | "node:net"
+            | "node:tls"
+            | "node:dgram"
+            | "node:cluster" => desktop_only_modules.push(module),
             _ => unsupported_modules.push(module),
         }
     }
@@ -1518,10 +1541,23 @@ pub struct PluginDescription {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostEvent {
-    ServiceRegistered { plugin_id: String, service: String },
-    ServiceUnregistered { plugin_id: String, service: String },
-    ToolRegistered { plugin_id: String, tool: String, metadata_json: String },
-    ToolUnregistered { plugin_id: String, tool: String },
+    ServiceRegistered {
+        plugin_id: String,
+        service: String,
+    },
+    ServiceUnregistered {
+        plugin_id: String,
+        service: String,
+    },
+    ToolRegistered {
+        plugin_id: String,
+        tool: String,
+        metadata_json: String,
+    },
+    ToolUnregistered {
+        plugin_id: String,
+        tool: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1580,7 +1616,9 @@ impl SharedModules {
     }
 
     fn bump_revision(&self) -> u64 {
-        self.revision.fetch_add(1, Ordering::Relaxed).saturating_add(1)
+        self.revision
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1)
     }
 
     fn revision(&self) -> u64 {
@@ -1633,7 +1671,10 @@ impl Loader for CompatLoader {
             .canonicalize()
             .map_err(|error| JsError::new_loading_message(name, error.to_string()))?;
         if !self.modules.allowed(&canonical) {
-            return Err(JsError::new_loading_message(name, "module path is outside plugin roots"));
+            return Err(JsError::new_loading_message(
+                name,
+                "module path is outside plugin roots",
+            ));
         }
         let mut source = fs::read_to_string(&canonical)
             .map_err(|error| JsError::new_loading_message(name, error.to_string()))?;
@@ -1713,12 +1754,12 @@ impl DeepSeekJsHost {
                 continue;
             }
             let resolved = self.resolve_bundle_entry(&canonical_root, &entry.name)?;
-            let relative = resolved
-                .strip_prefix(&canonical_root)
-                .map_err(|_| JsRuntimeError::InvalidPlugin(format!(
+            let relative = resolved.strip_prefix(&canonical_root).map_err(|_| {
+                JsRuntimeError::InvalidPlugin(format!(
                     "bundle entry {} resolves outside installed package",
                     entry.name
-                )))?;
+                ))
+            })?;
             let state = self.register_plugin_with_grants(
                 &runtime_id,
                 &canonical_root,
@@ -1929,11 +1970,12 @@ impl DeepSeekJsHost {
         };
         self.plugins.insert(plugin_id.to_string(), restored);
         if self.plugins[plugin_id].enabled {
-            self.reconcile().map_err(|rollback| JsRuntimeError::UpdateRollback {
-                plugin_id: plugin_id.to_string(),
-                candidate: candidate_error.clone(),
-                rollback: rollback.to_string(),
-            })?;
+            self.reconcile()
+                .map_err(|rollback| JsRuntimeError::UpdateRollback {
+                    plugin_id: plugin_id.to_string(),
+                    candidate: candidate_error.clone(),
+                    rollback: rollback.to_string(),
+                })?;
         }
         Err(JsRuntimeError::UpdateFailed {
             plugin_id: plugin_id.to_string(),
@@ -1968,12 +2010,14 @@ impl DeepSeekJsHost {
 
     pub fn active_plugins(&self) -> Result<Vec<String>, JsRuntimeError> {
         let json = self.call_string_function("__mahayanaActivePlugins", ())?;
-        serde_json::from_str(&json).map_err(|error| JsRuntimeError::InvalidPlugin(error.to_string()))
+        serde_json::from_str(&json)
+            .map_err(|error| JsRuntimeError::InvalidPlugin(error.to_string()))
     }
 
     pub fn registered_tools(&self) -> Result<Vec<String>, JsRuntimeError> {
         let json = self.call_string_function("__mahayanaTools", ())?;
-        serde_json::from_str(&json).map_err(|error| JsRuntimeError::InvalidPlugin(error.to_string()))
+        serde_json::from_str(&json)
+            .map_err(|error| JsRuntimeError::InvalidPlugin(error.to_string()))
     }
 
     pub fn call_tool_json(&self, name: &str, arguments: &Value) -> Result<Value, JsRuntimeError> {
@@ -2070,18 +2114,29 @@ impl DeepSeekJsHost {
         let wrapper = format!(
             "import * as plugin from {module_specifier}; globalThis.__mahayanaRegisterModule({plugin_json}, plugin);"
         );
-        self.context.with(|ctx| {
-            Module::evaluate(ctx.clone(), format!("mahayana:describe:{plugin_id}"), wrapper)?
+        self.context
+            .with(|ctx| {
+                Module::evaluate(
+                    ctx.clone(),
+                    format!("mahayana:describe:{plugin_id}"),
+                    wrapper,
+                )?
                 .finish::<()>()?;
-            let function: Function = ctx.globals().get("__mahayanaDescribe")?;
-            let json: String = function.call((plugin_id.to_string(),))?;
-            serde_json::from_str(&json).map_err(|error| JsError::new_from_js_message("string", "PluginDescription", error.to_string()))
-        }).map_err(JsRuntimeError::Js)
+                let function: Function = ctx.globals().get("__mahayanaDescribe")?;
+                let json: String = function.call((plugin_id.to_string(),))?;
+                serde_json::from_str(&json).map_err(|error| {
+                    JsError::new_from_js_message("string", "PluginDescription", error.to_string())
+                })
+            })
+            .map_err(JsRuntimeError::Js)
     }
 
     fn dependencies_ready(&self, plugin_id: &str) -> bool {
         self.plugins.get(plugin_id).is_some_and(|plugin| {
-            plugin.inject.iter().all(|service| self.services.get(service).is_some())
+            plugin
+                .inject
+                .iter()
+                .all(|service| self.services.get(service).is_some())
         })
     }
 
@@ -2116,7 +2171,10 @@ impl DeepSeekJsHost {
             if plugin.enabled
                 && plugin.state != PluginState::Active
                 && plugin.state != PluginState::Failed
-                && !plugin.inject.iter().all(|service| self.services.get(service).is_some())
+                && !plugin
+                    .inject
+                    .iter()
+                    .all(|service| self.services.get(service).is_some())
             {
                 let _ = id;
                 plugin.state = PluginState::Pending;
@@ -2134,10 +2192,12 @@ impl DeepSeekJsHost {
             plugin.state = PluginState::Loading;
             plugin.config_json.clone()
         };
-        self.context.with(|ctx| {
-            let function: Function = ctx.globals().get("__mahayanaLoad")?;
-            function.call::<_, ()>((plugin_id.to_string(), config_json))
-        }).map_err(JsRuntimeError::Js)?;
+        self.context
+            .with(|ctx| {
+                let function: Function = ctx.globals().get("__mahayanaLoad")?;
+                function.call::<_, ()>((plugin_id.to_string(), config_json))
+            })
+            .map_err(JsRuntimeError::Js)?;
         self.apply_bridge_events()?;
         if let Some(plugin) = self.plugins.get_mut(plugin_id) {
             plugin.state = PluginState::Active;
@@ -2170,14 +2230,20 @@ impl DeepSeekJsHost {
         self.collect_dependents(plugin_id, &mut BTreeSet::new(), &mut order);
         order.push(plugin_id.to_string());
         for id in order {
-            if self.plugins.get(&id).is_some_and(|plugin| plugin.state == PluginState::Active) {
+            if self
+                .plugins
+                .get(&id)
+                .is_some_and(|plugin| plugin.state == PluginState::Active)
+            {
                 if let Some(plugin) = self.plugins.get_mut(&id) {
                     plugin.state = PluginState::Unloading;
                 }
-                self.context.with(|ctx| {
-                    let function: Function = ctx.globals().get("__mahayanaUnload")?;
-                    function.call::<_, ()>((id.clone(),))
-                }).map_err(JsRuntimeError::Js)?;
+                self.context
+                    .with(|ctx| {
+                        let function: Function = ctx.globals().get("__mahayanaUnload")?;
+                        function.call::<_, ()>((id.clone(),))
+                    })
+                    .map_err(JsRuntimeError::Js)?;
                 self.services.remove_provider(&id);
                 self.apply_bridge_events()?;
             }
@@ -2219,10 +2285,12 @@ impl DeepSeekJsHost {
     where
         for<'js> A: rquickjs::function::IntoArgs<'js>,
     {
-        self.context.with(|ctx| {
-            let function: Function = ctx.globals().get(name)?;
-            function.call(args)
-        }).map_err(JsRuntimeError::Js)
+        self.context
+            .with(|ctx| {
+                let function: Function = ctx.globals().get(name)?;
+                function.call(args)
+            })
+            .map_err(JsRuntimeError::Js)
     }
 }
 
@@ -2251,9 +2319,7 @@ fn take_due_timers(bridge: &Arc<Mutex<BridgeState>>) -> Result<Vec<u64>, JsRunti
     Ok(due)
 }
 
-fn next_timer_delay(
-    bridge: &Arc<Mutex<BridgeState>>,
-) -> Result<Option<Duration>, JsRuntimeError> {
+fn next_timer_delay(bridge: &Arc<Mutex<BridgeState>>) -> Result<Option<Duration>, JsRuntimeError> {
     let state = bridge.lock().map_err(|_| JsRuntimeError::Poisoned)?;
     let now = Instant::now();
     Ok(state
@@ -2422,7 +2488,7 @@ fn install_host_functions(
                 ctx.clone(),
                 move |plugin_id: String, id: i32, delay_ms: f64, repeat: bool| {
                     let delay_ms = if delay_ms.is_finite() {
-                        delay_ms.max(0.0).min(24.0 * 60.0 * 60.0 * 1000.0)
+                        delay_ms.clamp(0.0, 24.0 * 60.0 * 60.0 * 1000.0)
                     } else {
                         0.0
                     };
@@ -2555,7 +2621,9 @@ fn resolve_module_path(
     name: &str,
 ) -> Result<PathBuf, JsRuntimeError> {
     if name.contains('\0') {
-        return Err(JsRuntimeError::ModuleResolution("NUL in module name".into()));
+        return Err(JsRuntimeError::ModuleResolution(
+            "NUL in module name".into(),
+        ));
     }
     let base = base.split('?').next().unwrap_or(base);
     let base_path = Path::new(base);
@@ -2615,7 +2683,9 @@ fn resolve_bare_package(
     let mut cursor = base.parent();
     while let Some(directory) = cursor {
         let package_root = directory.join("node_modules").join(&package_name);
-        if package_root.is_dir() && modules.allowed(&package_root.canonicalize().map_err(JsRuntimeError::Io)?) {
+        if package_root.is_dir()
+            && modules.allowed(&package_root.canonicalize().map_err(JsRuntimeError::Io)?)
+        {
             if let Some(subpath) = &subpath {
                 return resolve_candidate(&package_root.join(subpath));
             }
@@ -2634,7 +2704,9 @@ fn split_package_specifier(specifier: &str) -> Result<(String, Option<String>), 
     let parts = specifier.split('/').collect::<Vec<_>>();
     if specifier.starts_with('@') {
         if parts.len() < 2 || parts[0].len() < 2 || parts[1].is_empty() {
-            return Err(JsRuntimeError::ModuleResolution("invalid scoped package".into()));
+            return Err(JsRuntimeError::ModuleResolution(
+                "invalid scoped package".into(),
+            ));
         }
         Ok((
             format!("{}/{}", parts[0], parts[1]),
@@ -2678,14 +2750,21 @@ fn resolve_package_directory(root: &Path) -> Result<Option<PathBuf>, JsRuntimeEr
 
 fn canonical_entry(root: &Path, entry: &Path) -> Result<PathBuf, JsRuntimeError> {
     if entry.components().any(|component| {
-        matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_))
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
     }) {
-        return Err(JsRuntimeError::InvalidPlugin("entry must be plugin-relative".into()));
+        return Err(JsRuntimeError::InvalidPlugin(
+            "entry must be plugin-relative".into(),
+        ));
     }
     let entry = resolve_candidate(&root.join(entry))?;
     let canonical = entry.canonicalize().map_err(JsRuntimeError::Io)?;
     if !canonical.starts_with(root) {
-        return Err(JsRuntimeError::InvalidPlugin("entry escapes plugin root".into()));
+        return Err(JsRuntimeError::InvalidPlugin(
+            "entry escapes plugin root".into(),
+        ));
     }
     Ok(canonical)
 }
@@ -2704,7 +2783,9 @@ fn wrap_commonjs(source: &str) -> String {
     for (index, specifier) in requires.iter().enumerate() {
         let quoted = serde_json::to_string(specifier).unwrap_or_else(|_| "\"\"".into());
         imports.push_str(&format!("import * as __mh_cjs_{index} from {quoted};\n"));
-        registrations.push_str(&format!("__mh_require_modules.set({quoted}, __mh_cjs_{index});\n"));
+        registrations.push_str(&format!(
+            "__mh_require_modules.set({quoted}, __mh_cjs_{index});\n"
+        ));
     }
     format!(
         "{imports}const __mh_require_modules = new Map();\n{registrations}\
@@ -2759,13 +2840,15 @@ fn has_dynamic_require(source: &str) -> bool {
 }
 
 fn bundle_runtime_id(root: &Path, entry_id: &str, name: &str) -> String {
-    let digest = Sha256::digest(
-        format!("{}\0{entry_id}\0{name}", root.to_string_lossy()).as_bytes(),
-    );
+    let digest =
+        Sha256::digest(format!("{}\0{entry_id}\0{name}", root.to_string_lossy()).as_bytes());
     format!("dsh-{}", &format!("{digest:x}")[..20])
 }
 
-fn resolve_self_package_entry(root: &Path, specifier: &str) -> Result<Option<PathBuf>, JsRuntimeError> {
+fn resolve_self_package_entry(
+    root: &Path,
+    specifier: &str,
+) -> Result<Option<PathBuf>, JsRuntimeError> {
     let package_path = root.join("package.json");
     if !package_path.is_file() {
         return Ok(None);
@@ -2841,7 +2924,9 @@ pub enum JsRuntimeError {
     Transport(String),
     #[error("failed to apply loader update for {plugin_id}: {message}")]
     UpdateFailed { plugin_id: String, message: String },
-    #[error("failed to apply loader update for {plugin_id} ({candidate}); rollback also failed: {rollback}")]
+    #[error(
+        "failed to apply loader update for {plugin_id} ({candidate}); rollback also failed: {rollback}"
+    )]
     UpdateRollback {
         plugin_id: String,
         candidate: String,
@@ -2882,7 +2967,12 @@ export function apply(ctx) {
         );
         let mut host = DeepSeekJsHost::new().unwrap();
         let state = host
-            .register_plugin("greet-tool", temp.path(), Path::new("plugin.mjs"), &serde_json::json!({}))
+            .register_plugin(
+                "greet-tool",
+                temp.path(),
+                Path::new("plugin.mjs"),
+                &serde_json::json!({}),
+            )
             .unwrap();
         assert_eq!(state, PluginState::Active);
         assert_eq!(host.registered_tools().unwrap(), vec!["greet"]);
@@ -2923,22 +3013,40 @@ export function apply(ctx) {
 
         let mut host = DeepSeekJsHost::new().unwrap();
         assert_eq!(
-            host.register_plugin("consumer", consumer.path(), Path::new("consumer.mjs"), &serde_json::json!({})).unwrap(),
+            host.register_plugin(
+                "consumer",
+                consumer.path(),
+                Path::new("consumer.mjs"),
+                &serde_json::json!({})
+            )
+            .unwrap(),
             PluginState::Pending
         );
         assert_eq!(
-            host.register_plugin("provider", provider.path(), Path::new("provider.mjs"), &serde_json::json!({})).unwrap(),
+            host.register_plugin(
+                "provider",
+                provider.path(),
+                Path::new("provider.mjs"),
+                &serde_json::json!({})
+            )
+            .unwrap(),
             PluginState::Active
         );
         assert_eq!(host.plugin_state("consumer"), Some(PluginState::Active));
         assert_eq!(
-            host.call_tool_json("metric", &serde_json::json!({"value":"one"})).unwrap(),
+            host.call_tool_json("metric", &serde_json::json!({"value":"one"}))
+                .unwrap(),
             serde_json::json!("metric:one")
         );
 
         host.disable_plugin("provider").unwrap();
         assert_eq!(host.plugin_state("consumer"), Some(PluginState::Pending));
-        assert!(!host.registered_tools().unwrap().contains(&"metric".to_string()));
+        assert!(
+            !host
+                .registered_tools()
+                .unwrap()
+                .contains(&"metric".to_string())
+        );
         host.enable_plugin("provider").unwrap();
         assert_eq!(host.plugin_state("provider"), Some(PluginState::Active));
         assert_eq!(host.plugin_state("consumer"), Some(PluginState::Active));
@@ -2963,12 +3071,34 @@ export function apply(ctx) {
 "#,
         );
         let mut host = DeepSeekJsHost::new().unwrap();
-        host.register_plugin("events", temp.path(), Path::new("events.mjs"), &serde_json::json!({})).unwrap();
-        host.call_tool_json("emit-custom", &serde_json::json!({"value":"x"})).unwrap();
-        assert!(host.logs().unwrap().iter().any(|log| log.message.contains("seen:x")));
+        host.register_plugin(
+            "events",
+            temp.path(),
+            Path::new("events.mjs"),
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        host.call_tool_json("emit-custom", &serde_json::json!({"value":"x"}))
+            .unwrap();
+        assert!(
+            host.logs()
+                .unwrap()
+                .iter()
+                .any(|log| log.message.contains("seen:x"))
+        );
         host.disable_plugin("events").unwrap();
-        assert!(host.logs().unwrap().iter().any(|log| log.message.contains("effect:off")));
-        assert!(!host.registered_tools().unwrap().contains(&"emit-custom".to_string()));
+        assert!(
+            host.logs()
+                .unwrap()
+                .iter()
+                .any(|log| log.message.contains("effect:off"))
+        );
+        assert!(
+            !host
+                .registered_tools()
+                .unwrap()
+                .contains(&"emit-custom".to_string())
+        );
     }
 
     #[test]
@@ -3006,10 +3136,12 @@ export default class LateService extends Service {
             &serde_json::json!({}),
         )
         .unwrap();
-        assert!(!host
-            .registered_tools()
-            .unwrap()
-            .contains(&"late-value".to_string()));
+        assert!(
+            !host
+                .registered_tools()
+                .unwrap()
+                .contains(&"late-value".to_string())
+        );
 
         host.register_plugin(
             "late-provider",
@@ -3025,10 +3157,12 @@ export default class LateService extends Service {
         );
 
         host.disable_plugin("late-provider").unwrap();
-        assert!(!host
-            .registered_tools()
-            .unwrap()
-            .contains(&"late-value".to_string()));
+        assert!(
+            !host
+                .registered_tools()
+                .unwrap()
+                .contains(&"late-value".to_string())
+        );
     }
 
     #[test]
@@ -3178,7 +3312,8 @@ export function apply(ctx, config) {
         assert_eq!(states.len(), 1);
         assert_eq!(states[0].state, PluginState::Active);
         assert_eq!(
-            host.call_tool_json("bundle-value", &serde_json::json!({})).unwrap(),
+            host.call_tool_json("bundle-value", &serde_json::json!({}))
+                .unwrap(),
             serde_json::json!("from-bundle")
         );
     }
@@ -3205,7 +3340,8 @@ export function apply(ctx) {
         )
         .unwrap();
         assert_eq!(
-            host.call_tool_json("hmr-value", &serde_json::json!({})).unwrap(),
+            host.call_tool_json("hmr-value", &serde_json::json!({}))
+                .unwrap(),
             serde_json::json!("v1")
         );
         fs::write(
@@ -3218,9 +3354,13 @@ export function apply(ctx) {
 "#,
         )
         .unwrap();
-        assert_eq!(host.reload_plugin("hmr-checker").unwrap(), PluginState::Active);
         assert_eq!(
-            host.call_tool_json("hmr-value", &serde_json::json!({})).unwrap(),
+            host.reload_plugin("hmr-checker").unwrap(),
+            PluginState::Active
+        );
+        assert_eq!(
+            host.call_tool_json("hmr-value", &serde_json::json!({}))
+                .unwrap(),
             serde_json::json!("v2")
         );
     }
@@ -3269,15 +3409,21 @@ export function apply(ctx) {
             )
             .unwrap_err();
         assert!(matches!(error, JsRuntimeError::UpdateFailed { .. }));
-        assert_eq!(host.plugin_state("transactional"), Some(PluginState::Active));
         assert_eq!(
-            host.call_tool_json("stable-value", &serde_json::json!({})).unwrap(),
+            host.plugin_state("transactional"),
+            Some(PluginState::Active)
+        );
+        assert_eq!(
+            host.call_tool_json("stable-value", &serde_json::json!({}))
+                .unwrap(),
             serde_json::json!("stable")
         );
-        assert!(!host
-            .registered_tools()
-            .unwrap()
-            .contains(&"candidate-only".to_string()));
+        assert!(
+            !host
+                .registered_tools()
+                .unwrap()
+                .contains(&"candidate-only".to_string())
+        );
     }
 
     #[test]
@@ -3315,15 +3461,20 @@ export function apply(ctx) {
             .call_tool_json("timer-check", &serde_json::json!({}))
             .unwrap();
         assert!(result.get("ticks").and_then(Value::as_u64).unwrap_or(0) >= 2);
-        assert_eq!(result.get("timerService").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            result.get("timerService").and_then(Value::as_bool),
+            Some(true)
+        );
         host.disable_plugin("timer-checker").unwrap();
         std::thread::sleep(Duration::from_millis(110));
         host.pump_timers().unwrap();
-        assert!(!host
-            .logs()
-            .unwrap()
-            .iter()
-            .any(|log| log.message.contains("should-not-fire-after-dispose")));
+        assert!(
+            !host
+                .logs()
+                .unwrap()
+                .iter()
+                .any(|log| log.message.contains("should-not-fire-after-dispose"))
+        );
     }
 
     #[test]
@@ -3350,9 +3501,11 @@ export function apply(ctx) {
         fs::write(temp.path().join("addon.node"), b"native").unwrap();
         let report = scan_package_compatibility(temp.path()).unwrap();
         assert!(!report.mobile_compatible);
-        assert!(report
-            .desktop_only_modules
-            .contains(&"node:child_process".to_string()));
+        assert!(
+            report
+                .desktop_only_modules
+                .contains(&"node:child_process".to_string())
+        );
         assert!(report.native_addons.contains(&"addon.node".to_string()));
         assert!(report.commonjs_require_files.is_empty());
     }
@@ -3385,14 +3538,12 @@ export function apply(ctx) {
             &[],
         )
         .unwrap();
-        assert!(host
-            .call_tool_json("permission-storage", &serde_json::json!({}))
-            .is_err());
-        host.set_plugin_grants(
-            "permission-checker",
-            ["storage.local".to_string()],
-        )
-        .unwrap();
+        assert!(
+            host.call_tool_json("permission-storage", &serde_json::json!({}))
+                .is_err()
+        );
+        host.set_plugin_grants("permission-checker", ["storage.local".to_string()])
+            .unwrap();
         assert_eq!(
             host.call_tool_json("permission-storage", &serde_json::json!({}))
                 .unwrap(),
@@ -3437,7 +3588,8 @@ module.exports = {
         )
         .unwrap();
         assert_eq!(
-            host.call_tool_json("cjs-check", &serde_json::json!({})).unwrap(),
+            host.call_tool_json("cjs-check", &serde_json::json!({}))
+                .unwrap(),
             serde_json::json!("cjs/ok")
         );
     }

@@ -1,0 +1,12 @@
+[package]
+name = "mahayana-app-host-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mahayana-app-host"
+path = "src/main.rs"
+
+[dependencies]
+mahayana-app-host = { path = "../mahayana-app-host" }

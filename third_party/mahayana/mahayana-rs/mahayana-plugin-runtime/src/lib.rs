@@ -310,12 +310,11 @@ impl ArtifactResolver {
             return Ok(());
         }
         let source = fs::read_to_string(&manifest_path)?;
-        let manifest: NpmInstalledPackageJson = serde_json::from_str(&source).map_err(|error| {
-            RuntimeError::InvalidNpmPackage {
+        let manifest: NpmInstalledPackageJson =
+            serde_json::from_str(&source).map_err(|error| RuntimeError::InvalidNpmPackage {
                 path: manifest_path.clone(),
                 message: error.to_string(),
-            }
-        })?;
+            })?;
         let optional = manifest
             .optional_dependencies
             .keys()
@@ -361,13 +360,12 @@ impl ArtifactResolver {
         let resolved = self.resolve_npm_dependency(registry, &actual_name, &actual_requirement)?;
         let destination = npm_dependency_destination(package_root, requested_name)?;
         if destination.join("package.json").is_file() {
-            let existing: NpmInstalledPackageJson = serde_json::from_str(&fs::read_to_string(
-                destination.join("package.json"),
-            )?)
-            .map_err(|error| RuntimeError::InvalidNpmPackage {
-                path: destination.join("package.json"),
-                message: error.to_string(),
-            })?;
+            let existing: NpmInstalledPackageJson =
+                serde_json::from_str(&fs::read_to_string(destination.join("package.json"))?)
+                    .map_err(|error| RuntimeError::InvalidNpmPackage {
+                        path: destination.join("package.json"),
+                        message: error.to_string(),
+                    })?;
             if existing.version.as_deref() == Some(resolved.version.as_str()) {
                 return self.install_npm_dependencies_recursive(
                     &destination,
@@ -382,7 +380,11 @@ impl ArtifactResolver {
         }
         fs::create_dir_all(&destination)?;
         let bytes = self.download_bounded(&resolved.tarball, 50 * 1024 * 1024)?;
-        verify_npm_integrity(&bytes, resolved.integrity.as_deref(), resolved.shasum.as_deref())?;
+        verify_npm_integrity(
+            &bytes,
+            resolved.integrity.as_deref(),
+            resolved.shasum.as_deref(),
+        )?;
         state.package_count += 1;
         state.downloaded_bytes = state.downloaded_bytes.saturating_add(bytes.len() as u64);
         extract_artifact(&bytes, &ArtifactFormat::TarGz, &destination)?;
@@ -420,12 +422,14 @@ impl ArtifactResolver {
                 requirement: requirement.to_string(),
             }
         })?;
-        let version_metadata = metadata.versions.get(&version).ok_or_else(|| {
-            RuntimeError::NpmVersionNotFound {
-                package: package.to_string(),
-                requirement: requirement.to_string(),
-            }
-        })?;
+        let version_metadata =
+            metadata
+                .versions
+                .get(&version)
+                .ok_or_else(|| RuntimeError::NpmVersionNotFound {
+                    package: package.to_string(),
+                    requirement: requirement.to_string(),
+                })?;
         parse_public_https(&version_metadata.dist.tarball)?;
         Ok(ResolvedNpmDependency {
             version,
@@ -606,14 +610,14 @@ impl PluginInstaller {
             let _ = fs::remove_dir_all(&staging);
             return Err(error);
         }
-        if let ArtifactSource::Npm { registry, .. } = &artifact.source {
-            if let Err(error) = normalize_npm_package_root(&staging).and_then(|_| {
+        if let ArtifactSource::Npm { registry, .. } = &artifact.source
+            && let Err(error) = normalize_npm_package_root(&staging).and_then(|_| {
                 ArtifactResolver::new()?.install_npm_dependencies(&staging, registry)?;
                 Ok(())
-            }) {
-                let _ = fs::remove_dir_all(&staging);
-                return Err(error);
-            }
+            })
+        {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error);
         }
         if let Some(entry) = &artifact.entry {
             let entry = safe_relative_path(entry)?;
@@ -670,6 +674,16 @@ impl PluginInstaller {
         serde_json::from_slice(&source)
             .map(Some)
             .map_err(|error| RuntimeError::InvalidRelease(error.to_string()))
+    }
+
+    pub fn uninstall(&self, plugin_id: &str) -> Result<bool, RuntimeError> {
+        validate_identifier(plugin_id, "pluginId")?;
+        let plugin_root = self.root.join(plugin_id);
+        if !plugin_root.exists() {
+            return Ok(false);
+        }
+        fs::remove_dir_all(plugin_root).map_err(RuntimeError::Io)?;
+        Ok(true)
     }
 }
 
@@ -971,9 +985,7 @@ fn npm_dependency_target(
             let slash = alias
                 .find('/')
                 .ok_or_else(|| RuntimeError::InvalidSource("invalid npm alias".into()))?;
-            alias[slash + 1..]
-                .rfind('@')
-                .map(|index| slash + 1 + index)
+            alias[slash + 1..].rfind('@').map(|index| slash + 1 + index)
         } else {
             alias.rfind('@')
         };
@@ -983,7 +995,9 @@ fn npm_dependency_target(
         };
         validate_npm_package(package)?;
         if version.trim().is_empty() {
-            return Err(RuntimeError::InvalidSource("npm alias has empty version".into()));
+            return Err(RuntimeError::InvalidSource(
+                "npm alias has empty version".into(),
+            ));
         }
         return Ok((package.to_string(), version.to_string()));
     }
@@ -1017,10 +1031,10 @@ fn npm_dependency_destination(root: &Path, package: &str) -> Result<PathBuf, Run
 
 fn select_npm_version(metadata: &NpmFullPackageMetadata, requirement: &str) -> Option<String> {
     let requirement = requirement.trim();
-    if requirement.is_empty() || requirement == "*" || requirement == "latest" {
-        if let Some(version) = metadata.dist_tags.get("latest") {
-            return Some(version.clone());
-        }
+    if (requirement.is_empty() || requirement == "*" || requirement == "latest")
+        && let Some(version) = metadata.dist_tags.get("latest")
+    {
+        return Some(version.clone());
     }
     if let Some(version) = metadata.dist_tags.get(requirement) {
         return Some(version.clone());
@@ -1154,9 +1168,7 @@ fn extract_artifact(
                     .unix_mode()
                     .is_some_and(|mode| mode & 0o170000 == 0o120000)
                 {
-                    return Err(RuntimeError::Archive(
-                        "zip symlinks are not allowed".into(),
-                    ));
+                    return Err(RuntimeError::Archive("zip symlinks are not allowed".into()));
                 }
                 if entry.is_dir() {
                     fs::create_dir_all(&target).map_err(RuntimeError::Io)?;
@@ -1410,6 +1422,12 @@ impl PermissionManager {
         self.persist()
     }
 
+    pub fn remove_plugin(&mut self, plugin_id: &str) -> Result<bool, RuntimeError> {
+        let removed = self.store.grants.remove(plugin_id).is_some();
+        self.persist()?;
+        Ok(removed)
+    }
+
     pub fn retain_requested(
         &mut self,
         plugin_id: &str,
@@ -1432,9 +1450,8 @@ impl PermissionManager {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let bytes = serde_json::to_vec_pretty(&self.store).map_err(|error| {
-            RuntimeError::Io(io::Error::new(io::ErrorKind::InvalidData, error))
-        })?;
+        let bytes = serde_json::to_vec_pretty(&self.store)
+            .map_err(|error| RuntimeError::Io(io::Error::new(io::ErrorKind::InvalidData, error)))?;
         let temporary = self.path.with_extension(format!("tmp-{}", Uuid::new_v4()));
         fs::write(&temporary, bytes)?;
         if self.path.exists() {
@@ -1470,7 +1487,10 @@ pub enum RuntimeError {
     #[error("invalid npm package manifest at {path}: {message}")]
     InvalidNpmPackage { path: PathBuf, message: String },
     #[error("no npm version satisfies {package}@{requirement}")]
-    NpmVersionNotFound { package: String, requirement: String },
+    NpmVersionNotFound {
+        package: String,
+        requirement: String,
+    },
     #[error("plugin {plugin_id} did not request permission {permission}")]
     PermissionNotRequested {
         plugin_id: String,
@@ -1592,6 +1612,41 @@ mod tests {
     }
 
     #[test]
+    fn uninstall_removes_plugin_root_and_is_idempotent() {
+        let archive = tar_gz(&[("plugin.json", br#"{"ok":true}"#)]);
+        let digest = format!("{:x}", Sha256::digest(&archive));
+        let artifact = ReleaseArtifact {
+            id: "desktop-web".into(),
+            runtime: "local-web".into(),
+            platforms: vec!["linux".into()],
+            source: ArtifactSource::Https {
+                url: "https://example.com/plugin.tar.gz".into(),
+            },
+            sha256: digest,
+            size: archive.len() as u64,
+            format: ArtifactFormat::TarGz,
+            entry: Some("./plugin.json".into()),
+        };
+        let release = ExternalReleaseManifest {
+            schema_version: 1,
+            protocol: "mahayana.external-release.v1".into(),
+            plugin_id: "cleanup-plugin".into(),
+            version: "1.0.0".into(),
+            permissions: vec!["network".into()],
+            artifacts: vec![artifact.clone()],
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let installer = PluginInstaller::new(temp.path()).unwrap();
+        installer
+            .install_verified_bytes(&release, &artifact, &archive)
+            .unwrap();
+        assert!(temp.path().join("cleanup-plugin/active.json").is_file());
+        assert!(installer.uninstall("cleanup-plugin").unwrap());
+        assert!(!temp.path().join("cleanup-plugin").exists());
+        assert!(!installer.uninstall("cleanup-plugin").unwrap());
+    }
+
+    #[test]
     fn permission_manager_persists_only_declared_grants() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("permissions.json");
@@ -1616,6 +1671,23 @@ mod tests {
             .retain_requested("sample-plugin", &["storage.local".to_string()])
             .unwrap();
         assert!(manager.grants_for("sample-plugin").is_empty());
+    }
+
+    #[test]
+    fn permission_manager_removes_all_grants_for_uninstalled_plugin() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("permissions.json");
+        let mut manager = PermissionManager::load(&path).unwrap();
+        manager
+            .grant("cleanup-plugin", &["network".into()], "network")
+            .unwrap();
+        assert_eq!(
+            manager.grants_for("cleanup-plugin"),
+            vec!["network".to_string()]
+        );
+        assert!(manager.remove_plugin("cleanup-plugin").unwrap());
+        assert!(manager.grants_for("cleanup-plugin").is_empty());
+        assert!(!manager.remove_plugin("cleanup-plugin").unwrap());
     }
 
     #[test]
@@ -1655,8 +1727,14 @@ mod tests {
                 ),
             ]),
         };
-        assert_eq!(select_npm_version(&metadata, "^1.2.0").as_deref(), Some("1.9.0"));
-        assert_eq!(select_npm_version(&metadata, "latest").as_deref(), Some("2.0.0"));
+        assert_eq!(
+            select_npm_version(&metadata, "^1.2.0").as_deref(),
+            Some("1.9.0")
+        );
+        assert_eq!(
+            select_npm_version(&metadata, "latest").as_deref(),
+            Some("2.0.0")
+        );
         assert_eq!(
             npm_dependency_target("alias", "npm:@scope/real@^1.0.0").unwrap(),
             ("@scope/real".into(), "^1.0.0".into())
@@ -1692,10 +1770,7 @@ mod tests {
 
     #[test]
     fn rejects_tar_symlinks_even_when_archive_path_is_relative() {
-        let encoder = flate2::write::GzEncoder::new(
-            Vec::new(),
-            flate2::Compression::default(),
-        );
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         let mut builder = tar::Builder::new(encoder);
         let mut header = tar::Header::new_gnu();
         header.set_entry_type(tar::EntryType::Symlink);

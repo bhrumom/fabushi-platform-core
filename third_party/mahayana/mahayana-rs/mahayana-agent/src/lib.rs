@@ -163,6 +163,43 @@ pub trait AgentBackend: Send + Sync {
         ))
     }
 
+    /// Removes a user-managed MCP server configuration. Plugin-provided or
+    /// otherwise read-only servers must return false rather than mutating their source.
+    async fn remove_mcp_server(&self, _server: &str) -> Result<bool, AgentError> {
+        Err(AgentError::Unavailable(
+            "this agent backend does not support MCP configuration removal".into(),
+        ))
+    }
+
+    /// Returns per-server Fabushi instructions that must be applied whenever
+    /// the model uses that MCP server's tools.
+    async fn mcp_custom_instructions(&self) -> Result<HashMap<String, String>, AgentError> {
+        Ok(HashMap::new())
+    }
+
+    /// Persists per-server custom instructions without exposing provider credentials.
+    async fn set_mcp_custom_instructions(
+        &self,
+        _server: &str,
+        _instructions: &str,
+    ) -> Result<(), AgentError> {
+        Err(AgentError::Unavailable(
+            "this agent backend does not support MCP custom instructions".into(),
+        ))
+    }
+
+    /// Changes the actual runtime tool deny-list for a user-managed MCP server.
+    async fn set_mcp_tool_disabled(
+        &self,
+        _server: &str,
+        _tool: &str,
+        _disabled: bool,
+    ) -> Result<Vec<String>, AgentError> {
+        Err(AgentError::Unavailable(
+            "this agent backend does not support MCP tool filtering".into(),
+        ))
+    }
+
     /// Reloads configured MCP servers after credentials or plugin state change.
     async fn refresh_mcp_servers(&self) -> Result<(), AgentError> {
         Err(AgentError::Unavailable(

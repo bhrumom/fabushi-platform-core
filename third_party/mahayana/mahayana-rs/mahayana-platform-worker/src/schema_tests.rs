@@ -45,6 +45,25 @@ fn oauth_schema_separates_provider_identity_from_user_profile() {
 }
 
 #[test]
+fn registration_schema_hashes_codes_and_binds_them_to_browser_attempts() {
+    assert_eq!(
+        validate_account_registration_schema(ACCOUNT_REGISTRATION_SCHEMA_V5),
+        Ok(())
+    );
+    assert!(ACCOUNT_REGISTRATION_SCHEMA_V5.contains("code_hash TEXT NOT NULL"));
+    assert!(ACCOUNT_REGISTRATION_SCHEMA_V5.contains("attempt_id TEXT NOT NULL"));
+    assert!(ACCOUNT_REGISTRATION_SCHEMA_V5.contains("failed_attempts INTEGER NOT NULL"));
+    assert!(!ACCOUNT_REGISTRATION_SCHEMA_V5.contains("code TEXT NOT NULL"));
+}
+
+#[test]
+fn oauth_attempt_terminal_states_include_failed() {
+    assert!(ACCOUNT_OAUTH_STATUS_SCHEMA_V4.contains("'cancelled', 'failed'"));
+    assert!(ACCOUNT_OAUTH_STATUS_SCHEMA_V4.contains("FROM account_oauth_attempts"));
+    assert!(ACCOUNT_OAUTH_STATUS_SCHEMA_V4.contains("RENAME TO account_oauth_attempts"));
+}
+
+#[test]
 fn validation_rejects_floating_point_money() {
     let schema = PLATFORM_SCHEMA_V1.replace("amount INTEGER", "amount REAL");
     assert_eq!(

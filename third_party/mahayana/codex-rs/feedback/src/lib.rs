@@ -431,13 +431,24 @@ impl FeedbackSnapshot {
         use sentry::protocol::EnvelopeItem;
         use sentry::protocol::Event;
         use sentry::protocol::Level;
-        use sentry::transports::DefaultTransportFactory;
         use sentry::types::Dsn;
+
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        let transport: Arc<dyn sentry::TransportFactory> =
+            Arc::new(|options: &ClientOptions| -> Arc<dyn sentry::Transport> {
+                Arc::new(sentry::transports::ReqwestHttpTransport::with_client(
+                    options,
+                    codex_login::auth::default_client::build_reqwest_client(),
+                ))
+            });
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        let transport: Arc<dyn sentry::TransportFactory> =
+            Arc::new(sentry::transports::DefaultTransportFactory {});
 
         // Build Sentry client
         let client = Client::from_config(ClientOptions {
             dsn: Some(Dsn::from_str(SENTRY_DSN).map_err(|e| anyhow!("invalid DSN: {e}"))?),
-            transport: Some(Arc::new(DefaultTransportFactory {})),
+            transport: Some(transport),
             ..Default::default()
         });
 

@@ -17,10 +17,6 @@ use mahayana_core::ApprovalDecision as RuntimeApprovalDecision;
 #[cfg(feature = "production")]
 use mahayana_core::ApprovalId;
 #[cfg(feature = "production")]
-use mahayana_core::capability::CapabilityAvailability;
-#[cfg(feature = "production")]
-use mahayana_core::capability::CapabilityKind;
-#[cfg(feature = "production")]
 use mahayana_core::CODEX_ASSISTANT_CONVERSATION_ID;
 #[cfg(feature = "production")]
 use mahayana_core::ConversationId;
@@ -37,46 +33,50 @@ use mahayana_core::RuntimeEvent;
 #[cfg(feature = "production")]
 use mahayana_core::RuntimeResponse;
 #[cfg(feature = "production")]
+use mahayana_core::capability::CapabilityAvailability;
+#[cfg(feature = "production")]
+use mahayana_core::capability::CapabilityKind;
+#[cfg(feature = "production")]
 use mahayana_host::HostCreateConfig;
 #[cfg(feature = "production")]
 use mahayana_host::MahayanaHost;
 use mahayana_host_protocol::AgentBroadcastResult;
 use mahayana_host_protocol::AgentMode;
-use mahayana_host_protocol::AsyncTaskKind;
-use mahayana_host_protocol::AsyncTaskStatus;
-use mahayana_host_protocol::AsyncTaskSummary;
-use mahayana_host_protocol::AutoReviewBehavior;
-use mahayana_host_protocol::AutoReviewRule;
 use mahayana_host_protocol::AgentPeerMessage;
 use mahayana_host_protocol::AgentStepStatus;
-use mahayana_host_protocol::AutomationSummary;
-use mahayana_host_protocol::AutomationTrigger;
-use mahayana_host_protocol::BotSummary;
-use mahayana_host_protocol::ConnectorAccountSummary;
-use mahayana_host_protocol::ConnectorStatus;
-use mahayana_host_protocol::ConnectorSummary;
-use mahayana_host_protocol::ConnectorToolSummary;
-use mahayana_host_protocol::ConnectorTransport;
-use mahayana_host_protocol::DraftAction;
-use mahayana_host_protocol::DraftSendState;
-use mahayana_host_protocol::EventCard;
-use mahayana_host_protocol::EventField;
-use mahayana_host_protocol::ErrorTray;
 #[cfg(feature = "production")]
 use mahayana_host_protocol::ApprovalDecision;
 use mahayana_host_protocol::ApprovalResolution;
+use mahayana_host_protocol::AsyncTaskKind;
+use mahayana_host_protocol::AsyncTaskStatus;
+use mahayana_host_protocol::AsyncTaskSummary;
 use mahayana_host_protocol::AttachmentChunkResult;
 use mahayana_host_protocol::AttachmentContext;
 use mahayana_host_protocol::AttachmentImageResult;
 use mahayana_host_protocol::AttachmentStored;
 use mahayana_host_protocol::AttachmentTextResult;
+use mahayana_host_protocol::AutoReviewBehavior;
+use mahayana_host_protocol::AutoReviewRule;
+use mahayana_host_protocol::AutomationSummary;
+use mahayana_host_protocol::AutomationTrigger;
+use mahayana_host_protocol::BotSummary;
 use mahayana_host_protocol::CapabilitySummary;
 use mahayana_host_protocol::CommandAccepted;
 use mahayana_host_protocol::ComputerActionResult;
 use mahayana_host_protocol::ComputerControlOrigin;
 use mahayana_host_protocol::ComputerSnapshot;
+use mahayana_host_protocol::ConnectorAccountSummary;
+use mahayana_host_protocol::ConnectorStatus;
+use mahayana_host_protocol::ConnectorSummary;
+use mahayana_host_protocol::ConnectorToolSummary;
+use mahayana_host_protocol::ConnectorTransport;
 use mahayana_host_protocol::ConversationMessage;
 use mahayana_host_protocol::ConversationSummary;
+use mahayana_host_protocol::DraftAction;
+use mahayana_host_protocol::DraftSendState;
+use mahayana_host_protocol::ErrorTray;
+use mahayana_host_protocol::EventCard;
+use mahayana_host_protocol::EventField;
 use mahayana_host_protocol::FeatureCommand;
 use mahayana_host_protocol::GroupMessage;
 use mahayana_host_protocol::GroupSpeaker;
@@ -91,14 +91,11 @@ use mahayana_host_protocol::ListenerPlatform;
 use mahayana_host_protocol::LocalToolPermission;
 use mahayana_host_protocol::MemoryKind;
 use mahayana_host_protocol::MemoryRecord;
+use mahayana_host_protocol::MessageDraft;
+use mahayana_host_protocol::MessageRole;
 use mahayana_host_protocol::ProductHostSettings;
 use mahayana_host_protocol::SearchMediaMatch;
 use mahayana_host_protocol::SearchMessageMatch;
-use mahayana_host_protocol::WorkflowSource;
-use mahayana_host_protocol::WorkflowSummary;
-use mahayana_host_protocol::WorkflowTrigger;
-use mahayana_host_protocol::MessageDraft;
-use mahayana_host_protocol::MessageRole;
 use mahayana_host_protocol::SkillPublishState;
 use mahayana_host_protocol::SkillSource;
 use mahayana_host_protocol::SkillSummary;
@@ -112,6 +109,9 @@ use mahayana_host_protocol::TeachRecordingResult;
 use mahayana_host_protocol::TeachRecordingStatus;
 use mahayana_host_protocol::TranscriptCard;
 use mahayana_host_protocol::UpdateState;
+use mahayana_host_protocol::WorkflowSource;
+use mahayana_host_protocol::WorkflowSummary;
+use mahayana_host_protocol::WorkflowTrigger;
 #[cfg(feature = "production")]
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -540,6 +540,110 @@ impl FeatureHostController {
         }
     }
 
+    pub fn browser_login_start(&self) -> Result<Value, FeatureHostError> {
+        match self.config.mode {
+            HostMode::Test => Ok(json!({
+                "attemptId": "test-browser-login",
+                "loginUrl": "about:blank#fabushi-test-browser-login",
+                "expiresAt": now_millis() / 1000 + 600,
+                "pollAfterMs": 250,
+            })),
+            HostMode::Production => {
+                #[cfg(feature = "production")]
+                return self
+                    .runtime()?
+                    .product_execute(
+                        "mahayana.auth.browser.start",
+                        &json!({"platform": "desktop"}),
+                    )
+                    .map_err(FeatureHostError::from);
+                #[cfg(not(feature = "production"))]
+                return Err(FeatureHostError::ProductionUnavailable);
+            }
+        }
+    }
+
+    pub fn browser_login_reopen(&self, attempt_id: String) -> Result<Value, FeatureHostError> {
+        let attempt_id = required(attempt_id, "attemptId")?;
+        match self.config.mode {
+            HostMode::Test => Ok(json!({
+                "status": "pending",
+                "attemptId": attempt_id,
+                "loginUrl": "about:blank#fabushi-test-browser-login",
+                "pollAfterMs": 120,
+            })),
+            HostMode::Production => {
+                #[cfg(feature = "production")]
+                return self
+                    .runtime()?
+                    .product_execute(
+                        "mahayana.auth.browser.reopen",
+                        &json!({"attemptId": attempt_id}),
+                    )
+                    .map_err(FeatureHostError::from);
+                #[cfg(not(feature = "production"))]
+                return Err(FeatureHostError::ProductionUnavailable);
+            }
+        }
+    }
+
+    pub fn browser_login_cancel(&self, attempt_id: String) -> Result<Value, FeatureHostError> {
+        let attempt_id = required(attempt_id, "attemptId")?;
+        match self.config.mode {
+            HostMode::Test => Ok(json!({"status": "cancelled"})),
+            HostMode::Production => {
+                #[cfg(feature = "production")]
+                return self
+                    .runtime()?
+                    .product_execute(
+                        "mahayana.auth.browser.cancel",
+                        &json!({"attemptId": attempt_id}),
+                    )
+                    .map_err(FeatureHostError::from);
+                #[cfg(not(feature = "production"))]
+                return Err(FeatureHostError::ProductionUnavailable);
+            }
+        }
+    }
+
+    pub fn browser_login_poll(&self, attempt_id: String) -> Result<Value, FeatureHostError> {
+        let attempt_id = required(attempt_id, "attemptId")?;
+        match self.config.mode {
+            HostMode::Test => {
+                if attempt_id != "test-browser-login" {
+                    return Ok(json!({"status": "expired"}));
+                }
+                let user = json!({
+                    "id": "fast-e2e-browser-user",
+                    "email": "browser@example.test",
+                    "nickname": "Browser 测试用户",
+                });
+                self.state()?.auth_user = Some(user.clone());
+                Ok(json!({
+                    "status": "completed",
+                    "provider": "browser",
+                    "auth": {
+                        "loggedIn": true,
+                        "provider": "browser",
+                        "user": user,
+                    }
+                }))
+            }
+            HostMode::Production => {
+                #[cfg(feature = "production")]
+                return self
+                    .runtime()?
+                    .product_execute(
+                        "mahayana.auth.browser.poll",
+                        &json!({"attemptId": attempt_id}),
+                    )
+                    .map_err(FeatureHostError::from);
+                #[cfg(not(feature = "production"))]
+                return Err(FeatureHostError::ProductionUnavailable);
+            }
+        }
+    }
+
     pub fn auth_providers(&self) -> Result<Value, FeatureHostError> {
         match self.config.mode {
             HostMode::Test => Ok(json!([
@@ -766,6 +870,9 @@ impl FeatureHostController {
                 | FeatureCommand::McpApps { .. }
                 | FeatureCommand::McpOauthLogin { .. }
                 | FeatureCommand::McpOauthLogout { .. }
+                | FeatureCommand::McpRemove { .. }
+                | FeatureCommand::McpSetCustomInstructions { .. }
+                | FeatureCommand::McpSetToolDisabled { .. }
                 | FeatureCommand::McpRefresh { .. }
                 | FeatureCommand::McpToolCall { .. }
         ) {
@@ -794,11 +901,16 @@ impl FeatureHostController {
     ) -> Result<CommandAccepted, FeatureHostError> {
         let request_id = command.request_id().to_string();
         match command {
-            FeatureCommand::AutomationList { .. } => {
+            FeatureCommand::AutomationList { agent_id, .. } => {
                 let mut automations = self
                     .state()?
                     .automations
                     .values()
+                    .filter(|automation| {
+                        agent_id.as_ref().is_none_or(|agent_id| {
+                            automation.agent_id.as_deref() == Some(agent_id.as_str())
+                        })
+                    })
                     .cloned()
                     .collect::<Vec<_>>();
                 automations.sort_by_key(|item| item.created_at_ms);
@@ -813,6 +925,7 @@ impl FeatureHostController {
             }
             FeatureCommand::AutomationUpsert {
                 id,
+                agent_id,
                 name,
                 prompt,
                 schedule,
@@ -854,21 +967,40 @@ impl FeatureHostController {
                         state.sequence += 1;
                         format!("routine-{}-{}", now, state.sequence)
                     });
-                let action = if state.automations.contains_key(&id) {
+                let previous = state.automations.get(&id).cloned();
+                let requested_agent_id = match agent_id {
+                    Some(agent_id) => Some(required(agent_id, "automation agent id")?),
+                    None => None,
+                };
+                if let Some(agent_id) = requested_agent_id.as_deref() {
+                    if !state.bots.contains_key(agent_id) {
+                        return Err(FeatureHostError::Contract(format!(
+                            "unknown automation agent: {agent_id}"
+                        )));
+                    }
+                }
+                if let (Some(previous), Some(agent_id)) =
+                    (previous.as_ref(), requested_agent_id.as_deref())
+                {
+                    ensure_automation_agent_scope(previous, Some(agent_id))?;
+                }
+                let resolved_agent_id = requested_agent_id
+                    .or_else(|| previous.as_ref().and_then(|item| item.agent_id.clone()));
+                let action = if previous.is_some() {
                     "updated"
                 } else {
                     "created"
                 };
-                let previous = state.automations.get(&id);
                 let automation = AutomationSummary {
                     id: id.clone(),
+                    agent_id: resolved_agent_id,
                     name,
                     prompt,
                     schedule: schedule.clone(),
                     trigger: Some(trigger.clone()),
                     enabled,
-                    created_at_ms: previous.map_or(now, |item| item.created_at_ms),
-                    last_run_at_ms: previous.and_then(|item| item.last_run_at_ms),
+                    created_at_ms: previous.as_ref().map_or(now, |item| item.created_at_ms),
+                    last_run_at_ms: previous.as_ref().and_then(|item| item.last_run_at_ms),
                     next_run_at_ms: automation_next_run(&trigger, &schedule, enabled, now),
                 };
                 state.automations.insert(id, automation.clone());
@@ -883,11 +1015,17 @@ impl FeatureHostController {
                     operation_id: None,
                 })
             }
-            FeatureCommand::AutomationSetEnabled { id, enabled, .. } => {
+            FeatureCommand::AutomationSetEnabled {
+                id,
+                agent_id,
+                enabled,
+                ..
+            } => {
                 let mut state = self.state()?;
                 let automation = state.automations.get_mut(&id).ok_or_else(|| {
                     FeatureHostError::Contract(format!("unknown automation: {id}"))
                 })?;
+                ensure_automation_agent_scope(automation, agent_id.as_deref())?;
                 automation.enabled = enabled;
                 let trigger =
                     automation
@@ -910,11 +1048,16 @@ impl FeatureHostController {
                     operation_id: None,
                 })
             }
-            FeatureCommand::AutomationDelete { id, .. } => {
+            FeatureCommand::AutomationDelete { id, agent_id, .. } => {
                 let mut state = self.state()?;
-                let automation = state.automations.remove(&id).ok_or_else(|| {
+                let existing = state.automations.get(&id).ok_or_else(|| {
                     FeatureHostError::Contract(format!("unknown automation: {id}"))
                 })?;
+                ensure_automation_agent_scope(existing, agent_id.as_deref())?;
+                let automation = state
+                    .automations
+                    .remove(&id)
+                    .expect("automation checked above");
                 self.persist_automations(&state.automations)?;
                 state.events.push_back(HostEvent::AutomationChanged {
                     timestamp: timestamp(),
@@ -926,13 +1069,14 @@ impl FeatureHostController {
                     operation_id: None,
                 })
             }
-            FeatureCommand::AutomationRun { id, .. } => {
+            FeatureCommand::AutomationRun { id, agent_id, .. } => {
                 let automation =
                     {
                         let mut state = self.state()?;
                         let automation = state.automations.get_mut(&id).ok_or_else(|| {
                             FeatureHostError::Contract(format!("unknown automation: {id}"))
                         })?;
+                        ensure_automation_agent_scope(automation, agent_id.as_deref())?;
                         let now = now_millis();
                         automation.last_run_at_ms = Some(now);
                         let trigger = automation.trigger.clone().unwrap_or_else(|| {
@@ -996,11 +1140,15 @@ impl FeatureHostController {
                     "[自动化例程：{}]{}\n这是用户保存的 standing instruction。请立即执行并报告结果。\n\n{}",
                     automation.name, trigger_context, automation.prompt
                 );
+                let target_agent_id = automation
+                    .agent_id
+                    .clone()
+                    .unwrap_or_else(|| "mahayana-assistant".into());
                 match self.config.mode {
                     HostMode::Test => self.execute_test(FeatureCommand::ChatSend {
                         request_id,
                         text,
-                        agent_id: Some("mahayana-assistant".into()),
+                        agent_id: Some(target_agent_id.clone()),
                         conversation_id: None,
                         mode: AgentMode::Agent,
                         mode_statement: None,
@@ -1012,7 +1160,7 @@ impl FeatureHostController {
                         return self.production_chat(
                             request_id,
                             text,
-                            Some("mahayana-assistant".into()),
+                            Some(target_agent_id),
                             None,
                             AgentMode::Agent,
                             None,
@@ -1040,13 +1188,16 @@ impl FeatureHostController {
                 name,
                 description,
                 title,
+                avatar,
                 avatar_shape,
                 avatar_color,
                 ..
             } => {
                 let name = clamp_line(&name, 72);
                 if name.is_empty() {
-                    return Err(FeatureHostError::Contract("bot name must not be empty".into()));
+                    return Err(FeatureHostError::Contract(
+                        "bot name must not be empty".into(),
+                    ));
                 }
                 let id = next_id(&mut state, "agent");
                 let bot = BotSummary {
@@ -1055,10 +1206,12 @@ impl FeatureHostController {
                     description: clamp_block(&description, 2000),
                     title: title.trim().to_string(),
                     hidden: false,
-                    avatar: None,
+                    avatar: sanitize_avatar_data_url(avatar)?,
                     avatar_shape: clean_optional_string(avatar_shape),
                     avatar_color: clean_optional_string(avatar_color),
                     notifications_enabled: true,
+                    notify_on_updates: true,
+                    unread: false,
                     conversation_id: Some(format!("codex:agent:{id}")),
                 };
                 state.bots.insert(id, bot.clone());
@@ -1069,18 +1222,24 @@ impl FeatureHostController {
                 name,
                 description,
                 title,
+                avatar,
                 avatar_shape,
                 avatar_color,
                 notifications_enabled,
+                notify_on_updates,
+                unread,
                 ..
             } => {
-                let bot = state.bots.get_mut(&id).ok_or_else(|| {
-                    FeatureHostError::Contract(format!("unknown bot: {id}"))
-                })?;
+                let bot = state
+                    .bots
+                    .get_mut(&id)
+                    .ok_or_else(|| FeatureHostError::Contract(format!("unknown bot: {id}")))?;
                 if let Some(name) = name {
                     let name = clamp_line(&name, 72);
                     if name.is_empty() {
-                        return Err(FeatureHostError::Contract("bot name must not be empty".into()));
+                        return Err(FeatureHostError::Contract(
+                            "bot name must not be empty".into(),
+                        ));
                     }
                     bot.name = name;
                 }
@@ -1089,6 +1248,9 @@ impl FeatureHostController {
                 }
                 if let Some(title) = title {
                     bot.title = title.trim().to_string();
+                }
+                if avatar.is_some() {
+                    bot.avatar = sanitize_avatar_data_url(avatar)?;
                 }
                 if avatar_shape.is_some() {
                     bot.avatar_shape = clean_optional_string(avatar_shape);
@@ -1099,12 +1261,20 @@ impl FeatureHostController {
                 if let Some(enabled) = notifications_enabled {
                     bot.notifications_enabled = enabled;
                 }
+                if let Some(enabled) = notify_on_updates {
+                    bot.notify_on_updates = enabled;
+                }
+                if let Some(unread) = unread {
+                    bot.unread = unread;
+                }
                 ("updated", bot.clone())
             }
             FeatureCommand::BotClone { id, .. } => {
-                let source = state.bots.get(&id).cloned().ok_or_else(|| {
-                    FeatureHostError::Contract(format!("unknown bot: {id}"))
-                })?;
+                let source = state
+                    .bots
+                    .get(&id)
+                    .cloned()
+                    .ok_or_else(|| FeatureHostError::Contract(format!("unknown bot: {id}")))?;
                 let new_id = next_id(&mut state, "agent");
                 let clone_name = clone_agent_display_name(&source.name);
                 let bot = BotSummary {
@@ -1117,6 +1287,8 @@ impl FeatureHostController {
                     avatar_shape: source.avatar_shape,
                     avatar_color: source.avatar_color,
                     notifications_enabled: source.notifications_enabled,
+                    notify_on_updates: source.notify_on_updates,
+                    unread: false,
                     conversation_id: Some(format!("codex:agent:{new_id}")),
                 };
                 state.bots.insert(new_id, bot.clone());
@@ -1128,15 +1300,17 @@ impl FeatureHostController {
                         "the primary Mahayana assistant cannot be deleted".into(),
                     ));
                 }
-                let bot = state.bots.remove(&id).ok_or_else(|| {
-                    FeatureHostError::Contract(format!("unknown bot: {id}"))
-                })?;
+                let bot = state
+                    .bots
+                    .remove(&id)
+                    .ok_or_else(|| FeatureHostError::Contract(format!("unknown bot: {id}")))?;
                 ("deleted", bot)
             }
             FeatureCommand::BotSetHidden { id, hidden, .. } => {
-                let bot = state.bots.get_mut(&id).ok_or_else(|| {
-                    FeatureHostError::Contract(format!("unknown bot: {id}"))
-                })?;
+                let bot = state
+                    .bots
+                    .get_mut(&id)
+                    .ok_or_else(|| FeatureHostError::Contract(format!("unknown bot: {id}")))?;
                 bot.hidden = hidden;
                 ("updated", bot.clone())
             }
@@ -1179,7 +1353,9 @@ impl FeatureHostController {
             } => {
                 let name = clamp_line(&name, 72);
                 if name.is_empty() {
-                    return Err(FeatureHostError::Contract("group name must not be empty".into()));
+                    return Err(FeatureHostError::Contract(
+                        "group name must not be empty".into(),
+                    ));
                 }
                 let member_ids = validate_group_members(&state, member_ids)?;
                 let now = now_millis();
@@ -1211,13 +1387,16 @@ impl FeatureHostController {
                 let validated_members = member_ids
                     .map(|member_ids| validate_group_members(&state, member_ids))
                     .transpose()?;
-                let group = state.groups.get_mut(&id).ok_or_else(|| {
-                    FeatureHostError::Contract(format!("unknown group: {id}"))
-                })?;
+                let group = state
+                    .groups
+                    .get_mut(&id)
+                    .ok_or_else(|| FeatureHostError::Contract(format!("unknown group: {id}")))?;
                 if let Some(name) = name {
                     let name = clamp_line(&name, 72);
                     if name.is_empty() {
-                        return Err(FeatureHostError::Contract("group name must not be empty".into()));
+                        return Err(FeatureHostError::Contract(
+                            "group name must not be empty".into(),
+                        ));
                     }
                     group.name = name;
                 }
@@ -1237,9 +1416,10 @@ impl FeatureHostController {
                 });
             }
             FeatureCommand::GroupDelete { id, .. } => {
-                let group = state.groups.remove(&id).ok_or_else(|| {
-                    FeatureHostError::Contract(format!("unknown group: {id}"))
-                })?;
+                let group = state
+                    .groups
+                    .remove(&id)
+                    .ok_or_else(|| FeatureHostError::Contract(format!("unknown group: {id}")))?;
                 self.persist_groups(&state.groups)?;
                 state.events.push_back(HostEvent::GroupChanged {
                     timestamp: timestamp(),
@@ -1250,13 +1430,16 @@ impl FeatureHostController {
             FeatureCommand::GroupSend { id, text, .. } => {
                 let text = clamp_block(&text, 8000);
                 if text.is_empty() {
-                    return Err(FeatureHostError::Contract("group message must not be empty".into()));
+                    return Err(FeatureHostError::Contract(
+                        "group message must not be empty".into(),
+                    ));
                 }
                 let message_id = next_id(&mut state, "group-message");
                 let now = now_millis();
-                let group = state.groups.get_mut(&id).ok_or_else(|| {
-                    FeatureHostError::Contract(format!("unknown group: {id}"))
-                })?;
+                let group = state
+                    .groups
+                    .get_mut(&id)
+                    .ok_or_else(|| FeatureHostError::Contract(format!("unknown group: {id}")))?;
                 group.messages.push(GroupMessage {
                     id: message_id,
                     speaker: GroupSpeaker::User { name: None },
@@ -1315,10 +1498,7 @@ impl FeatureHostController {
         })
     }
 
-    fn execute_teach(
-        &self,
-        command: FeatureCommand,
-    ) -> Result<CommandAccepted, FeatureHostError> {
+    fn execute_teach(&self, command: FeatureCommand) -> Result<CommandAccepted, FeatureHostError> {
         let request_id = command.request_id().to_string();
         self.refresh_finished_teach_recording()?;
         match command {
@@ -1341,8 +1521,12 @@ impl FeatureHostController {
                 entry_point,
                 ..
             } => {
-                if !is_safe_memory_agent_id(&agent_id) || !self.state()?.bots.contains_key(&agent_id) {
-                    return Err(FeatureHostError::Contract(format!("unknown teach agent: {agent_id}")));
+                if !is_safe_memory_agent_id(&agent_id)
+                    || !self.state()?.bots.contains_key(&agent_id)
+                {
+                    return Err(FeatureHostError::Contract(format!(
+                        "unknown teach agent: {agent_id}"
+                    )));
                 }
                 let mut guard = self
                     .teach_recording
@@ -1401,11 +1585,7 @@ impl FeatureHostController {
                     result: None,
                 });
             }
-            FeatureCommand::TeachStop {
-                agent_id,
-                save,
-                ..
-            } => {
+            FeatureCommand::TeachStop { agent_id, save, .. } => {
                 let active = {
                     let mut guard = self
                         .teach_recording
@@ -1459,7 +1639,9 @@ impl FeatureHostController {
             let process_finished = match active.child.as_mut() {
                 Some(child) => child
                     .try_wait()
-                    .map_err(|error| FeatureHostError::Contract(format!("poll teach capture: {error}")))?
+                    .map_err(|error| {
+                        FeatureHostError::Contract(format!("poll teach capture: {error}"))
+                    })?
                     .is_some(),
                 None => now_millis() - active.started_at_ms >= TEACH_MAX_DURATION_MS,
             };
@@ -1522,8 +1704,9 @@ impl FeatureHostController {
         });
         std::fs::write(
             active.session_dir.join("session.json"),
-            serde_json::to_vec_pretty(&manifest)
-                .map_err(|error| FeatureHostError::Contract(format!("serialize teach manifest: {error}")))?,
+            serde_json::to_vec_pretty(&manifest).map_err(|error| {
+                FeatureHostError::Contract(format!("serialize teach manifest: {error}"))
+            })?,
         )
         .map_err(|error| FeatureHostError::Contract(format!("write teach manifest: {error}")))?;
 
@@ -1548,12 +1731,9 @@ impl FeatureHostController {
         video_path: &str,
         session_dir: &Path,
     ) -> Result<Option<String>, FeatureHostError> {
-        let bot = self
-            .state()?
-            .bots
-            .get(agent_id)
-            .cloned()
-            .ok_or_else(|| FeatureHostError::Contract(format!("unknown teach agent: {agent_id}")))?;
+        let bot = self.state()?.bots.get(agent_id).cloned().ok_or_else(|| {
+            FeatureHostError::Contract(format!("unknown teach agent: {agent_id}"))
+        })?;
         let frames_dir = session_dir.join("frames").to_string_lossy().to_string();
         let prompt = format!(
             "[teach-recording] The user just demonstrated a repeatable task for you.\nRecording: {video_path}\nExtracted frames (when present): {frames_dir}\n\nStudy the demonstration carefully. Infer the intent, ordered steps, important UI landmarks, decision points, and safety checks. Return a reusable Markdown workflow/skill only: start with a concise # heading, then instructions another future run can follow. Do not merely summarize the recording and do not mention this hidden teach prompt."
@@ -1593,7 +1773,7 @@ impl FeatureHostController {
                 operation_id: operation_id.clone(),
                 source: "teach-recording".into(),
             });
-            return Ok(Some(operation_id));
+            Ok(Some(operation_id))
         }
         #[cfg(not(feature = "production"))]
         Ok(None)
@@ -1605,9 +1785,10 @@ impl FeatureHostController {
         artifact: &str,
         markdown: &str,
     ) -> Result<WorkflowSummary, FeatureHostError> {
-        let workflow_root = self.workflow_root_path.as_deref().ok_or_else(|| {
-            FeatureHostError::Contract("workflow storage is unavailable".into())
-        })?;
+        let workflow_root = self
+            .workflow_root_path
+            .as_deref()
+            .ok_or_else(|| FeatureHostError::Contract("workflow storage is unavailable".into()))?;
         let body = clamp_block(markdown, 100_000);
         if body.is_empty() {
             return Err(FeatureHostError::Contract(
@@ -1640,8 +1821,9 @@ impl FeatureHostController {
             FeatureHostError::Contract(format!("serialize learned workflow frontmatter: {error}"))
         })?;
         let file_path = folder.join("SKILL.md");
-        std::fs::write(&file_path, format!("---\n{yaml}---\n{}\n", body.trim()))
-            .map_err(|error| FeatureHostError::Contract(format!("write learned workflow: {error}")))?;
+        std::fs::write(&file_path, format!("---\n{yaml}---\n{}\n", body.trim())).map_err(
+            |error| FeatureHostError::Contract(format!("write learned workflow: {error}")),
+        )?;
         let created_at = now_millis();
         let workflow = WorkflowSummary {
             id,
@@ -1722,16 +1904,22 @@ impl FeatureHostController {
     ) -> Result<CommandAccepted, FeatureHostError> {
         let request_id = command.request_id().to_string();
         match command {
-            FeatureCommand::AgentPeerHistory { agent_id, limit, .. } => {
+            FeatureCommand::AgentPeerHistory {
+                agent_id, limit, ..
+            } => {
                 let state = self.state()?;
                 ensure_open(&state)?;
                 if !state.bots.contains_key(&agent_id) {
-                    return Err(FeatureHostError::Contract(format!("unknown bot: {agent_id}")));
+                    return Err(FeatureHostError::Contract(format!(
+                        "unknown bot: {agent_id}"
+                    )));
                 }
                 let mut messages = state
                     .peer_messages
                     .iter()
-                    .filter(|message| message.from_agent_id == agent_id || message.target_id == agent_id)
+                    .filter(|message| {
+                        message.from_agent_id == agent_id || message.target_id == agent_id
+                    })
                     .cloned()
                     .collect::<Vec<_>>();
                 messages.sort_by_key(|message| message.created_at_ms);
@@ -1740,12 +1928,17 @@ impl FeatureHostController {
                     messages = messages.split_off(start);
                 }
                 drop(state);
-                self.state()?.events.push_back(HostEvent::AgentPeerHistoryListed {
-                    timestamp: timestamp(),
-                    agent_id,
-                    messages,
-                });
-                Ok(CommandAccepted { request_id, operation_id: None })
+                self.state()?
+                    .events
+                    .push_back(HostEvent::AgentPeerHistoryListed {
+                        timestamp: timestamp(),
+                        agent_id,
+                        messages,
+                    });
+                Ok(CommandAccepted {
+                    request_id,
+                    operation_id: None,
+                })
             }
             FeatureCommand::AgentSend {
                 from_agent_id,
@@ -1756,10 +1949,14 @@ impl FeatureHostController {
             } => {
                 let text = clamp_block(&text, 8000);
                 if text.is_empty() {
-                    return Err(FeatureHostError::Contract("agent message must not be empty".into()));
+                    return Err(FeatureHostError::Contract(
+                        "agent message must not be empty".into(),
+                    ));
                 }
                 if from_agent_id == target_id {
-                    return Err(FeatureHostError::Contract("an agent cannot message itself".into()));
+                    return Err(FeatureHostError::Contract(
+                        "an agent cannot message itself".into(),
+                    ));
                 }
 
                 let mut kick_group: Option<String> = None;
@@ -1792,14 +1989,21 @@ impl FeatureHostController {
                         });
                         Some((sender, target))
                     } else if let Some(group_snapshot) = state.groups.get(&target_id).cloned() {
-                        if !group_snapshot.member_ids.iter().any(|id| id == &from_agent_id) {
+                        if !group_snapshot
+                            .member_ids
+                            .iter()
+                            .any(|id| id == &from_agent_id)
+                        {
                             return Err(FeatureHostError::Contract(format!(
                                 "agent {from_agent_id} is not a member of group {target_id}"
                             )));
                         }
                         let now = now_millis();
                         let message_id = next_id(&mut state, "group-message");
-                        let group = state.groups.get_mut(&target_id).expect("group snapshot existed");
+                        let group = state
+                            .groups
+                            .get_mut(&target_id)
+                            .expect("group snapshot existed");
                         group.messages.push(GroupMessage {
                             id: message_id,
                             speaker: GroupSpeaker::Member {
@@ -1859,7 +2063,9 @@ impl FeatureHostController {
                         });
                         None
                     } else {
-                        return Err(FeatureHostError::Contract(format!("unknown agent or group: {target_id}")));
+                        return Err(FeatureHostError::Contract(format!(
+                            "unknown agent or group: {target_id}"
+                        )));
                     }
                 };
 
@@ -1870,24 +2076,40 @@ impl FeatureHostController {
                             let _ = self.start_next_group_turn(&group_id)?;
                         }
                     }
-                    return Ok(CommandAccepted { request_id, operation_id: None });
+                    return Ok(CommandAccepted {
+                        request_id,
+                        operation_id: None,
+                    });
                 }
 
                 if let Some((sender, target)) = direct_target {
                     let wake_prompt = build_agent_inbound_wake_prompt(&sender, &text, priority);
                     self.schedule_background_agent_turn(
                         &target,
-                        if priority { "agent-priority" } else { "agent-message" },
+                        if priority {
+                            "agent-priority"
+                        } else {
+                            "agent-message"
+                        },
                         wake_prompt,
                         format!("peer:{}:{}", sender.id, request_id),
                     )?;
                 }
-                Ok(CommandAccepted { request_id, operation_id: None })
+                Ok(CommandAccepted {
+                    request_id,
+                    operation_id: None,
+                })
             }
-            FeatureCommand::AgentBroadcast { target_ids, message, .. } => {
+            FeatureCommand::AgentBroadcast {
+                target_ids,
+                message,
+                ..
+            } => {
                 let message = clamp_block(&message, 8000);
                 if message.is_empty() {
-                    return Err(FeatureHostError::Contract("broadcast message must not be empty".into()));
+                    return Err(FeatureHostError::Contract(
+                        "broadcast message must not be empty".into(),
+                    ));
                 }
                 let targets = {
                     let state = self.state()?;
@@ -1924,7 +2146,10 @@ impl FeatureHostController {
                     timestamp: timestamp(),
                     result,
                 });
-                Ok(CommandAccepted { request_id, operation_id: None })
+                Ok(CommandAccepted {
+                    request_id,
+                    operation_id: None,
+                })
             }
             _ => unreachable!("non-agent-messaging command routed to agent messaging executor"),
         }
@@ -1998,7 +2223,7 @@ impl FeatureHostController {
                 operation_id: operation_id.clone(),
                 source: source.to_string(),
             });
-            return Ok(Some(operation_id));
+            Ok(Some(operation_id))
         }
         #[cfg(not(feature = "production"))]
         Err(FeatureHostError::ProductionUnavailable)
@@ -2018,16 +2243,16 @@ impl FeatureHostController {
                     settings.remote_control_enabled,
                     settings.ai_computer_control_enabled,
                 );
-                self.state()?.events.push_back(HostEvent::ComputerStatusChanged {
-                    timestamp: timestamp(),
-                    request_id: request_id.clone(),
-                    status,
-                });
+                self.state()?
+                    .events
+                    .push_back(HostEvent::ComputerStatusChanged {
+                        timestamp: timestamp(),
+                        request_id: request_id.clone(),
+                        status,
+                    });
             }
             FeatureCommand::ComputerScreenshot {
-                origin,
-                session_id,
-                ..
+                origin, session_id, ..
             } => {
                 self.ensure_computer_origin_allowed(origin, session_id.as_deref(), &settings)?;
                 let snapshot = if self.config.mode == HostMode::Test {
@@ -2046,12 +2271,14 @@ impl FeatureHostController {
                         "capturedAtMs": snapshot.captured_at_ms,
                     }),
                 );
-                self.state()?.events.push_back(HostEvent::ComputerSnapshotCaptured {
-                    timestamp: timestamp(),
-                    request_id: request_id.clone(),
-                    origin,
-                    snapshot,
-                });
+                self.state()?
+                    .events
+                    .push_back(HostEvent::ComputerSnapshotCaptured {
+                        timestamp: timestamp(),
+                        request_id: request_id.clone(),
+                        origin,
+                        snapshot,
+                    });
             }
             FeatureCommand::ComputerAction {
                 origin,
@@ -2109,11 +2336,13 @@ impl FeatureHostController {
                         "status": "success",
                     }),
                 )?;
-                self.state()?.events.push_back(HostEvent::ComputerActionCompleted {
-                    timestamp: timestamp(),
-                    request_id: request_id.clone(),
-                    result,
-                });
+                self.state()?
+                    .events
+                    .push_back(HostEvent::ComputerActionCompleted {
+                        timestamp: timestamp(),
+                        request_id: request_id.clone(),
+                        result,
+                    });
             }
             _ => unreachable!("non-computer command routed to computer executor"),
         }
@@ -2130,7 +2359,9 @@ impl FeatureHostController {
         let request_id = command.request_id().to_string();
         let remote_enabled = self.state()?.settings.remote_control_enabled;
         let (method, action, payload, local_transition) = match command {
-            FeatureCommand::RemoteComputerRegister { device_id, label, .. } => {
+            FeatureCommand::RemoteComputerRegister {
+                device_id, label, ..
+            } => {
                 if !remote_enabled {
                     return Err(FeatureHostError::Contract(
                         "enable remote computer control before creating a pairing code".into(),
@@ -2291,8 +2522,12 @@ impl FeatureHostController {
                     "expiresAt": now_millis() / 1000 + 7200,
                     "state": "active",
                 }),
-                "sessionClosed" => json!({"sessionId": payload.get("sessionId"), "state": "closed"}),
-                "signals" => json!({"sessionId": payload.get("sessionId"), "signals": [], "lastSignalId": payload.get("afterSignalId")}),
+                "sessionClosed" => {
+                    json!({"sessionId": payload.get("sessionId"), "state": "closed"})
+                }
+                "signals" => {
+                    json!({"sessionId": payload.get("sessionId"), "signals": [], "lastSignalId": payload.get("afterSignalId")})
+                }
                 _ => json!({"ok": true}),
             }
         } else {
@@ -2312,16 +2547,20 @@ impl FeatureHostController {
                     let client_id = data
                         .get("clientId")
                         .and_then(Value::as_str)
-                        .ok_or_else(|| FeatureHostError::Contract(
-                            "remote session activation did not return clientId".into(),
-                        ))?
+                        .ok_or_else(|| {
+                            FeatureHostError::Contract(
+                                "remote session activation did not return clientId".into(),
+                            )
+                        })?
                         .to_string();
                     let expires_at_seconds = data
                         .get("expiresAt")
                         .and_then(Value::as_i64)
-                        .ok_or_else(|| FeatureHostError::Contract(
-                            "remote session activation did not return expiresAt".into(),
-                        ))?;
+                        .ok_or_else(|| {
+                            FeatureHostError::Contract(
+                                "remote session activation did not return expiresAt".into(),
+                            )
+                        })?;
                     let device_id = payload
                         .get("deviceId")
                         .and_then(Value::as_str)
@@ -2340,18 +2579,22 @@ impl FeatureHostController {
                     self.state()?.remote_computer_sessions.remove(&id);
                 }
                 "revoke-client" => {
-                    self.state()?.remote_computer_sessions.retain(|_, session| session.client_id != id);
+                    self.state()?
+                        .remote_computer_sessions
+                        .retain(|_, session| session.client_id != id);
                 }
                 _ => {}
             }
         }
 
-        self.state()?.events.push_back(HostEvent::RemoteComputerChanged {
-            timestamp: timestamp(),
-            request_id: request_id.clone(),
-            action: action.to_string(),
-            data,
-        });
+        self.state()?
+            .events
+            .push_back(HostEvent::RemoteComputerChanged {
+                timestamp: timestamp(),
+                request_id: request_id.clone(),
+                action: action.to_string(),
+                data,
+            });
         Ok(CommandAccepted {
             request_id,
             operation_id: None,
@@ -2380,9 +2623,11 @@ impl FeatureHostController {
                 }
                 let session_id = session_id
                     .filter(|session| !session.trim().is_empty())
-                    .ok_or_else(|| FeatureHostError::Contract(
-                        "remote computer control requires an active paired session id".into(),
-                    ))?;
+                    .ok_or_else(|| {
+                        FeatureHostError::Contract(
+                            "remote computer control requires an active paired session id".into(),
+                        )
+                    })?;
                 let mut state = self.state()?;
                 let now = now_millis() / 1000;
                 state
@@ -2424,31 +2669,31 @@ impl FeatureHostController {
         Ok(())
     }
 
-    fn execute_memory(
-        &self,
-        command: FeatureCommand,
-    ) -> Result<CommandAccepted, FeatureHostError> {
+    fn execute_memory(&self, command: FeatureCommand) -> Result<CommandAccepted, FeatureHostError> {
         let request_id = command.request_id().to_string();
         let (agent_id, action) = match command {
-            FeatureCommand::MemoryList { agent_id, limit, .. } => {
-                (agent_id, MemoryAction::List { limit })
-            }
-            FeatureCommand::MemoryAdd { agent_id, content, kind, .. } => {
-                (agent_id, MemoryAction::Add { content, kind })
-            }
+            FeatureCommand::MemoryList {
+                agent_id, limit, ..
+            } => (agent_id, MemoryAction::List { limit }),
+            FeatureCommand::MemoryAdd {
+                agent_id,
+                content,
+                kind,
+                ..
+            } => (agent_id, MemoryAction::Add { content, kind }),
             FeatureCommand::MemoryRemove { agent_id, id, .. } => {
                 (agent_id, MemoryAction::Remove { id })
             }
-            FeatureCommand::MemoryClear { agent_id, .. } => {
-                (agent_id, MemoryAction::Clear)
-            }
+            FeatureCommand::MemoryClear { agent_id, .. } => (agent_id, MemoryAction::Clear),
             _ => unreachable!("non-memory command routed to memory executor"),
         };
         {
             let state = self.state()?;
             ensure_open(&state)?;
             if !state.bots.contains_key(&agent_id) {
-                return Err(FeatureHostError::Contract(format!("unknown bot: {agent_id}")));
+                return Err(FeatureHostError::Contract(format!(
+                    "unknown bot: {agent_id}"
+                )));
             }
         }
         if !is_safe_memory_agent_id(&agent_id) {
@@ -2456,9 +2701,10 @@ impl FeatureHostController {
                 "unsafe memory agent id: {agent_id}"
             )));
         }
-        let root = self.memory_root_path.as_deref().ok_or_else(|| {
-            FeatureHostError::Contract("memory storage is unavailable".into())
-        })?;
+        let root = self
+            .memory_root_path
+            .as_deref()
+            .ok_or_else(|| FeatureHostError::Contract("memory storage is unavailable".into()))?;
         let memory_dir = root.join(&agent_id).join("memory");
         match action {
             MemoryAction::List { limit } => {
@@ -2477,7 +2723,12 @@ impl FeatureHostController {
                 self.state()?.events.push_back(HostEvent::MemoryChanged {
                     timestamp: timestamp(),
                     agent_id,
-                    action: if memory.is_some() { "added" } else { "duplicate" }.into(),
+                    action: if memory.is_some() {
+                        "added"
+                    } else {
+                        "duplicate"
+                    }
+                    .into(),
                     memory,
                 });
             }
@@ -2510,10 +2761,7 @@ impl FeatureHostController {
         })
     }
 
-    fn execute_tray(
-        &self,
-        command: FeatureCommand,
-    ) -> Result<CommandAccepted, FeatureHostError> {
+    fn execute_tray(&self, command: FeatureCommand) -> Result<CommandAccepted, FeatureHostError> {
         let request_id = command.request_id().to_string();
         let mut state = self.state()?;
         ensure_open(&state)?;
@@ -2578,12 +2826,14 @@ impl FeatureHostController {
         command: FeatureCommand,
     ) -> Result<CommandAccepted, FeatureHostError> {
         let request_id = command.request_id().to_string();
-        let workflow_root = self.workflow_root_path.as_deref().ok_or_else(|| {
-            FeatureHostError::Contract("workflow storage is unavailable".into())
-        })?;
-        let agent_root = self.memory_root_path.as_deref().ok_or_else(|| {
-            FeatureHostError::Contract("agent storage is unavailable".into())
-        })?;
+        let workflow_root = self
+            .workflow_root_path
+            .as_deref()
+            .ok_or_else(|| FeatureHostError::Contract("workflow storage is unavailable".into()))?;
+        let agent_root = self
+            .memory_root_path
+            .as_deref()
+            .ok_or_else(|| FeatureHostError::Contract("agent storage is unavailable".into()))?;
         let agent_id = match &command {
             FeatureCommand::WorkflowList { agent_id, .. }
             | FeatureCommand::WorkflowUpsert { agent_id, .. }
@@ -2598,11 +2848,15 @@ impl FeatureHostController {
             let state = self.state()?;
             ensure_open(&state)?;
             if !state.bots.contains_key(&agent_id) {
-                return Err(FeatureHostError::Contract(format!("unknown bot: {agent_id}")));
+                return Err(FeatureHostError::Contract(format!(
+                    "unknown bot: {agent_id}"
+                )));
             }
         }
         if !is_safe_memory_agent_id(&agent_id) {
-            return Err(FeatureHostError::Contract(format!("unsafe workflow agent id: {agent_id}")));
+            return Err(FeatureHostError::Contract(format!(
+                "unsafe workflow agent id: {agent_id}"
+            )));
         }
 
         match command {
@@ -2613,6 +2867,12 @@ impl FeatureHostController {
                     state
                         .automations
                         .values()
+                        .filter(|automation| {
+                            automation
+                                .agent_id
+                                .as_deref()
+                                .is_none_or(|owner| owner == agent_id.as_str())
+                        })
                         .map(workflow_from_automation)
                         .collect::<Vec<_>>()
                 };
@@ -2636,9 +2896,7 @@ impl FeatureHostController {
                 if let Some(mut trigger) = trigger {
                     trigger.schedule = normalize_automation_schedule(&trigger.schedule)?;
                     let now = now_millis();
-                    let automation_id = id
-                        .clone()
-                        .unwrap_or_else(|| slugify_workflow_name(&name));
+                    let automation_id = id.clone().unwrap_or_else(|| slugify_workflow_name(&name));
                     let automation = {
                         let mut state = self.state()?;
                         let created_at_ms = state
@@ -2652,6 +2910,7 @@ impl FeatureHostController {
                             .and_then(|automation| automation.last_run_at_ms);
                         let automation = AutomationSummary {
                             id: automation_id.clone(),
+                            agent_id: Some(agent_id.clone()),
                             name: clamp_workflow_name(&name),
                             prompt: clamp_workflow_body(&body),
                             schedule: trigger.schedule.clone(),
@@ -2688,6 +2947,9 @@ impl FeatureHostController {
                     if let Some(existing_id) = id.as_deref() {
                         let removed_automation = {
                             let mut state = self.state()?;
+                            if let Some(existing) = state.automations.get(existing_id) {
+                                ensure_automation_agent_scope(existing, Some(agent_id.as_str()))?;
+                            }
                             let removed = state.automations.remove(existing_id).is_some();
                             if removed {
                                 self.persist_automations(&state.automations)?;
@@ -2722,6 +2984,7 @@ impl FeatureHostController {
                 let automation = {
                     let mut state = self.state()?;
                     if let Some(automation) = state.automations.get_mut(&id) {
+                        ensure_automation_agent_scope(automation, Some(agent_id.as_str()))?;
                         automation.enabled = enabled;
                         automation.next_run_at_ms = if enabled {
                             next_automation_run(&automation.schedule, now_millis())
@@ -2752,6 +3015,9 @@ impl FeatureHostController {
             FeatureCommand::WorkflowDelete { id, .. } => {
                 let removed_automation = {
                     let mut state = self.state()?;
+                    if let Some(existing) = state.automations.get(&id) {
+                        ensure_automation_agent_scope(existing, Some(agent_id.as_str()))?;
+                    }
                     let removed = state.automations.remove(&id).is_some();
                     if removed {
                         self.persist_automations(&state.automations)?;
@@ -2780,12 +3046,15 @@ impl FeatureHostController {
                     return self.execute_automation(FeatureCommand::AutomationRun {
                         request_id,
                         id,
+                        agent_id: Some(agent_id),
                     });
                 }
                 let workflow = load_workflow_summary(workflow_root, agent_root, &agent_id, &id)
                     .ok_or_else(|| FeatureHostError::Contract(format!("unknown workflow: {id}")))?;
                 if !workflow.is_enabled_for_agent {
-                    return Err(FeatureHostError::Contract(format!("workflow is disabled for {agent_id}: {id}")));
+                    return Err(FeatureHostError::Contract(format!(
+                        "workflow is disabled for {agent_id}: {id}"
+                    )));
                 }
                 let visible_text = format!("@{}", workflow.name);
                 let recipe = clamp_block(&workflow.body, WORKFLOW_INJECTED_BODY_LIMIT);
@@ -2808,7 +3077,10 @@ impl FeatureHostController {
                             text: format!("Running workflow: {}", workflow.name),
                             operation_id: None,
                         });
-                        return Ok(CommandAccepted { request_id, operation_id: None });
+                        return Ok(CommandAccepted {
+                            request_id,
+                            operation_id: None,
+                        });
                     }
                     HostMode::Production => {
                         #[cfg(feature = "production")]
@@ -2818,27 +3090,39 @@ impl FeatureHostController {
                                 .bots
                                 .get(&agent_id)
                                 .and_then(|bot| bot.conversation_id.clone())
-                                .ok_or_else(|| FeatureHostError::Contract(format!("bot has no conversation: {agent_id}")))?;
-                            let (provider, model) = match self.runtime()?.execute(RuntimeCommand::Status)? {
+                                .ok_or_else(|| {
+                                    FeatureHostError::Contract(format!(
+                                        "bot has no conversation: {agent_id}"
+                                    ))
+                                })?;
+                            let (provider, model) = match self
+                                .runtime()?
+                                .execute(RuntimeCommand::Status)?
+                            {
                                 RuntimeResponse::Status(status) => (
                                     format!("{:?}", status.model_provider).to_lowercase(),
                                     status.model,
                                 ),
                                 other => return Err(unexpected_response("runtime.status", other)),
                             };
-                            let response = self.runtime()?.execute(RuntimeCommand::SendMessage {
-                                conversation_id: ConversationId(conversation_id),
-                                text: runtime_text,
-                                client_message_id: Some(request_id.clone()),
-                                hidden: true,
-                            })?;
+                            let response =
+                                self.runtime()?.execute(RuntimeCommand::SendMessage {
+                                    conversation_id: ConversationId(conversation_id),
+                                    text: runtime_text,
+                                    client_message_id: Some(request_id.clone()),
+                                    hidden: true,
+                                })?;
                             let operation_id = match response {
-                                RuntimeResponse::Accepted { operation_id } => operation_id.to_string(),
+                                RuntimeResponse::Accepted { operation_id } => {
+                                    operation_id.to_string()
+                                }
                                 other => return Err(unexpected_response("workflow.run", other)),
                             };
                             let mut state = self.state()?;
                             state.operations.insert(operation_id.clone());
-                            state.operation_agents.insert(operation_id.clone(), agent_id);
+                            state
+                                .operation_agents
+                                .insert(operation_id.clone(), agent_id);
                             state.events.push_back(HostEvent::ModelRouted {
                                 timestamp: timestamp(),
                                 operation_id: operation_id.clone(),
@@ -2858,7 +3142,10 @@ impl FeatureHostController {
                                 label: format!("workflow:{}", workflow.id),
                                 interruptible: true,
                             });
-                            return Ok(CommandAccepted { request_id, operation_id: Some(operation_id) });
+                            return Ok(CommandAccepted {
+                                request_id,
+                                operation_id: Some(operation_id),
+                            });
                         }
                         #[cfg(not(feature = "production"))]
                         return Err(FeatureHostError::ProductionUnavailable);
@@ -2891,6 +3178,7 @@ impl FeatureHostController {
                     let id = slugify_workflow_name(&name);
                     let automation = AutomationSummary {
                         id: id.clone(),
+                        agent_id: Some(agent_id.clone()),
                         name: name.clone(),
                         prompt: parsed.body.clone(),
                         schedule: trigger.schedule.clone(),
@@ -2981,10 +3269,9 @@ impl FeatureHostController {
         command: FeatureCommand,
     ) -> Result<CommandAccepted, FeatureHostError> {
         let request_id = command.request_id().to_string();
-        let agent_root = self
-            .memory_root_path
-            .as_deref()
-            .ok_or_else(|| FeatureHostError::Contract("attachment storage is unavailable".into()))?;
+        let agent_root = self.memory_root_path.as_deref().ok_or_else(|| {
+            FeatureHostError::Contract("attachment storage is unavailable".into())
+        })?;
         match command {
             FeatureCommand::AttachmentUpload {
                 agent_id,
@@ -2993,16 +3280,24 @@ impl FeatureHostController {
                 bytes_base64,
                 ..
             } => {
-                if !is_safe_memory_agent_id(&agent_id) || !self.state()?.bots.contains_key(&agent_id) {
-                    return Err(FeatureHostError::Contract(format!("unknown attachment owner: {agent_id}")));
+                if !is_safe_memory_agent_id(&agent_id)
+                    || !self.state()?.bots.contains_key(&agent_id)
+                {
+                    return Err(FeatureHostError::Contract(format!(
+                        "unknown attachment owner: {agent_id}"
+                    )));
                 }
                 let filename = filename.trim();
                 if filename.is_empty() {
-                    return Err(FeatureHostError::Contract("attachment filename must not be empty".into()));
+                    return Err(FeatureHostError::Contract(
+                        "attachment filename must not be empty".into(),
+                    ));
                 }
                 let bytes = base64::engine::general_purpose::STANDARD
                     .decode(bytes_base64.trim())
-                    .map_err(|error| FeatureHostError::Contract(format!("invalid attachment base64: {error}")))?;
+                    .map_err(|error| {
+                        FeatureHostError::Contract(format!("invalid attachment base64: {error}"))
+                    })?;
                 if bytes.is_empty() {
                     return Err(FeatureHostError::Contract("attachment is empty".into()));
                 }
@@ -3018,7 +3313,11 @@ impl FeatureHostController {
                     .extension()
                     .and_then(|extension| extension.to_str())
                     .map(|extension| extension.to_ascii_lowercase())
-                    .filter(|extension| extension.chars().all(|character| character.is_ascii_alphanumeric()))
+                    .filter(|extension| {
+                        extension
+                            .chars()
+                            .all(|character| character.is_ascii_alphanumeric())
+                    })
                     .filter(|extension| !extension.is_empty())
                     .unwrap_or_else(|| "bin".into());
                 let attachments_dir = agent_root.join(&agent_id).join("attachments");
@@ -3036,7 +3335,8 @@ impl FeatureHostController {
                     agent_id,
                     name: filename.to_string(),
                     path: path.to_string_lossy().to_string(),
-                    mime_type: clean_optional_string(mime_type).or_else(|| media_mime_type(filename).map(str::to_string)),
+                    mime_type: clean_optional_string(mime_type)
+                        .or_else(|| media_mime_type(filename).map(str::to_string)),
                     size_bytes: bytes.len() as u64,
                     hash,
                 };
@@ -3060,10 +3360,12 @@ impl FeatureHostController {
                     truncated: !binary && bytes > ATTACHMENT_TEXT_PREVIEW_BYTE_CAP as u64,
                     bytes,
                 };
-                self.state()?.events.push_back(HostEvent::AttachmentTextRead {
-                    timestamp: timestamp(),
-                    result,
-                });
+                self.state()?
+                    .events
+                    .push_back(HostEvent::AttachmentTextRead {
+                        timestamp: timestamp(),
+                        result,
+                    });
             }
             FeatureCommand::AttachmentReadChunk {
                 agent_id,
@@ -3078,7 +3380,9 @@ impl FeatureHostController {
                 })?;
                 let total_size = metadata.len();
                 let start = offset.min(total_size);
-                let length = length.min(ATTACHMENT_CHUNK_MAX_BYTES as u64).min(total_size - start);
+                let length = length
+                    .min(ATTACHMENT_CHUNK_MAX_BYTES as u64)
+                    .min(total_size - start);
                 let bytes = read_file_range(&resolved, start, length as usize)?;
                 let result = AttachmentChunkResult {
                     path: resolved.to_string_lossy().to_string(),
@@ -3086,21 +3390,27 @@ impl FeatureHostController {
                     total_size,
                     mime: media_mime_type(resolved.to_string_lossy().as_ref()).map(str::to_string),
                 };
-                self.state()?.events.push_back(HostEvent::AttachmentChunkRead {
-                    timestamp: timestamp(),
-                    result,
-                });
+                self.state()?
+                    .events
+                    .push_back(HostEvent::AttachmentChunkRead {
+                        timestamp: timestamp(),
+                        result,
+                    });
             }
             FeatureCommand::AttachmentReadImage { agent_id, path, .. } => {
                 let resolved = resolve_agent_attachment_path(agent_root, &agent_id, &path)?;
                 let mime = media_mime_type(resolved.to_string_lossy().as_ref())
                     .filter(|mime| mime.starts_with("image/"))
-                    .ok_or_else(|| FeatureHostError::Contract("attachment is not a supported image".into()))?;
+                    .ok_or_else(|| {
+                        FeatureHostError::Contract("attachment is not a supported image".into())
+                    })?;
                 let bytes = std::fs::read(&resolved).map_err(|error| {
                     FeatureHostError::Contract(format!("read image attachment: {error}"))
                 })?;
                 if bytes.len() as u64 > ATTACHMENT_BYTE_LIMIT {
-                    return Err(FeatureHostError::Contract("image attachment exceeds preview limit".into()));
+                    return Err(FeatureHostError::Contract(
+                        "image attachment exceeds preview limit".into(),
+                    ));
                 }
                 let (width, height) = image_dimensions(&bytes, mime);
                 let result = AttachmentImageResult {
@@ -3112,10 +3422,12 @@ impl FeatureHostController {
                     width,
                     height,
                 };
-                self.state()?.events.push_back(HostEvent::AttachmentImageRead {
-                    timestamp: timestamp(),
-                    result,
-                });
+                self.state()?
+                    .events
+                    .push_back(HostEvent::AttachmentImageRead {
+                        timestamp: timestamp(),
+                        result,
+                    });
             }
             _ => unreachable!("non-attachment command routed to attachment executor"),
         }
@@ -3125,10 +3437,7 @@ impl FeatureHostController {
         })
     }
 
-    fn execute_search(
-        &self,
-        command: FeatureCommand,
-    ) -> Result<CommandAccepted, FeatureHostError> {
+    fn execute_search(&self, command: FeatureCommand) -> Result<CommandAccepted, FeatureHostError> {
         let request_id = command.request_id().to_string();
         {
             let state = self.state()?;
@@ -3142,20 +3451,32 @@ impl FeatureHostController {
                 if !query.is_empty() && self.config.mode == HostMode::Production {
                     #[cfg(feature = "production")]
                     {
-                        let conversations = match self.runtime()?.execute(RuntimeCommand::ListConversations)? {
-                            RuntimeResponse::Conversations { data } => data,
-                            other => return Err(unexpected_response("search.messages.conversations", other)),
-                        };
+                        let conversations =
+                            match self.runtime()?.execute(RuntimeCommand::ListConversations)? {
+                                RuntimeResponse::Conversations { data } => data,
+                                other => {
+                                    return Err(unexpected_response(
+                                        "search.messages.conversations",
+                                        other,
+                                    ));
+                                }
+                            };
                         let bots = self.state()?.bots.values().cloned().collect::<Vec<_>>();
                         let bot_by_conversation = bots
                             .iter()
-                            .filter_map(|bot| bot.conversation_id.as_ref().map(|conversation_id| (conversation_id.clone(), bot)))
+                            .filter_map(|bot| {
+                                bot.conversation_id
+                                    .as_ref()
+                                    .map(|conversation_id| (conversation_id.clone(), bot))
+                            })
                             .collect::<BTreeMap<_, _>>();
                         for conversation in conversations {
-                            let response = self.runtime()?.execute(RuntimeCommand::ConversationHistory {
-                                conversation_id: conversation.id.clone(),
-                                limit: Some(2_000),
-                            });
+                            let response =
+                                self.runtime()?
+                                    .execute(RuntimeCommand::ConversationHistory {
+                                        conversation_id: conversation.id.clone(),
+                                        limit: Some(2_000),
+                                    });
                             let messages = match response {
                                 Ok(RuntimeResponse::History { data }) => data,
                                 _ => continue,
@@ -3172,7 +3493,8 @@ impl FeatureHostController {
                                 if per_agent >= AGENT_CONTENT_SEARCH_MAX_MATCHES_PER_AGENT {
                                     break;
                                 }
-                                let Some(snippet) = build_content_snippet(&message.text, &query) else {
+                                let Some(snippet) = build_content_snippet(&message.text, &query)
+                                else {
                                     continue;
                                 };
                                 let role = match message.role {
@@ -3194,15 +3516,17 @@ impl FeatureHostController {
                                 per_agent += 1;
                             }
                         }
-                        matches.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms));
+                        matches.sort_by_key(|item| std::cmp::Reverse(item.timestamp_ms));
                         matches.truncate(limit);
                     }
                 }
-                self.state()?.events.push_back(HostEvent::SearchMessagesListed {
-                    timestamp: timestamp(),
-                    query,
-                    matches,
-                });
+                self.state()?
+                    .events
+                    .push_back(HostEvent::SearchMessagesListed {
+                        timestamp: timestamp(),
+                        query,
+                        matches,
+                    });
             }
             FeatureCommand::SearchMedia { query, limit, .. } => {
                 let query = query.trim().to_lowercase();
@@ -3220,13 +3544,15 @@ impl FeatureHostController {
                         );
                     }
                 }
-                matches.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms));
+                matches.sort_by_key(|item| std::cmp::Reverse(item.timestamp_ms));
                 matches.truncate(limit);
-                self.state()?.events.push_back(HostEvent::SearchMediaListed {
-                    timestamp: timestamp(),
-                    query,
-                    matches,
-                });
+                self.state()?
+                    .events
+                    .push_back(HostEvent::SearchMediaListed {
+                        timestamp: timestamp(),
+                        query,
+                        matches,
+                    });
             }
             _ => unreachable!("non-search command routed to search executor"),
         }
@@ -3236,10 +3562,7 @@ impl FeatureHostController {
         })
     }
 
-    fn execute_mcp(
-        &self,
-        command: FeatureCommand,
-    ) -> Result<CommandAccepted, FeatureHostError> {
+    fn execute_mcp(&self, command: FeatureCommand) -> Result<CommandAccepted, FeatureHostError> {
         let request_id = command.request_id().to_string();
         {
             let state = self.state()?;
@@ -3352,6 +3675,84 @@ impl FeatureHostController {
                     });
                 }
             }
+            FeatureCommand::McpRemove { server, .. } => {
+                let server = required(server, "MCP server")?;
+                if self.config.mode == HostMode::Production {
+                    #[cfg(feature = "production")]
+                    {
+                        let removed = match self.runtime()?.execute(RuntimeCommand::McpRemove {
+                            server: server.clone(),
+                        })? {
+                            RuntimeResponse::McpRemoved { removed, .. } => removed,
+                            other => return Err(unexpected_response("mcp.remove", other)),
+                        };
+                        if !removed {
+                            return Err(FeatureHostError::Contract(format!(
+                                "MCP server is not a user-managed configuration: {server}"
+                            )));
+                        }
+                    }
+                    #[cfg(not(feature = "production"))]
+                    return Err(FeatureHostError::ProductionUnavailable);
+                }
+                self.state()?.events.push_back(HostEvent::McpRefreshed {
+                    timestamp: timestamp(),
+                });
+            }
+            FeatureCommand::McpSetCustomInstructions {
+                server,
+                instructions,
+                ..
+            } => {
+                let server = required(server, "MCP server")?;
+                let instructions = clamp_block(&instructions, 20_000);
+                if self.config.mode == HostMode::Production {
+                    #[cfg(feature = "production")]
+                    match self
+                        .runtime()?
+                        .execute(RuntimeCommand::McpSetCustomInstructions {
+                            server: server.clone(),
+                            instructions,
+                        })? {
+                        RuntimeResponse::McpCustomInstructionsUpdated { .. } => {}
+                        other => {
+                            return Err(unexpected_response("mcp.setCustomInstructions", other));
+                        }
+                    }
+                    #[cfg(not(feature = "production"))]
+                    return Err(FeatureHostError::ProductionUnavailable);
+                }
+                self.state()?.events.push_back(HostEvent::McpRefreshed {
+                    timestamp: timestamp(),
+                });
+            }
+            FeatureCommand::McpSetToolDisabled {
+                server,
+                tool,
+                disabled,
+                ..
+            } => {
+                let server = required(server, "MCP server")?;
+                let tool = required(tool, "MCP tool")?;
+                if self.config.mode == HostMode::Production {
+                    #[cfg(feature = "production")]
+                    match self
+                        .runtime()?
+                        .execute(RuntimeCommand::McpSetToolDisabled {
+                            server: server.clone(),
+                            tool,
+                            disabled,
+                        })? {
+                        RuntimeResponse::McpToolDisabledUpdated { .. } => {}
+                        other => return Err(unexpected_response("mcp.setToolDisabled", other)),
+                    }
+                    #[cfg(not(feature = "production"))]
+                    return Err(FeatureHostError::ProductionUnavailable);
+                }
+                self.state()?.events.push_back(HostEvent::McpRefreshed {
+                    timestamp: timestamp(),
+                });
+            }
             FeatureCommand::McpRefresh { .. } => {
                 if self.config.mode == HostMode::Production {
                     #[cfg(feature = "production")]
@@ -3449,14 +3850,25 @@ impl FeatureHostController {
                     settings,
                 });
             }
-            FeatureCommand::AuditList { agent_id, limit, .. } => {
-                if !is_safe_memory_agent_id(&agent_id) || !self.state()?.bots.contains_key(&agent_id) {
-                    return Err(FeatureHostError::Contract(format!("unknown audit agent: {agent_id}")));
+            FeatureCommand::AuditList {
+                agent_id, limit, ..
+            } => {
+                if !is_safe_memory_agent_id(&agent_id)
+                    || !self.state()?.bots.contains_key(&agent_id)
+                {
+                    return Err(FeatureHostError::Contract(format!(
+                        "unknown audit agent: {agent_id}"
+                    )));
                 }
                 let records = self
                     .memory_root_path
                     .as_deref()
-                    .map(|root| read_action_audit(&root.join(&agent_id).join("audit.jsonl"), limit.min(1000)))
+                    .map(|root| {
+                        read_action_audit(
+                            &root.join(&agent_id).join("audit.jsonl"),
+                            limit.min(1000),
+                        )
+                    })
                     .unwrap_or_default();
                 self.state()?.events.push_back(HostEvent::AuditListed {
                     timestamp: timestamp(),
@@ -3912,6 +4324,33 @@ impl FeatureHostController {
                     }
                 }
             }
+            FeatureCommand::ListenerDisconnect { platform, .. } => {
+                let integration = state.listeners.get_mut(&platform).ok_or_else(|| {
+                    FeatureHostError::Contract(format!(
+                        "unsupported listener platform: {platform:?}"
+                    ))
+                })?;
+                integration.is_connected = false;
+                integration.account_label = None;
+                integration.error = None;
+                let integration = integration.clone();
+                state.events.push_back(HostEvent::ListenerChanged {
+                    timestamp: timestamp(),
+                    integration,
+                });
+                if let Some(connector_id) = connector_for_listener_platform(platform) {
+                    if let Some(connector) = state.connectors.get_mut(connector_id) {
+                        connector.status = ConnectorStatus::Disconnected;
+                        connector.accounts.clear();
+                        let connector = connector.clone();
+                        state.events.push_back(HostEvent::ConnectorChanged {
+                            timestamp: timestamp(),
+                            action: "disconnected".into(),
+                            connector,
+                        });
+                    }
+                }
+            }
             FeatureCommand::UpdateStatus { .. } => {
                 let update_state = state.update_state.clone();
                 state.events.push_back(HostEvent::UpdateChanged {
@@ -4287,8 +4726,6 @@ impl FeatureHostController {
                 let (connectors, _) = self.production_connector_snapshot()?;
                 for integration in &mut integrations {
                     if integration.platform == ListenerPlatform::Git {
-                        integration.is_connected = true;
-                        integration.account_label = Some("Local repository".into());
                         continue;
                     }
                     if let Some(connector_id) =
@@ -4346,6 +4783,68 @@ impl FeatureHostController {
                     account_label: None,
                 };
                 self.execute_live_product_surface_production(&synthetic)?;
+                Ok(Some(CommandAccepted {
+                    request_id,
+                    operation_id: None,
+                }))
+            }
+            FeatureCommand::ListenerDisconnect { platform, .. } => {
+                if *platform != ListenerPlatform::Git {
+                    let connector_id =
+                        connector_for_listener_platform(*platform).ok_or_else(|| {
+                            FeatureHostError::Contract(format!(
+                                "no connector exists for listener platform {platform:?}"
+                            ))
+                        })?;
+                    let (connectors, live) = self.production_connector_snapshot()?;
+                    let accounts = connectors
+                        .iter()
+                        .find(|connector| connector.id == connector_id)
+                        .map(|connector| connector.accounts.clone())
+                        .unwrap_or_default();
+                    if accounts.is_empty() {
+                        if let Some(projection) = live.get(connector_id) {
+                            if projection.status == Some(ConnectorStatus::Connected) {
+                                if let Some(server) = projection.server_name.clone() {
+                                    match self
+                                        .runtime()?
+                                        .execute(RuntimeCommand::McpOauthLogout { server })?
+                                    {
+                                        RuntimeResponse::McpOauth { .. } => {}
+                                        other => {
+                                            return Err(unexpected_response(
+                                                "mahayana.mcp.oauth.logout",
+                                                other,
+                                            ));
+                                        }
+                                    }
+                                    self.emit_connector_snapshot_change(connector_id, "removed")?;
+                                }
+                            }
+                        }
+                    } else {
+                        for account in accounts {
+                            let synthetic = FeatureCommand::ConnectorRemoveAccount {
+                                request_id: format!("{request_id}:{}", account.id),
+                                connector_id: connector_id.into(),
+                                account_id: account.id,
+                            };
+                            self.execute_live_product_surface_production(&synthetic)?;
+                        }
+                    }
+                }
+                let payload = serde_json::to_value(command).map_err(|error| {
+                    FeatureHostError::Contract(format!("encode listener.disconnect: {error}"))
+                })?;
+                let response = self
+                    .runtime()?
+                    .product_execute("mahayana.listener.disconnect", &payload)?;
+                let integration =
+                    decode_product_field(response, "integration", "mahayana.listener.disconnect")?;
+                self.state()?.events.push_back(HostEvent::ListenerChanged {
+                    timestamp: timestamp(),
+                    integration,
+                });
                 Ok(Some(CommandAccepted {
                     request_id,
                     operation_id: None,
@@ -4472,7 +4971,10 @@ impl FeatureHostController {
             }
             FeatureCommand::BotList { .. } => {
                 let mut bots: Vec<BotSummary> = decode_product_field(response, "bots", method)?;
-                let mut known = bots.iter().map(|bot| bot.id.clone()).collect::<BTreeSet<_>>();
+                let mut known = bots
+                    .iter()
+                    .map(|bot| bot.id.clone())
+                    .collect::<BTreeSet<_>>();
                 for bot in state.bots.values() {
                     if known.insert(bot.id.clone()) {
                         bots.push(bot.clone());
@@ -4526,7 +5028,7 @@ impl FeatureHostController {
                     integrations,
                 });
             }
-            FeatureCommand::ListenerConnect { .. } => {
+            FeatureCommand::ListenerConnect { .. } | FeatureCommand::ListenerDisconnect { .. } => {
                 let integration = decode_product_field(response, "integration", method)?;
                 state.events.push_back(HostEvent::ListenerChanged {
                     timestamp: timestamp(),
@@ -4636,12 +5138,16 @@ impl FeatureHostController {
                 automation.prompt
             );
             let request_id = format!("listener-{}-{}", automation.id, now_millis());
+            let target_agent_id = automation
+                .agent_id
+                .clone()
+                .unwrap_or_else(|| "mahayana-assistant".into());
             match self.config.mode {
                 HostMode::Test => {
                     self.execute_test(FeatureCommand::ChatSend {
                         request_id,
                         text,
-                        agent_id: Some("mahayana-assistant".into()),
+                        agent_id: Some(target_agent_id.clone()),
                         conversation_id: None,
                         mode: AgentMode::Agent,
                         mode_statement: None,
@@ -4655,7 +5161,7 @@ impl FeatureHostController {
                         self.production_chat(
                             request_id,
                             text,
-                            Some("mahayana-assistant".into()),
+                            Some(target_agent_id),
                             None,
                             AgentMode::Agent,
                             None,
@@ -4691,11 +5197,12 @@ impl FeatureHostController {
             .find(|automation| {
                 automation.enabled && automation.next_run_at_ms.is_some_and(|next| next <= now)
             })
-            .map(|automation| automation.id.clone());
-        if let Some(id) = due {
+            .map(|automation| (automation.id.clone(), automation.agent_id.clone()));
+        if let Some((id, agent_id)) = due {
             let _ = self.execute_automation(FeatureCommand::AutomationRun {
                 request_id: format!("scheduled-{id}-{now}"),
                 id,
+                agent_id,
             })?;
         }
         Ok(())
@@ -4711,10 +5218,7 @@ impl FeatureHostController {
         persist_automations(path, automations)
     }
 
-    fn persist_bots(
-        &self,
-        bots: &BTreeMap<String, BotSummary>,
-    ) -> Result<(), FeatureHostError> {
+    fn persist_bots(&self, bots: &BTreeMap<String, BotSummary>) -> Result<(), FeatureHostError> {
         let Some(path) = self.bot_state_path.as_deref() else {
             return Ok(());
         };
@@ -4731,10 +5235,7 @@ impl FeatureHostController {
         persist_groups(path, groups)
     }
 
-    fn persist_peer_messages(
-        &self,
-        messages: &[AgentPeerMessage],
-    ) -> Result<(), FeatureHostError> {
+    fn persist_peer_messages(&self, messages: &[AgentPeerMessage]) -> Result<(), FeatureHostError> {
         let Some(path) = self.peer_messages_path.as_deref() else {
             return Ok(());
         };
@@ -4895,10 +5396,7 @@ impl FeatureHostController {
     }
 
     #[cfg(feature = "production")]
-    fn start_next_group_turn(
-        &self,
-        group_id: &str,
-    ) -> Result<Option<String>, FeatureHostError> {
+    fn start_next_group_turn(&self, group_id: &str) -> Result<Option<String>, FeatureHostError> {
         let prepared = {
             let state = self.state()?;
             let Some(run) = state.group_runs.get(group_id).cloned() else {
@@ -4951,7 +5449,7 @@ impl FeatureHostController {
             }
             context_sections.push(turn_prompt);
             let runtime_text = format!(
-                "[SAND_HIDDEN_PROMPT]\n{}",
+                "[MAHAYANA_HIDDEN_CONTEXT]\n{}",
                 context_sections.join("\n\n")
             );
             (
@@ -4980,9 +5478,7 @@ impl FeatureHostController {
             other => return Err(unexpected_response("group.member.turn", other)),
         };
         let mut state = self.state()?;
-        state
-            .group_operations
-            .insert(operation_id.clone(), context);
+        state.group_operations.insert(operation_id.clone(), context);
         Ok(Some(operation_id))
     }
 
@@ -5050,11 +5546,7 @@ impl FeatureHostController {
                 ..
             } => {
                 let operation_id = operation_id.to_string();
-                let group_context = self
-                    .state()?
-                    .group_operations
-                    .get(&operation_id)
-                    .cloned();
+                let group_context = self.state()?.group_operations.get(&operation_id).cloned();
                 if let Some(context) = group_context {
                     Some(HostEvent::GroupDelta {
                         timestamp: timestamp(),
@@ -5092,11 +5584,7 @@ impl FeatureHostController {
                 ..
             } => {
                 let operation_id = operation_id.to_string();
-                let group_context = self
-                    .state()?
-                    .group_operations
-                    .get(&operation_id)
-                    .cloned();
+                let group_context = self.state()?.group_operations.get(&operation_id).cloned();
                 if let Some(context) = group_context {
                     if message.role != RuntimeMessageRole::Assistant {
                         None
@@ -5157,13 +5645,15 @@ impl FeatureHostController {
                                     &message.text,
                                 ) {
                                     Ok(workflow) => {
-                                        self.state()?.events.push_back(HostEvent::WorkflowChanged {
-                                            timestamp: timestamp(),
-                                            agent_id: context.agent_id.clone(),
-                                            action: "learned".into(),
-                                            workflow: Some(workflow),
-                                            id: None,
-                                        });
+                                        self.state()?.events.push_back(
+                                            HostEvent::WorkflowChanged {
+                                                timestamp: timestamp(),
+                                                agent_id: context.agent_id.clone(),
+                                                action: "learned".into(),
+                                                workflow: Some(workflow),
+                                                id: None,
+                                            },
+                                        );
                                     }
                                     Err(error) => {
                                         let mut state = self.state()?;
@@ -5194,41 +5684,41 @@ impl FeatureHostController {
                     let mut cards = transcript_cards_from_metadata(&message.metadata);
                     let message_id = message.id.to_string();
                     if message.text.trim().is_empty() && !cards.is_empty() {
-                    let first = cards.remove(0);
-                    let mut state = self.state()?;
-                    for (index, card) in cards.into_iter().enumerate() {
-                        state.events.push_back(HostEvent::TranscriptCard {
-                            timestamp: timestamp(),
-                            entry_id: format!("{message_id}-card-{}", index + 1),
-                            operation_id: Some(operation_id.clone()),
-                            card,
-                        });
-                    }
-                    Some(HostEvent::TranscriptCard {
-                        timestamp: timestamp(),
-                        entry_id: format!("{message_id}-card-0"),
-                        operation_id: Some(operation_id),
-                        card: first,
-                    })
-                } else {
-                    if !cards.is_empty() {
+                        let first = cards.remove(0);
                         let mut state = self.state()?;
                         for (index, card) in cards.into_iter().enumerate() {
                             state.events.push_back(HostEvent::TranscriptCard {
                                 timestamp: timestamp(),
-                                entry_id: format!("{message_id}-card-{index}"),
+                                entry_id: format!("{message_id}-card-{}", index + 1),
                                 operation_id: Some(operation_id.clone()),
                                 card,
                             });
                         }
-                    }
-                    let role = match message.role {
-                        RuntimeMessageRole::User => MessageRole::User,
-                        RuntimeMessageRole::Assistant
-                        | RuntimeMessageRole::Contact
-                        | RuntimeMessageRole::MiniApp
-                        | RuntimeMessageRole::System => MessageRole::Assistant,
-                    };
+                        Some(HostEvent::TranscriptCard {
+                            timestamp: timestamp(),
+                            entry_id: format!("{message_id}-card-0"),
+                            operation_id: Some(operation_id),
+                            card: first,
+                        })
+                    } else {
+                        if !cards.is_empty() {
+                            let mut state = self.state()?;
+                            for (index, card) in cards.into_iter().enumerate() {
+                                state.events.push_back(HostEvent::TranscriptCard {
+                                    timestamp: timestamp(),
+                                    entry_id: format!("{message_id}-card-{index}"),
+                                    operation_id: Some(operation_id.clone()),
+                                    card,
+                                });
+                            }
+                        }
+                        let role = match message.role {
+                            RuntimeMessageRole::User => MessageRole::User,
+                            RuntimeMessageRole::Assistant
+                            | RuntimeMessageRole::Contact
+                            | RuntimeMessageRole::MiniApp
+                            | RuntimeMessageRole::System => MessageRole::Assistant,
+                        };
                         Some(HostEvent::ChatMessage {
                             timestamp: timestamp(),
                             role,
@@ -5250,7 +5740,9 @@ impl FeatureHostController {
                 if let Some(context) = group_context {
                     let _ = self.advance_group_run_after_turn(&context)?;
                     None
-                } else if let Some(context) = self.state()?.background_operations.remove(&operation_id) {
+                } else if let Some(context) =
+                    self.state()?.background_operations.remove(&operation_id)
+                {
                     Some(HostEvent::AgentBackgroundFinished {
                         timestamp: timestamp(),
                         agent_id: context.agent_id,
@@ -5296,7 +5788,9 @@ impl FeatureHostController {
                         action: format!("turnFailed:{code}:{message}"),
                         group,
                     })
-                } else if let Some(context) = self.state()?.background_operations.remove(&operation_id) {
+                } else if let Some(context) =
+                    self.state()?.background_operations.remove(&operation_id)
+                {
                     let mut state = self.state()?;
                     push_error_tray(
                         &mut state,
@@ -5424,12 +5918,20 @@ impl FeatureHostController {
                         tasks,
                     });
                 }
-                if matches!(kind.as_str(), "shell" | "command" | "local-exec" | "exec" | "cloud-agent" | "cloud_agent") {
+                if matches!(
+                    kind.as_str(),
+                    "shell" | "command" | "local-exec" | "exec" | "cloud-agent" | "cloud_agent"
+                ) {
                     let task_id = format!("{operation_id}:{step_id}");
                     let task_kind = if matches!(kind.as_str(), "cloud-agent" | "cloud_agent") {
                         AsyncTaskKind::CloudAgent
                     } else {
                         AsyncTaskKind::Shell
+                    };
+                    let resource_id = if task_kind == AsyncTaskKind::CloudAgent {
+                        cloud_task_resource_id(metadata.as_ref())
+                    } else {
+                        None
                     };
                     let mut state = self.state()?;
                     if status == RuntimeActivityStatus::Running {
@@ -5444,6 +5946,7 @@ impl FeatureHostController {
                                 started_at_ms: now_millis(),
                                 detail: detail.clone(),
                                 subagent_type: None,
+                                resource_id: resource_id.clone(),
                             },
                         );
                     } else {
@@ -5522,7 +6025,7 @@ impl FeatureHostController {
                     progress: None,
                     total: None,
                 })
-            },
+            }
             RuntimeEvent::ProviderDegraded { provider, message } => Some(HostEvent::AgentStep {
                 timestamp: timestamp(),
                 operation_id: None,
@@ -5579,18 +6082,24 @@ impl FeatureHostController {
                 .get("kind")
                 .and_then(Value::as_str)
                 .is_some_and(|kind| matches!(kind, "command" | "local-tool" | "local_tool"));
-        let has_ask_match = settings
-            .auto_review_rules
-            .iter()
-            .any(|rule| rule.behavior == AutoReviewBehavior::Ask && auto_review_rule_matches(rule, &title, &details));
+        let has_ask_match = settings.auto_review_rules.iter().any(|rule| {
+            rule.behavior == AutoReviewBehavior::Ask
+                && auto_review_rule_matches(rule, &title, &details)
+        });
         let has_allow_match = !has_ask_match
-            && settings
-                .auto_review_rules
-                .iter()
-                .any(|rule| rule.behavior == AutoReviewBehavior::Allow && auto_review_rule_matches(rule, &title, &details));
-        let auto_decision = if is_local_tool_request && (!settings.local_execution || settings.local_tool_permission == LocalToolPermission::Never) {
+            && settings.auto_review_rules.iter().any(|rule| {
+                rule.behavior == AutoReviewBehavior::Allow
+                    && auto_review_rule_matches(rule, &title, &details)
+            });
+        let auto_decision = if is_local_tool_request
+            && (!settings.local_execution
+                || settings.local_tool_permission == LocalToolPermission::Never)
+        {
             Some(ApprovalDecision::Deny)
-        } else if is_local_tool_request && settings.local_tool_permission == LocalToolPermission::Always && !has_ask_match {
+        } else if is_local_tool_request
+            && settings.local_tool_permission == LocalToolPermission::Always
+            && !has_ask_match
+        {
             Some(ApprovalDecision::AllowSession)
         } else if has_allow_match {
             Some(ApprovalDecision::AllowOnce)
@@ -5853,6 +6362,18 @@ impl FeatureHostController {
     }
 
     #[cfg(feature = "production")]
+    fn mcp_instruction_context(&self) -> Result<Option<String>, FeatureHostError> {
+        let instructions = match self
+            .runtime()?
+            .execute(RuntimeCommand::McpCustomInstructions)?
+        {
+            RuntimeResponse::McpCustomInstructions { instructions } => instructions,
+            other => return Err(unexpected_response("mcp.customInstructions", other)),
+        };
+        Ok(render_mcp_instruction_context(&instructions))
+    }
+
+    #[cfg(feature = "production")]
     fn production_chat(
         &self,
         request_id: String,
@@ -5933,6 +6454,14 @@ impl FeatureHostController {
         };
         let mut runtime_text =
             compose_agent_input(&text, mode, mode_statement.as_deref(), &attachments);
+        if let Some(mcp_context) = self.mcp_instruction_context()? {
+            runtime_text = format!(
+                "{mcp_context}
+
+[Current turn]
+{runtime_text}"
+            );
+        }
         let memory_agent_id = agent_id.as_deref().unwrap_or("mahayana-assistant");
         if is_safe_memory_agent_id(memory_agent_id) {
             if let Some(root) = self.memory_root_path.as_deref() {
@@ -5951,9 +6480,8 @@ impl FeatureHostController {
                 let workflow_catalog =
                     render_workflow_catalog(workflow_root, agent_root, memory_agent_id);
                 if !workflow_catalog.is_empty() {
-                    runtime_text = format!(
-                        "[Available workflows]\n{workflow_catalog}\n\n{runtime_text}"
-                    );
+                    runtime_text =
+                        format!("[Available workflows]\n{workflow_catalog}\n\n{runtime_text}");
                 }
             }
         }
@@ -5971,7 +6499,9 @@ impl FeatureHostController {
         state.operations.insert(operation_id.clone());
         state.operation_agents.insert(
             operation_id.clone(),
-            agent_id.clone().unwrap_or_else(|| "mahayana-assistant".into()),
+            agent_id
+                .clone()
+                .unwrap_or_else(|| "mahayana-assistant".into()),
         );
         state.events.push_back(HostEvent::ModelRouted {
             timestamp: timestamp(),
@@ -6506,6 +7036,7 @@ fn is_product_surface_command(command: &FeatureCommand) -> bool {
             | FeatureCommand::SecretProvide { .. }
             | FeatureCommand::ListenerList { .. }
             | FeatureCommand::ListenerConnect { .. }
+            | FeatureCommand::ListenerDisconnect { .. }
             | FeatureCommand::UpdateStatus { .. }
             | FeatureCommand::UpdateCheck { .. }
             | FeatureCommand::UpdateInstall { .. }
@@ -7238,6 +7769,8 @@ fn default_bots() -> BTreeMap<String, BotSummary> {
             avatar_shape: None,
             avatar_color: None,
             notifications_enabled: true,
+            notify_on_updates: true,
+            unread: false,
             conversation_id: Some("codex:agent:assistant".into()),
         },
         BotSummary {
@@ -7250,6 +7783,8 @@ fn default_bots() -> BTreeMap<String, BotSummary> {
             avatar_shape: None,
             avatar_color: None,
             notifications_enabled: true,
+            notify_on_updates: true,
+            unread: false,
             conversation_id: Some("codex:agent:research".into()),
         },
         BotSummary {
@@ -7262,6 +7797,8 @@ fn default_bots() -> BTreeMap<String, BotSummary> {
             avatar_shape: None,
             avatar_color: None,
             notifications_enabled: true,
+            notify_on_updates: true,
+            unread: false,
             conversation_id: Some("codex:agent:incident".into()),
         },
     ]
@@ -7398,6 +7935,7 @@ fn product_surface_method(command: &FeatureCommand) -> &'static str {
         FeatureCommand::SecretProvide { .. } => "mahayana.secret.provide",
         FeatureCommand::ListenerList { .. } => "mahayana.listener.list",
         FeatureCommand::ListenerConnect { .. } => "mahayana.listener.connect",
+        FeatureCommand::ListenerDisconnect { .. } => "mahayana.listener.disconnect",
         FeatureCommand::UpdateStatus { .. } => "mahayana.update.status",
         FeatureCommand::UpdateCheck { .. } => "mahayana.update.check",
         FeatureCommand::UpdateInstall { .. } => "mahayana.update.install",
@@ -7449,9 +7987,11 @@ fn push_error_tray(
 ) -> ErrorTray {
     let now = now_millis();
     if let Some(key) = dedupe_key.as_deref() {
-        if let Some(index) = state.trays.iter().position(|tray| {
-            tray.kind == "error" && tray.dedupe_key.as_deref() == Some(key)
-        }) {
+        if let Some(index) = state
+            .trays
+            .iter()
+            .position(|tray| tray.kind == "error" && tray.dedupe_key.as_deref() == Some(key))
+        {
             let mut updated = state.trays[index].clone();
             updated.agent_id = agent_id;
             updated.title = title;
@@ -7540,7 +8080,7 @@ fn required(value: String, name: &str) -> Result<String, FeatureHostError> {
     }
 }
 
-// Grok Bot 0.16 shared text-shaping/profile semantics.
+// Shared Fabushi text-shaping and profile semantics.
 fn clamp_line(raw: &str, max_length: usize) -> String {
     raw.split_whitespace()
         .collect::<Vec<_>>()
@@ -7576,7 +8116,9 @@ fn resolve_agent_attachment_path(
     raw_path: &str,
 ) -> Result<PathBuf, FeatureHostError> {
     if !is_safe_memory_agent_id(agent_id) {
-        return Err(FeatureHostError::Contract("invalid attachment owner".into()));
+        return Err(FeatureHostError::Contract(
+            "invalid attachment owner".into(),
+        ));
     }
     let base = agent_root.join(agent_id).join("attachments");
     let base = std::fs::canonicalize(&base).map_err(|error| {
@@ -7584,13 +8126,19 @@ fn resolve_agent_attachment_path(
     })?;
     let candidate = {
         let path = PathBuf::from(raw_path);
-        if path.is_absolute() { path } else { base.join(path) }
+        if path.is_absolute() {
+            path
+        } else {
+            base.join(path)
+        }
     };
     let candidate = std::fs::canonicalize(&candidate).map_err(|error| {
         FeatureHostError::Contract(format!("attachment path unavailable: {error}"))
     })?;
     if !candidate.starts_with(&base) {
-        return Err(FeatureHostError::Contract("attachment path escapes the agent attachment directory".into()));
+        return Err(FeatureHostError::Contract(
+            "attachment path escapes the agent attachment directory".into(),
+        ));
     }
     Ok(candidate)
 }
@@ -7630,10 +8178,43 @@ fn is_text_previewable_name(path: &Path) -> bool {
         .to_ascii_lowercase();
     matches!(
         extension.as_str(),
-        "txt" | "md" | "markdown" | "mdc" | "csv" | "tsv" | "json" | "jsonl" | "yaml"
-            | "yml" | "toml" | "xml" | "html" | "htm" | "css" | "js" | "jsx" | "ts" | "tsx"
-            | "py" | "rs" | "go" | "java" | "kt" | "swift" | "c" | "h" | "cpp" | "hpp" | "sh"
-            | "bash" | "zsh" | "fish" | "log" | "sql" | "ini" | "conf"
+        "txt"
+            | "md"
+            | "markdown"
+            | "mdc"
+            | "csv"
+            | "tsv"
+            | "json"
+            | "jsonl"
+            | "yaml"
+            | "yml"
+            | "toml"
+            | "xml"
+            | "html"
+            | "htm"
+            | "css"
+            | "js"
+            | "jsx"
+            | "ts"
+            | "tsx"
+            | "py"
+            | "rs"
+            | "go"
+            | "java"
+            | "kt"
+            | "swift"
+            | "c"
+            | "h"
+            | "cpp"
+            | "hpp"
+            | "sh"
+            | "bash"
+            | "zsh"
+            | "fish"
+            | "log"
+            | "sql"
+            | "ini"
+            | "conf"
     )
 }
 
@@ -7657,7 +8238,10 @@ fn image_dimensions(bytes: &[u8], mime: &str) -> (Option<u32>, Option<u32>) {
         let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
         return (Some(width), Some(height));
     }
-    if mime == "image/gif" && bytes.len() >= 10 && (&bytes[..6] == b"GIF87a" || &bytes[..6] == b"GIF89a") {
+    if mime == "image/gif"
+        && bytes.len() >= 10
+        && (&bytes[..6] == b"GIF87a" || &bytes[..6] == b"GIF89a")
+    {
         let width = u16::from_le_bytes([bytes[6], bytes[7]]) as u32;
         let height = u16::from_le_bytes([bytes[8], bytes[9]]) as u32;
         return (Some(width), Some(height));
@@ -7671,7 +8255,8 @@ fn image_dimensions(bytes: &[u8], mime: &str) -> (Option<u32>, Option<u32>) {
             }
             let marker = bytes[index + 1];
             index += 2;
-            if marker == 0xd8 || marker == 0xd9 || marker == 0x01 || (0xd0..=0xd7).contains(&marker) {
+            if marker == 0xd8 || marker == 0xd9 || marker == 0x01 || (0xd0..=0xd7).contains(&marker)
+            {
                 continue;
             }
             if index + 2 > bytes.len() {
@@ -7681,8 +8266,21 @@ fn image_dimensions(bytes: &[u8], mime: &str) -> (Option<u32>, Option<u32>) {
             if segment_length < 2 || index + segment_length > bytes.len() {
                 break;
             }
-            if matches!(marker, 0xc0 | 0xc1 | 0xc2 | 0xc3 | 0xc5 | 0xc6 | 0xc7 | 0xc9 | 0xca | 0xcb | 0xcd | 0xce | 0xcf)
-                && segment_length >= 7
+            if matches!(
+                marker,
+                0xc0 | 0xc1
+                    | 0xc2
+                    | 0xc3
+                    | 0xc5
+                    | 0xc6
+                    | 0xc7
+                    | 0xc9
+                    | 0xca
+                    | 0xcb
+                    | 0xcd
+                    | 0xce
+                    | 0xcf
+            ) && segment_length >= 7
             {
                 let height = u16::from_be_bytes([bytes[index + 3], bytes[index + 4]]) as u32;
                 let width = u16::from_be_bytes([bytes[index + 5], bytes[index + 6]]) as u32;
@@ -7744,7 +8342,8 @@ fn collect_agent_media_matches(
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            if !normalized_query.is_empty() && !name.to_ascii_lowercase().contains(normalized_query) {
+            if !normalized_query.is_empty() && !name.to_ascii_lowercase().contains(normalized_query)
+            {
                 continue;
             }
             let Ok(metadata) = entry.metadata() else {
@@ -7770,7 +8369,10 @@ fn collect_agent_media_matches(
 }
 
 fn media_mime_type(name: &str) -> Option<&'static str> {
-    let extension = Path::new(name).extension()?.to_string_lossy().to_ascii_lowercase();
+    let extension = Path::new(name)
+        .extension()?
+        .to_string_lossy()
+        .to_ascii_lowercase();
     match extension.as_str() {
         "png" => Some("image/png"),
         "jpg" | "jpeg" => Some("image/jpeg"),
@@ -7794,6 +8396,40 @@ fn clean_optional_string(value: Option<String>) -> Option<String> {
         let value = value.trim().to_string();
         (!value.is_empty()).then_some(value)
     })
+}
+
+fn sanitize_avatar_data_url(value: Option<String>) -> Result<Option<String>, FeatureHostError> {
+    const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let (header, payload) = value.split_once(',').ok_or_else(|| {
+        FeatureHostError::Contract("avatar must be a base64 image data URL".into())
+    })?;
+    if !matches!(
+        header,
+        "data:image/png;base64"
+            | "data:image/jpeg;base64"
+            | "data:image/webp;base64"
+            | "data:image/gif;base64"
+    ) {
+        return Err(FeatureHostError::Contract(
+            "avatar format must be PNG, JPEG, WebP, or GIF".into(),
+        ));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .map_err(|_| FeatureHostError::Contract("avatar base64 payload is invalid".into()))?;
+    if bytes.is_empty() || bytes.len() > MAX_AVATAR_BYTES {
+        return Err(FeatureHostError::Contract(format!(
+            "avatar must be between 1 byte and {MAX_AVATAR_BYTES} bytes"
+        )));
+    }
+    Ok(Some(value.to_string()))
 }
 
 fn clone_agent_display_name(name: &str) -> String {
@@ -7859,6 +8495,79 @@ fn is_safe_automation_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
+fn render_mcp_instruction_context(
+    instructions: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    let mut entries = instructions
+        .iter()
+        .filter_map(|(server, instruction)| {
+            let server = clamp_line(server, 200);
+            let instruction = clamp_block(instruction, 4_000);
+            (!server.is_empty() && !instruction.is_empty()).then_some((server, instruction))
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries.truncate(16);
+    if entries.is_empty() {
+        return None;
+    }
+    let mut context = String::from(
+        "[MCP connector operating instructions]
+These are user-configured rules for the named connector. Apply them whenever using tools from that connector. They are runtime context, not user message text.
+",
+    );
+    for (server, instruction) in entries {
+        let remaining = 14_000usize.saturating_sub(context.chars().count());
+        if remaining == 0 {
+            break;
+        }
+        let block = format!(
+            "
+Connector: {server}
+{instruction}
+"
+        );
+        context.push_str(&clamp_block(&block, remaining));
+    }
+    Some(context)
+}
+
+fn cloud_task_resource_id(metadata: Option<&Value>) -> Option<String> {
+    let object = metadata?.as_object()?;
+    for key in ["bcId", "runId", "run_id", "cloudRunId", "cloud_run_id"] {
+        if let Some(value) = object.get(key).and_then(Value::as_str) {
+            let value = value.trim();
+            if !value.is_empty() && value.len() <= 240 {
+                return Some(value.to_string());
+            }
+        }
+    }
+    for key in ["run", "cloud", "metadata"] {
+        if let Some(nested) = object.get(key) {
+            if let Some(value) = cloud_task_resource_id(Some(nested)) {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+fn ensure_automation_agent_scope(
+    automation: &AutomationSummary,
+    agent_id: Option<&str>,
+) -> Result<(), FeatureHostError> {
+    let Some(agent_id) = agent_id else {
+        return Ok(());
+    };
+    if automation.agent_id.as_deref() == Some(agent_id) {
+        return Ok(());
+    }
+    Err(FeatureHostError::Contract(format!(
+        "automation {} does not belong to agent {agent_id}",
+        automation.id
+    )))
+}
+
 const MEMORY_PROFILE_HEADER: &str = "# About the user\n\n<!-- Enduring facts: who the user is, how to address them, lasting preferences.\n     Kept in mind every turn. Safe to read, grep, and edit.\n     One fact per line, as \"- (YYYY-MM-DD) <fact>\". -->\n";
 const MEMORY_LOG_HEADER: &str = "# Memory log\n\n<!-- Dated facts, one per line as \"- (YYYY-MM-DD) <fact>\". Safe to read, grep, and edit. -->\n";
 const MEMORY_MAX_CONTENT_LENGTH: usize = 500;
@@ -7907,11 +8616,9 @@ fn sha1_digest(input: &[u8]) -> [u8; 20] {
             ]);
         }
         for index in 16..80 {
-            words[index] = (words[index - 3]
-                ^ words[index - 8]
-                ^ words[index - 14]
-                ^ words[index - 16])
-                .rotate_left(1);
+            words[index] =
+                (words[index - 3] ^ words[index - 8] ^ words[index - 14] ^ words[index - 16])
+                    .rotate_left(1);
         }
         let mut a = h0;
         let mut b = h1;
@@ -8008,7 +8715,12 @@ fn write_memory_atomic(path: &Path, content: &str) -> Result<(), FeatureHostErro
     Ok(())
 }
 
-fn parse_memory_facts(raw: &str, kind: MemoryKind, base: usize, path: &Path) -> Vec<ParsedMemoryFact> {
+fn parse_memory_facts(
+    raw: &str,
+    kind: MemoryKind,
+    base: usize,
+    path: &Path,
+) -> Vec<ParsedMemoryFact> {
     let mut facts = Vec::new();
     let mut order = base;
     for (line_index, line) in raw.lines().enumerate() {
@@ -8124,7 +8836,10 @@ fn add_memory(
     let path = match kind {
         MemoryKind::Profile => memory_dir.join("profile.md"),
         MemoryKind::Log => {
-            let bucket = format_memory_date(created_at).chars().take(7).collect::<String>();
+            let bucket = format_memory_date(created_at)
+                .chars()
+                .take(7)
+                .collect::<String>();
             memory_dir.join("log").join(format!("{bucket}.md"))
         }
     };
@@ -8133,8 +8848,16 @@ fn add_memory(
         MemoryKind::Log => MEMORY_LOG_HEADER,
     };
     let raw = read_memory_text(&path);
-    let base = if raw.is_empty() { header.to_string() } else { raw };
-    let separator = if base.ends_with('\n') || base.is_empty() { "" } else { "\n" };
+    let base = if raw.is_empty() {
+        header.to_string()
+    } else {
+        raw
+    };
+    let separator = if base.ends_with('\n') || base.is_empty() {
+        ""
+    } else {
+        "\n"
+    };
     let line = format!("- ({}) {}", format_memory_date(created_at), content);
     write_memory_atomic(&path, &format!("{base}{separator}{line}\n"))?;
     Ok(Some(MemoryRecord {
@@ -8332,20 +9055,20 @@ fn yaml_key(name: &str) -> serde_yaml::Value {
 }
 
 fn yaml_string(data: &serde_yaml::Mapping, name: &str) -> Option<String> {
-    data.get(&yaml_key(name))
+    data.get(yaml_key(name))
         .and_then(serde_yaml::Value::as_str)
         .map(str::to_string)
 }
 
 fn read_workflow_trigger(data: &serde_yaml::Mapping) -> Option<WorkflowTrigger> {
-    let trigger = data.get(&yaml_key("trigger"))?.as_mapping()?;
-    let raw_schedule = trigger.get(&yaml_key("schedule"))?.as_str()?;
+    let trigger = data.get(yaml_key("trigger"))?.as_mapping()?;
+    let raw_schedule = trigger.get(yaml_key("schedule"))?.as_str()?;
     let schedule = normalize_automation_schedule(raw_schedule).ok()?;
     if schedule.is_empty() {
         return None;
     }
     let is_enabled = trigger
-        .get(&yaml_key("enabled"))
+        .get(yaml_key("enabled"))
         .and_then(serde_yaml::Value::as_bool)
         .unwrap_or(true);
     Some(WorkflowTrigger {
@@ -8356,12 +9079,12 @@ fn read_workflow_trigger(data: &serde_yaml::Mapping) -> Option<WorkflowTrigger> 
 
 fn read_workflow_source_ref(data: &serde_yaml::Mapping) -> Option<String> {
     let nested = data
-        .get(&yaml_key("metadata"))
+        .get(yaml_key("metadata"))
         .and_then(serde_yaml::Value::as_mapping)
-        .and_then(|metadata| metadata.get(&yaml_key("source")))
+        .and_then(|metadata| metadata.get(yaml_key("source")))
         .and_then(serde_yaml::Value::as_str);
     let raw = nested.or_else(|| {
-        data.get(&yaml_key("source"))
+        data.get(yaml_key("source"))
             .and_then(serde_yaml::Value::as_str)
     })?;
     let trimmed = raw.trim();
@@ -8411,18 +9134,21 @@ fn serialize_workflow_file(
     existing_data: Option<&serde_yaml::Mapping>,
 ) -> Result<String, FeatureHostError> {
     let mut data = existing_data.cloned().unwrap_or_default();
-    data.insert(yaml_key("name"), serde_yaml::Value::String(name.to_string()));
+    data.insert(
+        yaml_key("name"),
+        serde_yaml::Value::String(name.to_string()),
+    );
     if description.is_empty() {
-        data.remove(&yaml_key("description"));
+        data.remove(yaml_key("description"));
     } else {
         data.insert(
             yaml_key("description"),
             serde_yaml::Value::String(description.to_string()),
         );
     }
-    let legacy_source = data.remove(&yaml_key("source"));
+    let legacy_source = data.remove(yaml_key("source"));
     let mut metadata = data
-        .get(&yaml_key("metadata"))
+        .get(yaml_key("metadata"))
         .and_then(serde_yaml::Value::as_mapping)
         .cloned()
         .unwrap_or_default();
@@ -8430,7 +9156,7 @@ fn serialize_workflow_file(
         .map(str::to_string)
         .or_else(|| {
             metadata
-                .get(&yaml_key("source"))
+                .get(yaml_key("source"))
                 .and_then(serde_yaml::Value::as_str)
                 .map(str::to_string)
         })
@@ -8438,10 +9164,10 @@ fn serialize_workflow_file(
     if let Some(source) = next_source.filter(|source| !source.is_empty()) {
         metadata.insert(yaml_key("source"), serde_yaml::Value::String(source));
     } else {
-        metadata.remove(&yaml_key("source"));
+        metadata.remove(yaml_key("source"));
     }
     if metadata.is_empty() {
-        data.remove(&yaml_key("metadata"));
+        data.remove(yaml_key("metadata"));
     } else {
         data.insert(yaml_key("metadata"), serde_yaml::Value::Mapping(metadata));
     }
@@ -8455,10 +9181,14 @@ fn serialize_workflow_file(
             yaml_key("enabled"),
             serde_yaml::Value::Bool(trigger.is_enabled),
         );
-        data.insert(yaml_key("trigger"), serde_yaml::Value::Mapping(trigger_data));
+        data.insert(
+            yaml_key("trigger"),
+            serde_yaml::Value::Mapping(trigger_data),
+        );
     }
-    let mut yaml = serde_yaml::to_string(&data)
-        .map_err(|error| FeatureHostError::Contract(format!("serialize workflow frontmatter: {error}")))?;
+    let mut yaml = serde_yaml::to_string(&data).map_err(|error| {
+        FeatureHostError::Contract(format!("serialize workflow frontmatter: {error}"))
+    })?;
     if let Some(stripped) = yaml.strip_prefix("---\n") {
         yaml = stripped.to_string();
     }
@@ -8495,8 +9225,7 @@ fn derive_workflow_name_from_markdown(body: &str) -> Option<String> {
 fn derive_workflow_name_from_source(source: &str) -> String {
     let raw = source
         .split('/')
-        .filter(|segment| !segment.is_empty())
-        .next_back()
+        .rfind(|segment| !segment.is_empty())
         .unwrap_or("Imported skill");
     let raw = [".markdown", ".mdc", ".md", ".txt"]
         .iter()
@@ -8504,7 +9233,11 @@ fn derive_workflow_name_from_source(source: &str) -> String {
         .unwrap_or(raw);
     let name = raw.replace(['-', '_'], " ");
     let name = clamp_workflow_name(name.trim());
-    if name.is_empty() { "Imported skill".into() } else { name }
+    if name.is_empty() {
+        "Imported skill".into()
+    } else {
+        name
+    }
 }
 
 fn build_live_source_pointer_body(source: &str) -> String {
@@ -8554,12 +9287,15 @@ fn write_workflow_enablement(
         })?;
     }
     let temp = path.with_extension("json.tmp");
-    let body = serde_json::to_vec_pretty(&file)
-        .map_err(|error| FeatureHostError::Contract(format!("serialize workflow enablement: {error}")))?;
-    std::fs::write(&temp, [body.as_slice(), b"\n"].concat())
-        .map_err(|error| FeatureHostError::Contract(format!("write workflow enablement: {error}")))?;
-    std::fs::rename(&temp, &path)
-        .map_err(|error| FeatureHostError::Contract(format!("commit workflow enablement: {error}")))?;
+    let body = serde_json::to_vec_pretty(&file).map_err(|error| {
+        FeatureHostError::Contract(format!("serialize workflow enablement: {error}"))
+    })?;
+    std::fs::write(&temp, [body.as_slice(), b"\n"].concat()).map_err(|error| {
+        FeatureHostError::Contract(format!("write workflow enablement: {error}"))
+    })?;
+    std::fs::rename(&temp, &path).map_err(|error| {
+        FeatureHostError::Contract(format!("commit workflow enablement: {error}"))
+    })?;
     Ok(())
 }
 
@@ -8611,7 +9347,10 @@ fn workflow_helper_scripts(dir: &Path) -> Vec<String> {
             } else if path.is_file() {
                 let relative = path.strip_prefix(root).unwrap_or(&path);
                 let name = relative.to_string_lossy();
-                if name != WORKFLOW_FILENAME && name != LEGACY_WORKFLOW_FILENAME && name != "runs.json" {
+                if name != WORKFLOW_FILENAME
+                    && name != LEGACY_WORKFLOW_FILENAME
+                    && name != "runs.json"
+                {
                     out.push(path.to_string_lossy().into_owned());
                 }
             }
@@ -8653,7 +9392,7 @@ fn load_workflow_summary(
     };
     let disable_model_invocation = parsed
         .data
-        .get(&yaml_key("disable-model-invocation"))
+        .get(yaml_key("disable-model-invocation"))
         .and_then(serde_yaml::Value::as_bool);
     let next_run_at = parsed
         .trigger
@@ -8672,7 +9411,10 @@ fn load_workflow_summary(
         published_by_current_user: false,
         is_enabled_for_agent: is_workflow_enabled(agent_root, agent_id, id),
         disable_model_invocation,
-        schedule_description: parsed.trigger.as_ref().map(|trigger| trigger.schedule.clone()),
+        schedule_description: parsed
+            .trigger
+            .as_ref()
+            .map(|trigger| trigger.schedule.clone()),
         created_at: workflow_created_at(&file_path),
         last_run_at: None,
         next_run_at,
@@ -8697,7 +9439,11 @@ fn list_workflow_summaries(
             load_workflow_summary(workflow_root, agent_root, agent_id, &id)
         })
         .collect::<Vec<_>>();
-    workflows.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.id.cmp(&b.id)));
+    workflows.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
     workflows.truncate(WORKFLOW_UI_LIMIT);
     workflows
 }
@@ -8721,15 +9467,23 @@ fn write_workflow(
             "workflow name and body must not be empty".into(),
         ));
     }
-    std::fs::create_dir_all(workflow_root).map_err(|error| {
-        FeatureHostError::Contract(format!("create workflow root: {error}"))
-    })?;
-    let id = id.map(str::to_string).unwrap_or_else(|| slugify_workflow_name(&name));
+    std::fs::create_dir_all(workflow_root)
+        .map_err(|error| FeatureHostError::Contract(format!("create workflow root: {error}")))?;
+    let id = id
+        .map(str::to_string)
+        .unwrap_or_else(|| slugify_workflow_name(&name));
     if !is_safe_memory_agent_id(&id) {
-        return Err(FeatureHostError::Contract(format!("unsafe workflow id: {id}")));
+        return Err(FeatureHostError::Contract(format!(
+            "unsafe workflow id: {id}"
+        )));
     }
     let existing_count = std::fs::read_dir(workflow_root)
-        .map(|entries| entries.flatten().filter(|entry| entry.path().is_dir()).count())
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.path().is_dir())
+                .count()
+        })
         .unwrap_or(0);
     if !workflow_root.join(&id).exists() && existing_count >= WORKFLOW_MAX_PER_AGENT {
         return Err(FeatureHostError::Contract(format!(
@@ -8750,8 +9504,9 @@ fn write_workflow(
         source_ref,
         existing_data.as_ref(),
     )?;
-    std::fs::create_dir_all(&dir)
-        .map_err(|error| FeatureHostError::Contract(format!("create workflow directory: {error}")))?;
+    std::fs::create_dir_all(&dir).map_err(|error| {
+        FeatureHostError::Contract(format!("create workflow directory: {error}"))
+    })?;
     let temp = path.with_extension("md.tmp");
     std::fs::write(&temp, raw)
         .map_err(|error| FeatureHostError::Contract(format!("write workflow: {error}")))?;
@@ -8803,7 +9558,11 @@ fn render_workflow_catalog(workflow_root: &Path, agent_root: &Path, agent_id: &s
         lines.push(format!(
             "- {} — {} (file: {})",
             workflow.name,
-            if workflow.description.is_empty() { "No description" } else { workflow.description.as_str() },
+            if workflow.description.is_empty() {
+                "No description"
+            } else {
+                workflow.description.as_str()
+            },
             workflow.file_path
         ));
     }
@@ -8935,9 +9694,9 @@ fn group_messages_since_member_last_spoke<'a>(
     history: &'a [GroupMessage],
     member_id: &str,
 ) -> &'a [GroupMessage] {
-    if let Some(index) = history.iter().rposition(|message| {
-        matches!(&message.speaker, GroupSpeaker::Member { id, .. } if id == member_id)
-    }) {
+    if let Some(index) = history.iter().rposition(
+        |message| matches!(&message.speaker, GroupSpeaker::Member { id, .. } if id == member_id),
+    ) {
         &history[index + 1..]
     } else {
         history
@@ -9012,7 +9771,11 @@ fn build_group_member_system_prompt(
     } else {
         format!(
             "Right now you are speaking in this group chat, with {}.",
-            peers.iter().map(|peer| peer.name.as_str()).collect::<Vec<_>>().join(", ")
+            peers
+                .iter()
+                .map(|peer| peer.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     });
     lines.extend([
@@ -9043,7 +9806,11 @@ fn build_group_turn_prompt(
     } else {
         format!(
             " - with {}",
-            peers.iter().map(|peer| peer.name.as_str()).collect::<Vec<_>>().join(", ")
+            peers
+                .iter()
+                .map(|peer| peer.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     };
     let mut lines = vec![format!(
@@ -9083,7 +9850,9 @@ fn validate_group_members(
             ));
         }
         if !state.bots.contains_key(&id) {
-            return Err(FeatureHostError::Contract(format!("unknown group member: {id}")));
+            return Err(FeatureHostError::Contract(format!(
+                "unknown group member: {id}"
+            )));
         }
         members.push(id);
     }
@@ -9147,10 +9916,7 @@ fn subagent_title(prompt: Option<&str>, fallback: &str) -> String {
 
 #[cfg(feature = "production")]
 fn subagent_status_from_agent_state(value: Option<&Value>) -> Option<SubagentStatus> {
-    let status = value?
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let status = value?.get("status").and_then(Value::as_str).unwrap_or("");
     match status {
         "pendingInit" | "running" => Some(SubagentStatus::Running),
         "completed" | "shutdown" => Some(SubagentStatus::Done),
@@ -9196,18 +9962,21 @@ fn update_subagents_from_activity(
         for receiver in receivers {
             let existing = state.subagents.get(receiver).cloned();
             let state_value = agent_states.and_then(|states| states.get(receiver));
-            let inferred_status = subagent_status_from_agent_state(state_value).unwrap_or_else(|| {
-                if runtime_status == RuntimeActivityStatus::Failed {
-                    SubagentStatus::Error
-                } else if tool == "closeAgent" && runtime_status == RuntimeActivityStatus::Completed {
-                    SubagentStatus::Done
-                } else {
-                    existing
-                        .as_ref()
-                        .map(|subagent| subagent.status)
-                        .unwrap_or(SubagentStatus::Running)
-                }
-            });
+            let inferred_status =
+                subagent_status_from_agent_state(state_value).unwrap_or_else(|| {
+                    if runtime_status == RuntimeActivityStatus::Failed {
+                        SubagentStatus::Error
+                    } else if tool == "closeAgent"
+                        && runtime_status == RuntimeActivityStatus::Completed
+                    {
+                        SubagentStatus::Done
+                    } else {
+                        existing
+                            .as_ref()
+                            .map(|subagent| subagent.status)
+                            .unwrap_or(SubagentStatus::Running)
+                    }
+                });
             let state_message = state_value
                 .and_then(|state| state.get("message"))
                 .and_then(Value::as_str)
@@ -9217,7 +9986,11 @@ fn update_subagents_from_activity(
                 parent_agent_id: parent_agent_id.to_string(),
                 subagent_type: model
                     .map(str::to_string)
-                    .or_else(|| existing.as_ref().map(|subagent| subagent.subagent_type.clone()))
+                    .or_else(|| {
+                        existing
+                            .as_ref()
+                            .map(|subagent| subagent.subagent_type.clone())
+                    })
                     .unwrap_or_else(|| "codex".into()),
                 title: subagent_title(
                     prompt,
@@ -9236,7 +10009,9 @@ fn update_subagents_from_activity(
                     .or_else(|| detail.map(str::to_string))
                     .or_else(|| prompt.map(|prompt| clamp_block(prompt, 1000))),
             };
-            state.subagents.insert(receiver.to_string(), subagent.clone());
+            state
+                .subagents
+                .insert(receiver.to_string(), subagent.clone());
             changed.push(subagent);
         }
     } else if event_type == "subAgentActivity" {
@@ -9248,7 +10023,10 @@ fn update_subagents_from_activity(
             return Vec::new();
         };
         let activity_kind = metadata.get("kind").and_then(Value::as_str).unwrap_or("");
-        let path = metadata.get("agentPath").and_then(Value::as_str).unwrap_or("");
+        let path = metadata
+            .get("agentPath")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let existing = state.subagents.get(receiver).cloned();
         let status = match activity_kind {
             "interrupted" => SubagentStatus::Aborted,
@@ -9284,7 +10062,9 @@ fn update_subagents_from_activity(
                 .map(str::to_string)
                 .or_else(|| (!path.is_empty()).then(|| path.to_string())),
         };
-        state.subagents.insert(receiver.to_string(), subagent.clone());
+        state
+            .subagents
+            .insert(receiver.to_string(), subagent.clone());
         changed.push(subagent);
     }
 
@@ -9301,6 +10081,7 @@ fn update_subagents_from_activity(
                     started_at_ms: subagent.started_at_ms,
                     detail: subagent.detail.clone(),
                     subagent_type: Some(subagent.subagent_type.clone()),
+                    resource_id: None,
                 },
             );
         } else {
@@ -9309,7 +10090,7 @@ fn update_subagents_from_activity(
     }
 
     // A generic provider may report a subagent activity without a receiver id.
-    // Do not fabricate a durable identity from the operation id; Grok's roster
+    // Do not fabricate a durable identity from the operation id; the agent roster
     // only contains actual subagent ids.
     let _ = operation_id;
     changed
@@ -9372,7 +10153,11 @@ fn teach_recording_status(active: Option<&TeachCaptureProcess>) -> TeachRecordin
 }
 
 fn find_ffmpeg_binary() -> Result<PathBuf, FeatureHostError> {
-    for candidate in ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "ffmpeg"] {
+    for candidate in [
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "ffmpeg",
+    ] {
         let ok = std::process::Command::new(candidate)
             .arg("-version")
             .stdout(std::process::Stdio::null())
@@ -9391,16 +10176,30 @@ fn find_ffmpeg_binary() -> Result<PathBuf, FeatureHostError> {
 #[cfg(target_os = "macos")]
 fn avfoundation_screen_index(ffmpeg: &Path) -> Result<String, FeatureHostError> {
     let output = std::process::Command::new(ffmpeg)
-        .args(["-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""])
+        .args([
+            "-hide_banner",
+            "-f",
+            "avfoundation",
+            "-list_devices",
+            "true",
+            "-i",
+            "",
+        ])
         .output()
-        .map_err(|error| FeatureHostError::Contract(format!("list screen capture devices: {error}")))?;
+        .map_err(|error| {
+            FeatureHostError::Contract(format!("list screen capture devices: {error}"))
+        })?;
     let text = String::from_utf8_lossy(&output.stderr);
     for line in text.lines() {
         if !line.contains("Capture screen") {
             continue;
         }
-        let Some(open) = line.rfind('[') else { continue };
-        let Some(close_rel) = line[open + 1..].find(']') else { continue };
+        let Some(open) = line.rfind('[') else {
+            continue;
+        };
+        let Some(close_rel) = line[open + 1..].find(']') else {
+            continue;
+        };
         let index = &line[open + 1..open + 1 + close_rel];
         if !index.is_empty() && index.chars().all(|character| character.is_ascii_digit()) {
             return Ok(index.to_string());
@@ -9476,7 +10275,9 @@ fn stop_teach_capture(child: &mut std::process::Child) -> Result<(), FeatureHost
     for _ in 0..40 {
         if child
             .try_wait()
-            .map_err(|error| FeatureHostError::Contract(format!("wait for teach recorder: {error}")))?
+            .map_err(|error| {
+                FeatureHostError::Contract(format!("wait for teach recorder: {error}"))
+            })?
             .is_some()
         {
             return Ok(());
@@ -9594,18 +10395,22 @@ fn persist_remote_computer_device_secrets(
         })?;
     }
     let temp = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec_pretty(secrets)
-        .map_err(|error| FeatureHostError::Contract(format!("serialize remote device secret: {error}")))?;
-    std::fs::write(&temp, bytes)
-        .map_err(|error| FeatureHostError::Contract(format!("write remote device secret: {error}")))?;
+    let bytes = serde_json::to_vec_pretty(secrets).map_err(|error| {
+        FeatureHostError::Contract(format!("serialize remote device secret: {error}"))
+    })?;
+    std::fs::write(&temp, bytes).map_err(|error| {
+        FeatureHostError::Contract(format!("write remote device secret: {error}"))
+    })?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))
-            .map_err(|error| FeatureHostError::Contract(format!("protect remote device secret: {error}")))?;
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600)).map_err(
+            |error| FeatureHostError::Contract(format!("protect remote device secret: {error}")),
+        )?;
     }
-    std::fs::rename(&temp, path)
-        .map_err(|error| FeatureHostError::Contract(format!("commit remote device secret: {error}")))
+    std::fs::rename(&temp, path).map_err(|error| {
+        FeatureHostError::Contract(format!("commit remote device secret: {error}"))
+    })
 }
 
 #[cfg(test)]
@@ -9719,7 +10524,10 @@ fn load_peer_messages(path: &Path) -> Vec<AgentPeerMessage> {
     messages
 }
 
-fn persist_peer_messages(path: &Path, messages: &[AgentPeerMessage]) -> Result<(), FeatureHostError> {
+fn persist_peer_messages(
+    path: &Path,
+    messages: &[AgentPeerMessage],
+) -> Result<(), FeatureHostError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             FeatureHostError::Contract(format!("create peer message directory: {error}"))
@@ -9728,10 +10536,12 @@ fn persist_peer_messages(path: &Path, messages: &[AgentPeerMessage]) -> Result<(
     let temp = path.with_extension("json.tmp");
     let data = serde_json::to_vec_pretty(messages)
         .map_err(|error| FeatureHostError::Contract(format!("serialize peer messages: {error}")))?;
-    std::fs::write(&temp, data)
-        .map_err(|error| FeatureHostError::Contract(format!("write peer message store: {error}")))?;
-    std::fs::rename(&temp, path)
-        .map_err(|error| FeatureHostError::Contract(format!("commit peer message store: {error}")))?;
+    std::fs::write(&temp, data).map_err(|error| {
+        FeatureHostError::Contract(format!("write peer message store: {error}"))
+    })?;
+    std::fs::rename(&temp, path).map_err(|error| {
+        FeatureHostError::Contract(format!("commit peer message store: {error}"))
+    })?;
     Ok(())
 }
 
@@ -9748,7 +10558,9 @@ fn load_groups(path: &Path) -> BTreeMap<String, GroupSummary> {
             group.name = clamp_line(&group.name, 72);
             group.description = clamp_block(&group.description, 2000);
             let mut seen = BTreeSet::new();
-            group.member_ids.retain(|id| !id.trim().is_empty() && seen.insert(id.clone()));
+            group
+                .member_ids
+                .retain(|id| !id.trim().is_empty() && seen.insert(id.clone()));
             if group.id.trim().is_empty() || group.name.is_empty() || group.member_ids.is_empty() {
                 return None;
             }
@@ -9799,10 +10611,7 @@ fn load_bots(path: &Path) -> BTreeMap<String, BotSummary> {
         .collect()
 }
 
-fn persist_bots(
-    path: &Path,
-    bots: &BTreeMap<String, BotSummary>,
-) -> Result<(), FeatureHostError> {
+fn persist_bots(path: &Path, bots: &BTreeMap<String, BotSummary>) -> Result<(), FeatureHostError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             FeatureHostError::Contract(format!("create bot directory: {error}"))
@@ -10057,7 +10866,7 @@ mod tests {
     }
 
     #[test]
-    fn group_chat_matches_grok_mentions_round_order_and_pass_rules() {
+    fn group_chat_handles_mentions_round_order_and_pass_rules() {
         let bots = BTreeMap::from([
             (
                 "research-bot".into(),
@@ -10071,6 +10880,8 @@ mod tests {
                     avatar_shape: None,
                     avatar_color: None,
                     notifications_enabled: true,
+                    notify_on_updates: true,
+                    unread: false,
                     conversation_id: Some("codex:agent:research".into()),
                 },
             ),
@@ -10086,6 +10897,8 @@ mod tests {
                     avatar_shape: None,
                     avatar_color: None,
                     notifications_enabled: true,
+                    notify_on_updates: true,
+                    unread: false,
                     conversation_id: Some("codex:agent:incident".into()),
                 },
             ),
@@ -10104,7 +10917,10 @@ mod tests {
             created_at_ms: 1,
             updated_at_ms: 1,
         };
-        assert_eq!(resolve_group_responders(&group, &bots), vec!["research-bot"]);
+        assert_eq!(
+            resolve_group_responders(&group, &bots),
+            vec!["research-bot"]
+        );
         group.messages.push(GroupMessage {
             id: "message-2".into(),
             speaker: GroupSpeaker::User { name: None },
@@ -10175,7 +10991,7 @@ mod tests {
     }
 
     #[test]
-    fn trays_match_grok_dedupe_count_and_twenty_item_cap() {
+    fn trays_preserve_dedupe_count_and_twenty_item_cap() {
         let controller = controller();
         drain(&controller);
         {
@@ -10210,17 +11026,26 @@ mod tests {
                 );
             }
             assert_eq!(state.trays.len(), MAX_TRAYS);
-            assert!(state.trays.iter().all(|tray| tray.id != state.trays[0].dedupe_key.clone().unwrap_or_default()));
+            assert!(
+                state
+                    .trays
+                    .iter()
+                    .all(|tray| tray.id != state.trays[0].dedupe_key.clone().unwrap_or_default())
+            );
         }
         controller
-            .execute(FeatureCommand::TrayList { request_id: "tray-list".into() })
+            .execute(FeatureCommand::TrayList {
+                request_id: "tray-list".into(),
+            })
             .expect("list trays");
         assert!(drain(&controller).into_iter().any(|event| matches!(
             event,
             HostEvent::TrayListed { ref trays, .. } if trays.len() == MAX_TRAYS
         )));
         controller
-            .execute(FeatureCommand::TrayClear { request_id: "tray-clear".into() })
+            .execute(FeatureCommand::TrayClear {
+                request_id: "tray-clear".into(),
+            })
             .expect("clear trays");
         assert!(drain(&controller).into_iter().any(|event| matches!(
             event,
@@ -10229,7 +11054,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_store_matches_grok_id_format_dedupe_and_markdown_layout() {
+    fn memory_store_preserves_id_dedupe_and_markdown_layout() {
         assert_eq!(memory_id_for("hello"), "aaf4c61ddcc5e8a2");
         let controller = controller();
         drain(&controller);
@@ -10303,7 +11128,7 @@ mod tests {
     }
 
     #[test]
-    fn automation_schedule_supports_the_recovered_grok_grammar() {
+    fn automation_schedule_supports_supported_schedule_grammar() {
         let base = 1_750_000_000_000_i64;
         assert_eq!(parse_every_interval_ms("@every 5m"), Some(300_000));
         assert_eq!(next_automation_run("@every 5m", base), Some(base + 300_000));
@@ -10320,6 +11145,7 @@ mod tests {
             .execute(FeatureCommand::AutomationUpsert {
                 request_id: "automation-create".into(),
                 id: Some("morning-review".into()),
+                agent_id: None,
                 name: "晨间复盘".into(),
                 prompt: "总结昨天的进展并给出今天的三个行动。".into(),
                 schedule: "@daily".into(),
@@ -10338,6 +11164,7 @@ mod tests {
         controller
             .execute(FeatureCommand::AutomationList {
                 request_id: "automation-list".into(),
+                agent_id: None,
             })
             .expect("list automations");
         assert!(drain(&controller).into_iter().any(|event| matches!(
@@ -10350,6 +11177,7 @@ mod tests {
             .execute(FeatureCommand::AutomationSetEnabled {
                 request_id: "automation-pause".into(),
                 id: "morning-review".into(),
+                agent_id: None,
                 enabled: false,
             })
             .expect("pause automation");
@@ -10363,6 +11191,7 @@ mod tests {
             .execute(FeatureCommand::AutomationRun {
                 request_id: "automation-run".into(),
                 id: "morning-review".into(),
+                agent_id: None,
             })
             .expect("run automation");
         let kinds = drain(&controller)
@@ -10376,12 +11205,170 @@ mod tests {
             .execute(FeatureCommand::AutomationDelete {
                 request_id: "automation-delete".into(),
                 id: "morning-review".into(),
+                agent_id: None,
             })
             .expect("delete automation");
         assert!(drain(&controller).into_iter().any(|event| matches!(
             event,
             HostEvent::AutomationChanged { action, .. } if action == "deleted"
         )));
+    }
+
+    #[test]
+    fn automation_agent_scope_filters_routes_and_blocks_cross_agent_mutation() {
+        let controller = controller();
+        drain(&controller);
+
+        for (id, agent_id, name) in [
+            ("research-digest", "research-bot", "Research digest"),
+            ("incident-digest", "incident-bot", "Incident digest"),
+        ] {
+            controller
+                .execute(FeatureCommand::AutomationUpsert {
+                    request_id: format!("create-{id}"),
+                    id: Some(id.into()),
+                    agent_id: Some(agent_id.into()),
+                    name: name.into(),
+                    prompt: format!("Run the {name} task."),
+                    schedule: "@daily".into(),
+                    trigger: Some(AutomationTrigger::Schedule {
+                        schedule: "@daily".into(),
+                    }),
+                    enabled: true,
+                })
+                .expect("create agent automation");
+            drain(&controller);
+        }
+
+        controller
+            .execute(FeatureCommand::AutomationList {
+                request_id: "research-list".into(),
+                agent_id: Some("research-bot".into()),
+            })
+            .expect("list research automations");
+        assert!(drain(&controller).into_iter().any(|event| matches!(
+            event,
+            HostEvent::AutomationListed { automations, .. }
+                if automations.len() == 1
+                    && automations[0].id == "research-digest"
+                    && automations[0].agent_id.as_deref() == Some("research-bot")
+        )));
+
+        let error = controller
+            .execute(FeatureCommand::AutomationSetEnabled {
+                request_id: "wrong-owner-pause".into(),
+                id: "research-digest".into(),
+                agent_id: Some("incident-bot".into()),
+                enabled: false,
+            })
+            .expect_err("cross-agent automation mutation must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("does not belong to agent incident-bot")
+        );
+
+        controller
+            .execute(FeatureCommand::AutomationRun {
+                request_id: "research-run".into(),
+                id: "research-digest".into(),
+                agent_id: Some("research-bot".into()),
+            })
+            .expect("run research automation");
+        assert!(drain(&controller).into_iter().any(|event| matches!(
+            event,
+            HostEvent::ChatMessage { role: MessageRole::Assistant, text, .. }
+                if text.starts_with("research-bot机器人收到：")
+        )));
+
+        let error = controller
+            .execute(FeatureCommand::AutomationDelete {
+                request_id: "wrong-owner-delete".into(),
+                id: "research-digest".into(),
+                agent_id: Some("incident-bot".into()),
+            })
+            .expect_err("cross-agent automation deletion must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("does not belong to agent incident-bot")
+        );
+    }
+
+    #[test]
+    fn cloud_task_resource_id_only_accepts_structured_run_keys() {
+        assert_eq!(
+            cloud_task_resource_id(Some(&json!({"bcId": "cloud-run-1"}))).as_deref(),
+            Some("cloud-run-1")
+        );
+        assert_eq!(
+            cloud_task_resource_id(Some(&json!({"metadata": {"runId": "cloud-run-2"}}))).as_deref(),
+            Some("cloud-run-2")
+        );
+        assert_eq!(
+            cloud_task_resource_id(Some(&json!({"id": "generic-step-id"}))),
+            None
+        );
+        assert_eq!(cloud_task_resource_id(Some(&json!({"runId": "   "}))), None);
+    }
+
+    #[test]
+    fn mcp_settings_use_refresh_event_contract_in_test_mode() {
+        let controller = controller();
+        drain(&controller);
+        controller
+            .execute(FeatureCommand::McpSetCustomInstructions {
+                request_id: "mcp-instructions-test".into(),
+                server: "docs".into(),
+                instructions: "Prefer source links.".into(),
+            })
+            .expect("set MCP custom instructions in test mode");
+        controller
+            .execute(FeatureCommand::McpSetToolDisabled {
+                request_id: "mcp-tool-disable-test".into(),
+                server: "docs".into(),
+                tool: "delete_page".into(),
+                disabled: true,
+            })
+            .expect("disable MCP tool in test mode");
+        let refreshed = drain(&controller)
+            .into_iter()
+            .filter(|event| matches!(event, HostEvent::McpRefreshed { .. }))
+            .count();
+        assert_eq!(refreshed, 2);
+    }
+
+    #[test]
+    fn mcp_instruction_context_is_sorted_bounded_and_hidden() {
+        let instructions = std::collections::HashMap::from([
+            ("zeta".into(), "Use read-only operations.".into()),
+            ("alpha".into(), "Always include source links.".into()),
+            ("empty".into(), "   ".into()),
+        ]);
+        let context = render_mcp_instruction_context(&instructions).expect("MCP context");
+        assert!(context.starts_with("[MCP connector operating instructions]"));
+        assert!(
+            context.find("Connector: alpha").unwrap() < context.find("Connector: zeta").unwrap()
+        );
+        assert!(!context.contains("Connector: empty"));
+        assert!(context.len() < 16_000);
+    }
+
+    #[test]
+    fn mcp_remove_uses_refresh_event_contract_in_test_mode() {
+        let controller = controller();
+        drain(&controller);
+        controller
+            .execute(FeatureCommand::McpRemove {
+                request_id: "mcp-remove-test".into(),
+                server: "docs".into(),
+            })
+            .expect("remove MCP server in test mode");
+        assert!(
+            drain(&controller)
+                .into_iter()
+                .any(|event| matches!(event, HostEvent::McpRefreshed { .. }))
+        );
     }
 
     #[test]
@@ -10529,6 +11516,7 @@ mod tests {
             .execute(FeatureCommand::AutomationUpsert {
                 request_id: "event-routine-create".into(),
                 id: Some("regression-triage".into()),
+                agent_id: None,
                 name: "Regression triage".into(),
                 prompt: "Inspect the regression and summarize impact.".into(),
                 schedule: "event:sentry:issue.regressed".into(),
@@ -10610,6 +11598,7 @@ mod tests {
             "weekly-review".into(),
             AutomationSummary {
                 id: "weekly-review".into(),
+                agent_id: None,
                 name: "每周复盘".into(),
                 prompt: "整理本周工作。".into(),
                 schedule: "@weekly".into(),
@@ -10706,6 +11695,76 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_browser_login_keeps_credentials_out_of_the_presentation_boundary() {
+        let login_controller = controller();
+        assert_eq!(login_controller.auth_status().unwrap()["loggedIn"], false);
+
+        let attempt = login_controller
+            .browser_login_start()
+            .expect("start browser login");
+        assert_eq!(attempt["attemptId"], "test-browser-login");
+        assert_eq!(
+            attempt["loginUrl"],
+            "about:blank#fabushi-test-browser-login"
+        );
+        assert!(attempt.get("accessToken").is_none());
+        assert!(attempt.get("refreshToken").is_none());
+        assert!(attempt.get("password").is_none());
+
+        let completed = login_controller
+            .browser_login_poll(
+                attempt["attemptId"]
+                    .as_str()
+                    .expect("attempt id")
+                    .to_string(),
+            )
+            .expect("complete browser login");
+        assert_eq!(completed["status"], "completed");
+        assert_eq!(completed["auth"]["loggedIn"], true);
+        assert!(completed["auth"].get("accessToken").is_none());
+        assert!(completed["auth"].get("refreshToken").is_none());
+        assert_eq!(login_controller.auth_status().unwrap()["loggedIn"], true);
+
+        let reopened_controller = controller();
+        let reopened_attempt = reopened_controller
+            .browser_login_start()
+            .expect("start reopenable browser login");
+        let reopened = reopened_controller
+            .browser_login_reopen(
+                reopened_attempt["attemptId"]
+                    .as_str()
+                    .expect("reopen attempt id")
+                    .to_string(),
+            )
+            .expect("reopen browser login");
+        assert_eq!(reopened["status"], "pending");
+        assert_eq!(reopened["attemptId"], reopened_attempt["attemptId"]);
+        assert_eq!(
+            reopened["loginUrl"],
+            "about:blank#fabushi-test-browser-login"
+        );
+        assert!(reopened.get("pollSecret").is_none());
+
+        let cancelled_controller = controller();
+        let cancelled_attempt = cancelled_controller
+            .browser_login_start()
+            .expect("start cancellable browser login");
+        let cancelled = cancelled_controller
+            .browser_login_cancel(
+                cancelled_attempt["attemptId"]
+                    .as_str()
+                    .expect("cancel attempt id")
+                    .to_string(),
+            )
+            .expect("cancel browser login");
+        assert_eq!(cancelled["status"], "cancelled");
+        assert_eq!(
+            cancelled_controller.auth_status().unwrap()["loggedIn"],
+            false
+        );
+    }
+
+    #[test]
     fn deterministic_oauth_journey_matches_the_cross_platform_ui_contract() {
         let controller = controller();
         let providers = controller.auth_providers().expect("OAuth providers");
@@ -10730,7 +11789,7 @@ mod tests {
     }
 
     #[test]
-    fn attachment_store_matches_grok_limits_content_addressing_and_scoped_reads() {
+    fn attachment_store_enforces_limits_content_addressing_and_scoped_reads() {
         let controller = controller();
         drain(&controller);
         let content = b"hello attachment\nsecond line\n";
@@ -10791,16 +11850,22 @@ mod tests {
         }));
 
         assert_eq!(attachment_byte_limit_for_name("clip.mp4"), VIDEO_BYTE_LIMIT);
-        assert_eq!(attachment_byte_limit_for_name("document.pdf"), ATTACHMENT_BYTE_LIMIT);
+        assert_eq!(
+            attachment_byte_limit_for_name("document.pdf"),
+            ATTACHMENT_BYTE_LIMIT
+        );
 
-        let outside = std::env::temp_dir().join(format!("fabushi-attachment-outside-{}", std::process::id()));
+        let outside =
+            std::env::temp_dir().join(format!("fabushi-attachment-outside-{}", std::process::id()));
         std::fs::write(&outside, b"outside").expect("write outside fixture");
         let escaped = controller.execute(FeatureCommand::AttachmentReadText {
             request_id: "attachment-escape".into(),
             agent_id: "mahayana-assistant".into(),
             path: outside.to_string_lossy().to_string(),
         });
-        assert!(matches!(escaped, Err(FeatureHostError::Contract(message)) if message.contains("escapes")));
+        assert!(
+            matches!(escaped, Err(FeatureHostError::Contract(message)) if message.contains("escapes"))
+        );
         let _ = std::fs::remove_file(outside);
     }
 
@@ -10814,6 +11879,7 @@ mod tests {
                 name: "Research".into(),
                 description: "Research teammate".into(),
                 title: "Researcher".into(),
+                avatar: None,
                 avatar_shape: None,
                 avatar_color: None,
             })
@@ -10848,7 +11914,13 @@ mod tests {
             HostEvent::AgentBackgroundMessage { agent_id, source, .. }
                 if agent_id == &peer.id && source == "agent-priority"
         )));
-        assert!(!events.iter().any(|event| matches!(event, HostEvent::ChatMessage { role: MessageRole::User, .. })));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            HostEvent::ChatMessage {
+                role: MessageRole::User,
+                ..
+            }
+        )));
 
         controller
             .execute(FeatureCommand::AgentPeerHistory {

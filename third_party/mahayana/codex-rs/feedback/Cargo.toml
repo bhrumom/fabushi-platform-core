@@ -12,9 +12,21 @@ anyhow = { workspace = true }
 codex-login = { workspace = true }
 codex-protocol = { workspace = true }
 mime_guess = { workspace = true }
-sentry = { version = "0.46" }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+sentry = { version = "0.46", default-features = false, features = [
+    "backtrace",
+    "contexts",
+    "debug-images",
+    "panic",
+    "release-health",
+    "reqwest",
+] }
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+sentry = { version = "0.46" }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

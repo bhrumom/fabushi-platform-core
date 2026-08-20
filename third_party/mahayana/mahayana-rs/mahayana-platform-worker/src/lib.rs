@@ -10,6 +10,10 @@ pub const ACCOUNT_AUTH_SCHEMA_V2: &str =
     include_str!("../account-migrations/0001_account_auth.sql");
 pub const ACCOUNT_OAUTH_SCHEMA_V3: &str =
     include_str!("../account-migrations/0002_oauth_identities.sql");
+pub const ACCOUNT_OAUTH_STATUS_SCHEMA_V4: &str =
+    include_str!("../account-migrations/0003_oauth_attempt_failed_status.sql");
+pub const ACCOUNT_REGISTRATION_SCHEMA_V5: &str =
+    include_str!("../account-migrations/0004_email_registration_challenges.sql");
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SchemaError {
@@ -100,6 +104,16 @@ pub fn validate_account_auth_schema(schema: &str) -> Result<(), SchemaError> {
     Ok(())
 }
 
+pub fn validate_account_registration_schema(schema: &str) -> Result<(), SchemaError> {
+    for table in ["account_email_challenges"] {
+        let declaration = format!("CREATE TABLE IF NOT EXISTS {table}");
+        if !schema.contains(&declaration) {
+            return Err(SchemaError::MissingTable(table));
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_account_oauth_schema(schema: &str) -> Result<(), SchemaError> {
     for table in ["account_identities", "account_oauth_attempts"] {
         let declaration = format!("CREATE TABLE IF NOT EXISTS {table}");
@@ -109,6 +123,9 @@ pub fn validate_account_oauth_schema(schema: &str) -> Result<(), SchemaError> {
     }
     Ok(())
 }
+
+#[cfg(target_arch = "wasm32")]
+mod identity_auth;
 
 #[cfg(target_arch = "wasm32")]
 mod worker_api;

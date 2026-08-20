@@ -35,6 +35,7 @@ use mahayana_social::MahayanaSocialConversationProvider;
 use mahayana_telegram::TelegramConversationProvider;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::env;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -93,22 +94,26 @@ pub struct MahayanaHost {
 
 impl MahayanaHost {
     pub fn create(config: HostCreateConfig) -> Result<Self, HostError> {
+        let api_base_url = env::var("MAHAYANA_API_BASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "https://api.ombhrum.com".to_string());
         let product_client = match (
             config.product_session_path.clone(),
             config.product_surface_state_path.clone(),
         ) {
             (Some(session_path), Some(surface_state_path)) => {
                 MahayanaProductClient::new_with_surface_state_path(
-                    "https://api.ombhrum.com",
+                    api_base_url.clone(),
                     session_path,
                     surface_state_path,
                 )
             }
             (Some(session_path), None) => {
-                MahayanaProductClient::new("https://api.ombhrum.com", session_path)
+                MahayanaProductClient::new(api_base_url.clone(), session_path)
             }
             (None, Some(surface_state_path)) => MahayanaProductClient::new_with_surface_state_path(
-                "https://api.ombhrum.com",
+                api_base_url,
                 default_product_session_path(),
                 surface_state_path,
             ),

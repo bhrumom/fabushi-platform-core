@@ -5,6 +5,7 @@
 //! policy, and audit decisions; this crate only executes already-authorized
 //! actions on the machine where Fabushi is installed.
 
+#[cfg(target_os = "macos")]
 use base64::Engine as _;
 use mahayana_host_protocol::COMPUTER_MAX_ACTIONS_PER_CALL;
 use mahayana_host_protocol::COMPUTER_MAX_WAIT_MS;
@@ -15,15 +16,19 @@ use mahayana_host_protocol::ComputerControlOrigin;
 use mahayana_host_protocol::ComputerSnapshot;
 use mahayana_host_protocol::ComputerStatus;
 use mahayana_host_protocol::LocalToolPermission;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::RwLock;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+#[cfg(target_os = "macos")]
 use std::time::Duration;
+#[cfg(target_os = "macos")]
 use std::time::SystemTime;
+#[cfg(target_os = "macos")]
 use std::time::UNIX_EPOCH;
 
+#[cfg(target_os = "macos")]
 const FINAL_SCREEN_SETTLE_MS: u64 = 250;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +164,7 @@ pub fn execute(
         }
     }
 
+    #[cfg(target_os = "macos")]
     let ai_epoch = USER_OVERRIDE_EPOCH.load(Ordering::SeqCst);
     if origin != ComputerControlOrigin::Ai {
         // Bump before waiting on the desktop mutex so a human request can stop
@@ -199,6 +205,7 @@ pub fn execute(
     }
 }
 
+#[cfg(target_os = "macos")]
 fn ensure_ai_not_preempted(epoch: u64) -> Result<(), ComputerError> {
     if USER_OVERRIDE_EPOCH.load(Ordering::SeqCst) != epoch {
         Err(ComputerError::Preempted)
@@ -207,6 +214,7 @@ fn ensure_ai_not_preempted(epoch: u64) -> Result<(), ComputerError> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn ai_wait_with_preemption(wait_ms: u64, epoch: u64) -> Result<(), ComputerError> {
     let mut remaining = wait_ms;
     while remaining > 0 {
@@ -233,7 +241,10 @@ pub fn validate_action(action: &ComputerAction) -> Result<(), ComputerError> {
     match action.action {
         ComputerActionKind::Screenshot => {}
         ComputerActionKind::Click => {
-            if action.click_count.is_some_and(|count| !(1..=3).contains(&count)) {
+            if action
+                .click_count
+                .is_some_and(|count| !(1..=3).contains(&count))
+            {
                 return Err(ComputerError::InvalidAction(
                     "count must be 1, 2, or 3".into(),
                 ));
@@ -242,7 +253,10 @@ pub fn validate_action(action: &ComputerAction) -> Result<(), ComputerError> {
         ComputerActionKind::Move => {}
         ComputerActionKind::Drag => {
             let has_path = action.path.as_ref().is_some_and(|path| path.len() >= 2);
-            let has_endpoints = action.x.is_some() && action.y.is_some() && action.x2.is_some() && action.y2.is_some();
+            let has_endpoints = action.x.is_some()
+                && action.y.is_some()
+                && action.x2.is_some()
+                && action.y2.is_some();
             if !has_path && !has_endpoints {
                 return Err(ComputerError::InvalidAction(
                     "drag requires path with at least two points or x/y/x2/y2".into(),
@@ -251,13 +265,15 @@ pub fn validate_action(action: &ComputerAction) -> Result<(), ComputerError> {
         }
         ComputerActionKind::Type => {
             if action.text.is_none() {
-                return Err(ComputerError::InvalidAction(
-                    "type requires text".into(),
-                ));
+                return Err(ComputerError::InvalidAction("type requires text".into()));
             }
         }
         ComputerActionKind::Key => {
-            if action.key.as_deref().is_none_or(|key| key.trim().is_empty()) {
+            if action
+                .key
+                .as_deref()
+                .is_none_or(|key| key.trim().is_empty())
+            {
                 return Err(ComputerError::InvalidAction(
                     "key requires a key or chord".into(),
                 ));
@@ -265,7 +281,10 @@ pub fn validate_action(action: &ComputerAction) -> Result<(), ComputerError> {
         }
         ComputerActionKind::Scroll => {}
         ComputerActionKind::Wait => {
-            if action.wait_ms.is_some_and(|wait_ms| wait_ms > COMPUTER_MAX_WAIT_MS) {
+            if action
+                .wait_ms
+                .is_some_and(|wait_ms| wait_ms > COMPUTER_MAX_WAIT_MS)
+            {
                 return Err(ComputerError::InvalidAction(format!(
                     "durationMs must be at most {COMPUTER_MAX_WAIT_MS}"
                 )));
@@ -275,6 +294,7 @@ pub fn validate_action(action: &ComputerAction) -> Result<(), ComputerError> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -302,9 +322,9 @@ mod macos {
     use core_foundation::base::TCFType;
     use core_foundation::data::CFData;
     use core_foundation::string::CFString;
-    use core_foundation_sys::base::kCFAllocatorDefault;
     use core_foundation_sys::base::CFRelease;
     use core_foundation_sys::base::CFTypeRef;
+    use core_foundation_sys::base::kCFAllocatorDefault;
     use core_foundation_sys::data::CFDataCreateMutable;
     use core_foundation_sys::data::CFDataRef;
     use core_foundation_sys::data::CFMutableDataRef;
@@ -402,11 +422,7 @@ mod macos {
             ));
         }
         unsafe {
-            CGImageDestinationAddImage(
-                destination,
-                image.as_ptr() as *mut c_void,
-                ptr::null(),
-            );
+            CGImageDestinationAddImage(destination, image.as_ptr() as *mut c_void, ptr::null());
         }
         let finalized = unsafe { CGImageDestinationFinalize(destination) };
         unsafe { CFRelease(destination as CFTypeRef) };
@@ -432,7 +448,10 @@ mod macos {
     }
 
     pub(super) fn execute_action(action: &ComputerAction) -> Result<(), ComputerError> {
-        if action.action != ComputerActionKind::Screenshot && action.action != ComputerActionKind::Wait && !accessibility_granted() {
+        if action.action != ComputerActionKind::Screenshot
+            && action.action != ComputerActionKind::Wait
+            && !accessibility_granted()
+        {
             return Err(ComputerError::Permission(
                 "Accessibility permission is required in System Settings > Privacy & Security"
                     .into(),
@@ -514,7 +533,12 @@ mod macos {
 
     fn move_to(position: CGPoint, dragged: Option<CGMouseButton>) -> Result<(), ComputerError> {
         let event_type = dragged.map_or(CGEventType::MouseMoved, |button| mouse_types(button).1);
-        post_mouse(event_type, position, dragged.unwrap_or(CGMouseButton::Left), None)
+        post_mouse(
+            event_type,
+            position,
+            dragged.unwrap_or(CGMouseButton::Left),
+            None,
+        )
     }
 
     fn move_pointer(action: &ComputerAction) -> Result<(), ComputerError> {
@@ -543,10 +567,9 @@ mod macos {
             return Ok(path.clone());
         }
         match (action.x, action.y, action.x2, action.y2) {
-            (Some(x), Some(y), Some(x2), Some(y2)) => Ok(vec![
-                ComputerPoint { x, y },
-                ComputerPoint { x: x2, y: y2 },
-            ]),
+            (Some(x), Some(y), Some(x2), Some(y2)) => {
+                Ok(vec![ComputerPoint { x, y }, ComputerPoint { x: x2, y: y2 }])
+            }
             _ => Err(ComputerError::InvalidAction(
                 "drag requires path or x/y/x2/y2".into(),
             )),
@@ -562,7 +585,10 @@ mod macos {
         post_mouse(down, first, mouse_button, Some(1))?;
         std::thread::sleep(Duration::from_millis(20));
         for point in points.iter().skip(1) {
-            move_to(CGPoint::new(point.x as f64, point.y as f64), Some(mouse_button))?;
+            move_to(
+                CGPoint::new(point.x as f64, point.y as f64),
+                Some(mouse_button),
+            )?;
             std::thread::sleep(Duration::from_millis(12));
         }
         let last = points.last().expect("validated drag points");
@@ -631,13 +657,12 @@ mod macos {
                 other => {
                     return Err(ComputerError::InvalidAction(format!(
                         "unsupported modifier: {other}"
-                    )))
+                    )));
                 }
             }
         }
-        let keycode = key_code(raw_key).ok_or_else(|| {
-            ComputerError::InvalidAction(format!("unsupported key: {raw_key}"))
-        })?;
+        let keycode = key_code(raw_key)
+            .ok_or_else(|| ComputerError::InvalidAction(format!("unsupported key: {raw_key}")))?;
         let down = CGEvent::new_keyboard_event(event_source()?, keycode, true)
             .map_err(|_| ComputerError::Input("could not create key-down event".into()))?;
         down.set_flags(flags);
@@ -734,7 +759,8 @@ mod macos {
             move_to(action_position(action)?, None)?;
         }
         let amount = action.amount.unwrap_or(3).abs().max(1);
-        let (vertical, horizontal) = match action.direction.unwrap_or(ComputerScrollDirection::Down) {
+        let (vertical, horizontal) = match action.direction.unwrap_or(ComputerScrollDirection::Down)
+        {
             ComputerScrollDirection::Up => (amount, 0),
             ComputerScrollDirection::Down => (-amount, 0),
             ComputerScrollDirection::Left => (0, amount),
@@ -779,7 +805,7 @@ mod tests {
     }
 
     #[test]
-    fn grok_action_limits_are_enforced_without_touching_the_desktop() {
+    fn action_limits_are_enforced_without_touching_the_desktop() {
         let mut wait = action(ComputerActionKind::Wait);
         wait.wait_ms = Some(COMPUTER_MAX_WAIT_MS + 1);
         assert!(validate_action(&wait).is_err());
@@ -795,7 +821,7 @@ mod tests {
     }
 
     #[test]
-    fn grok_follow_up_sequence_rejects_screenshot_before_touching_the_desktop() {
+    fn follow_up_sequence_rejects_screenshot_before_touching_the_desktop() {
         let primary = action(ComputerActionKind::Click);
         let follow_up = action(ComputerActionKind::Screenshot);
         let error = execute(&[primary, follow_up], ComputerControlOrigin::LocalUi)
@@ -807,7 +833,10 @@ mod tests {
     fn human_override_epoch_preempts_ai_without_touching_the_desktop() {
         let epoch = USER_OVERRIDE_EPOCH.load(Ordering::SeqCst);
         USER_OVERRIDE_EPOCH.fetch_add(1, Ordering::SeqCst);
-        assert!(matches!(ensure_ai_not_preempted(epoch), Err(ComputerError::Preempted)));
+        assert!(matches!(
+            ensure_ai_not_preempted(epoch),
+            Err(ComputerError::Preempted)
+        ));
     }
 
     #[test]

@@ -16,6 +16,7 @@ command = "worker-build --release --no-panic-recovery"
 ACCESS_TOKEN_KEY_ID = "mahayana-account-2026-07"
 PLUGIN_TOKEN_KEY_ID = "mahayana-account-2026-07"
 DEFAULT_AI_TOKEN_LIMIT = "2000000"
+AUTH_PUBLIC_BASE_URL = "https://mahayana-platform.bhrumom.workers.dev"
 
 [[d1_databases]]
 binding = "PLATFORM_DB"
