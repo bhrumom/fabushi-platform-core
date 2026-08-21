@@ -187,6 +187,7 @@ impl AppHost {
                 .feature
                 .logout()
                 .map_err(|error| AppHostError::Operation(error.to_string())),
+            "feature.messaging.access.issue" => self.feature_messaging_access_issue(params),
             other => Err(AppHostError::InvalidRequest(format!(
                 "unknown feature method {other}"
             ))),
@@ -231,6 +232,33 @@ impl AppHost {
             .interrupt(operation_id)
             .map_err(|error| AppHostError::Operation(error.to_string()))?;
         Ok(Value::Null)
+    }
+
+    fn feature_messaging_access_issue(&self, params: Value) -> Result<Value, AppHostError> {
+        let device_id = string_param(&params, "deviceId")?.to_string();
+        let session_id = string_param(&params, "sessionId")?.to_string();
+        let scopes = params
+            .get("scopes")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| {
+                        item.as_str().map(str::to_string).ok_or_else(|| {
+                            AppHostError::InvalidRequest("scopes must contain strings".into())
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let ttl_ms = params
+            .get("ttlMs")
+            .and_then(Value::as_i64)
+            .unwrap_or(24 * 60 * 60 * 1000);
+        self.feature
+            .issue_messaging_access(device_id, session_id, scopes, ttl_ms)
+            .map_err(|error| AppHostError::Operation(error.to_string()))
     }
 
     fn feature_password_login(&self, params: Value) -> Result<Value, AppHostError> {

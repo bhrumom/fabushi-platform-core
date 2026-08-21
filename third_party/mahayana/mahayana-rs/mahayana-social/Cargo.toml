@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
+fabushi-messaging-core.workspace = true
 mahayana-conversation.workspace = true
 mahayana-core.workspace = true
 mahayana-product = { package = "mahayana-platform-client", path = "../mahayana-product" }

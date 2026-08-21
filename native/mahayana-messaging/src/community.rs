@@ -1,0 +1,197 @@
+use crate::actor::ActorId;
+use crate::conversation::ConversationId;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+use thiserror::Error;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MemberStatus {
+    Owner,
+    Administrator,
+    Member,
+    Restricted,
+    Left,
+    Banned,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminRights {
+    pub change_info: bool,
+    pub post_messages: bool,
+    pub edit_messages: bool,
+    pub delete_messages: bool,
+    pub ban_members: bool,
+    pub invite_members: bool,
+    pub pin_messages: bool,
+    pub manage_topics: bool,
+    pub manage_calls: bool,
+    pub add_admins: bool,
+    pub remain_anonymous: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberRestrictions {
+    pub send_messages: bool,
+    pub send_media: bool,
+    pub send_polls: bool,
+    pub embed_links: bool,
+    pub add_members: bool,
+    pub pin_messages: bool,
+    pub change_info: bool,
+    pub until_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommunityMember {
+    pub actor_id: ActorId,
+    pub status: MemberStatus,
+    pub admin_title: Option<String>,
+    pub admin_rights: AdminRights,
+    pub restrictions: MemberRestrictions,
+    pub joined_at_ms: i64,
+    pub invited_by: Option<ActorId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InviteLink {
+    pub id: String,
+    pub conversation_id: ConversationId,
+    pub creator_id: ActorId,
+    pub token: String,
+    pub name: Option<String>,
+    pub created_at_ms: i64,
+    pub expires_at_ms: Option<i64>,
+    pub member_limit: Option<u32>,
+    pub join_request: bool,
+    pub revoked: bool,
+    pub joined_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JoinRequest {
+    pub conversation_id: ConversationId,
+    pub actor_id: ActorId,
+    pub invite_link_id: Option<String>,
+    pub bio: Option<String>,
+    pub requested_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForumTopicState {
+    pub id: String,
+    pub conversation_id: ConversationId,
+    pub title: String,
+    pub icon: Option<String>,
+    pub creator_id: ActorId,
+    pub created_at_ms: i64,
+    pub pinned: bool,
+    pub closed: bool,
+    pub hidden: bool,
+    pub unread_count: u32,
+    pub last_message_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommunityState {
+    pub conversation_id: ConversationId,
+    pub public_username: Option<String>,
+    pub linked_discussion_id: Option<ConversationId>,
+    pub signatures_enabled: bool,
+    pub join_to_send: bool,
+    pub join_request_required: bool,
+    pub slow_mode_seconds: Option<u32>,
+    pub members: BTreeMap<ActorId, CommunityMember>,
+    pub invite_links: BTreeMap<String, InviteLink>,
+    pub pending_join_requests: BTreeMap<ActorId, JoinRequest>,
+    pub topics: BTreeMap<String, ForumTopicState>,
+    pub banned_words: BTreeSet<String>,
+}
+
+impl CommunityState {
+    pub fn new(conversation_id: ConversationId) -> Self {
+        Self {
+            conversation_id,
+            public_username: None,
+            linked_discussion_id: None,
+            signatures_enabled: false,
+            join_to_send: false,
+            join_request_required: false,
+            slow_mode_seconds: None,
+            members: BTreeMap::new(),
+            invite_links: BTreeMap::new(),
+            pending_join_requests: BTreeMap::new(),
+            topics: BTreeMap::new(),
+            banned_words: BTreeSet::new(),
+        }
+    }
+
+    pub fn can_moderate(&self, actor_id: &ActorId) -> bool {
+        self.members.get(actor_id).is_some_and(|member| {
+            matches!(member.status, MemberStatus::Owner)
+                || (matches!(member.status, MemberStatus::Administrator)
+                    && member.admin_rights.delete_messages)
+        })
+    }
+
+    pub fn upsert_member(&mut self, member: CommunityMember) {
+        self.pending_join_requests.remove(&member.actor_id);
+        self.members.insert(member.actor_id.clone(), member);
+    }
+
+    pub fn request_join(&mut self, request: JoinRequest) {
+        self.pending_join_requests
+            .insert(request.actor_id.clone(), request);
+    }
+
+    pub fn approve_join(
+        &mut self,
+        actor_id: &ActorId,
+        approved_by: &ActorId,
+        now_ms: i64,
+    ) -> Result<(), CommunityError> {
+        if !self.can_moderate(approved_by) {
+            return Err(CommunityError::PermissionDenied);
+        }
+        let request = self
+            .pending_join_requests
+            .remove(actor_id)
+            .ok_or_else(|| CommunityError::JoinRequestNotFound(actor_id.clone()))?;
+        self.upsert_member(CommunityMember {
+            actor_id: request.actor_id,
+            status: MemberStatus::Member,
+            admin_title: None,
+            admin_rights: AdminRights::default(),
+            restrictions: MemberRestrictions::default(),
+            joined_at_ms: now_ms,
+            invited_by: Some(approved_by.clone()),
+        });
+        Ok(())
+    }
+
+    pub fn revoke_invite(&mut self, invite_id: &str) -> Result<(), CommunityError> {
+        let invite = self
+            .invite_links
+            .get_mut(invite_id)
+            .ok_or_else(|| CommunityError::InviteNotFound(invite_id.to_string()))?;
+        invite.revoked = true;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum CommunityError {
+    #[error("community permission denied")]
+    PermissionDenied,
+    #[error("join request for actor {0:?} was not found")]
+    JoinRequestNotFound(ActorId),
+    #[error("invite link {0} was not found")]
+    InviteNotFound(String),
+}

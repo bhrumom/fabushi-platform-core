@@ -69,6 +69,7 @@ crossbeam-channel = "0.5"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 flate2 = "1.1.8"
 crossterm = "0.28.1"
+fabushi-messaging-core = { path = "../../../native/mahayana-messaging" }
 mahayana-agent = { path = "mahayana-agent" }
 mahayana-agent-responses = { path = "mahayana-agent-responses" }
 mahayana-app-host = { path = "mahayana-app-host" }

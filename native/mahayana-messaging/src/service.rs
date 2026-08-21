@@ -1,0 +1,890 @@
+use crate::actor::{ActorId, ActorKind};
+use crate::blob_store::{BlobStoreError, FileBlobStore};
+use crate::bot::BotInvocation;
+use crate::engine::{Command, EngineError, Event, MessagingEngine};
+use crate::message::{Message, MessageContent, MessageId};
+use crate::payment::Money;
+use crate::protocol::{
+    ClientCommand, ClientEnvelope, ServerEnvelope, ServerEvent, FABUSHI_MESSAGING_PROTOCOL_VERSION,
+};
+use crate::settlement::{SettlementError, SettlementVerifier, SignedSettlement};
+use crate::store::{MessagingSnapshot, MessagingStateStore, StoreError};
+use crate::wallet::{LedgerEntry, WalletAccountId};
+use base64::Engine as _;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum MessagingServiceError {
+    #[error("unsupported messaging protocol version {actual}; expected {expected}")]
+    ProtocolVersion { expected: u16, actual: u16 },
+    #[error(transparent)]
+    Engine(#[from] EngineError),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error(transparent)]
+    Blob(#[from] BlobStoreError),
+    #[error("blob storage is unavailable for this messaging service")]
+    BlobStoreUnavailable,
+    #[error("blob chunk is not valid base64: {0}")]
+    InvalidBlobBase64(String),
+    #[error("messaging service invariant failed: {0}")]
+    Invariant(String),
+    #[error("messaging command is not authorized for the authenticated actor: {0}")]
+    UnauthorizedCommand(String),
+    #[error(transparent)]
+    Settlement(#[from] SettlementError),
+}
+
+fn sanitize_invocation_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | ':') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .take(160)
+        .collect()
+}
+
+pub struct MessagingService<S: MessagingStateStore> {
+    engine: MessagingEngine,
+    store: S,
+    blob_store: Option<FileBlobStore>,
+    cursor: u64,
+}
+
+impl<S: MessagingStateStore> MessagingService<S> {
+    pub fn load(store: S) -> Result<Self, MessagingServiceError> {
+        let snapshot = store.load()?;
+        let (engine, cursor) = match snapshot {
+            Some(snapshot) => (MessagingEngine::from_state(snapshot.state), snapshot.cursor),
+            None => (MessagingEngine::new(), 0),
+        };
+        Ok(Self {
+            engine,
+            store,
+            blob_store: None,
+            cursor,
+        })
+    }
+
+    pub fn load_with_blob_store(
+        store: S,
+        blob_store: FileBlobStore,
+    ) -> Result<Self, MessagingServiceError> {
+        let mut service = Self::load(store)?;
+        service.blob_store = Some(blob_store);
+        Ok(service)
+    }
+
+    pub fn engine(&self) -> &MessagingEngine {
+        &self.engine
+    }
+
+    pub fn cursor(&self) -> u64 {
+        self.cursor
+    }
+
+    pub fn into_store(self) -> S {
+        self.store
+    }
+
+    pub fn handle(
+        &mut self,
+        envelope: ClientEnvelope,
+        server_time_ms: i64,
+    ) -> Result<Vec<ServerEnvelope>, MessagingServiceError> {
+        if envelope.protocol_version != FABUSHI_MESSAGING_PROTOCOL_VERSION {
+            return Err(MessagingServiceError::ProtocolVersion {
+                expected: FABUSHI_MESSAGING_PROTOCOL_VERSION,
+                actual: envelope.protocol_version,
+            });
+        }
+
+        let actor_id = envelope.context.actor_id;
+        let command = envelope.command;
+        self.validate_command_authorization(&actor_id, &command)?;
+        match command {
+            ClientCommand::BeginBlobUpload { metadata } => {
+                let status = self.blob_store()?.begin_upload(&metadata)?;
+                self.single_service_event(ServerEvent::BlobUploadChanged { status }, server_time_ms)
+            }
+            ClientCommand::AppendBlobChunk {
+                blob_id,
+                offset,
+                data_base64,
+            } => {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(data_base64.as_bytes())
+                    .map_err(|error| MessagingServiceError::InvalidBlobBase64(error.to_string()))?;
+                let status = self.blob_store()?.append_chunk(&blob_id, offset, &bytes)?;
+                self.single_service_event(ServerEvent::BlobUploadChanged { status }, server_time_ms)
+            }
+            ClientCommand::FinishBlobUpload { blob_id } => {
+                let metadata = self.blob_store()?.finish_upload(&blob_id)?;
+                self.single_service_event(ServerEvent::BlobReady { metadata }, server_time_ms)
+            }
+            ClientCommand::DeleteBlob { blob_id } => {
+                self.blob_store()?.delete(&blob_id)?;
+                self.single_service_event(ServerEvent::BlobDeleted { blob_id }, server_time_ms)
+            }
+            ClientCommand::WalletStatus => {
+                Ok(vec![self.wallet_status_envelope(&actor_id, server_time_ms)])
+            }
+            command => {
+                if let ClientCommand::Sync { limit, .. } = &command {
+                    return Ok(vec![self.sync_envelope(&actor_id, *limit, server_time_ms)]);
+                }
+
+                let commands = self.project_command(&actor_id, command, server_time_ms);
+                let mut events = Vec::new();
+                for command in commands {
+                    events.extend(self.engine.execute(command)?);
+                }
+                if events.is_empty() {
+                    return Ok(Vec::new());
+                }
+
+                let bot_invocations = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        Event::MessageQueued { message } => Some(message),
+                        _ => None,
+                    })
+                    .flat_map(|message| self.bot_invocations_for_message(message))
+                    .collect::<Vec<_>>();
+                self.cursor = self.cursor.saturating_add(events.len() as u64);
+                self.persist(server_time_ms)?;
+                let mut responses = events
+                    .into_iter()
+                    .filter_map(|event| self.project_event(event, server_time_ms))
+                    .collect::<Vec<_>>();
+                responses.extend(
+                    bot_invocations
+                        .into_iter()
+                        .map(|invocation| ServerEnvelope {
+                            protocol_version: FABUSHI_MESSAGING_PROTOCOL_VERSION,
+                            cursor: Some(self.cursor.to_string()),
+                            server_time_ms,
+                            event: ServerEvent::BotInvocationRequested { invocation },
+                        }),
+                );
+                Ok(responses)
+            }
+        }
+    }
+
+    fn bot_invocations_for_message(&self, message: &Message) -> Vec<BotInvocation> {
+        let sender = match self.engine.state().actors.get(&message.sender_id) {
+            Some(sender) => sender,
+            None => return Vec::new(),
+        };
+        if matches!(
+            sender.kind,
+            ActorKind::Bot | ActorKind::Assistant | ActorKind::Service
+        ) {
+            return Vec::new();
+        }
+        let MessageContent::Text { text } = &message.content else {
+            return Vec::new();
+        };
+        let Some(conversation) = self
+            .engine
+            .state()
+            .conversations
+            .get(&message.conversation_id)
+        else {
+            return Vec::new();
+        };
+        let command = text
+            .text
+            .trim()
+            .strip_prefix('/')
+            .and_then(|value| value.split_whitespace().next())
+            .map(|value| value.trim_start_matches('@').to_string())
+            .filter(|value| !value.is_empty());
+        conversation
+            .participants
+            .iter()
+            .filter_map(|participant| {
+                if participant.actor_id == message.sender_id {
+                    return None;
+                }
+                let actor = self.engine.state().actors.get(&participant.actor_id)?;
+                if !matches!(actor.kind, ActorKind::Bot | ActorKind::Assistant) {
+                    return None;
+                }
+                Some(BotInvocation {
+                    id: format!(
+                        "invoke:auto:{}:{}",
+                        sanitize_invocation_component(&message.id.0),
+                        sanitize_invocation_component(&actor.id.0)
+                    ),
+                    bot_id: actor.id.clone(),
+                    sender_id: message.sender_id.clone(),
+                    conversation_id: message.conversation_id.clone(),
+                    command: command.clone(),
+                    text: text.clone(),
+                    reply_to_message_id: message.reply_to_message_id.clone(),
+                    metadata: std::collections::BTreeMap::from([
+                        ("source".into(), "messaging-service".into()),
+                        ("messageId".into(), message.id.0.clone()),
+                    ]),
+                    created_at_ms: message.created_at_ms,
+                })
+            })
+            .collect()
+    }
+
+    fn validate_command_authorization(
+        &self,
+        actor_id: &ActorId,
+        command: &ClientCommand,
+    ) -> Result<(), MessagingServiceError> {
+        let denied = |reason: &str| MessagingServiceError::UnauthorizedCommand(reason.into());
+        match command {
+            ClientCommand::UpsertProfile { actor } if &actor.id != actor_id => {
+                return Err(denied(
+                    "profile actor id does not match authenticated actor",
+                ));
+            }
+            ClientCommand::CreateConversation { conversation } => {
+                let caller_is_participant = conversation
+                    .participants
+                    .iter()
+                    .any(|participant| &participant.actor_id == actor_id);
+                if !caller_is_participant
+                    || conversation
+                        .owner_id
+                        .as_ref()
+                        .is_some_and(|owner| owner != actor_id)
+                {
+                    return Err(denied("conversation creator must be an owner/participant"));
+                }
+            }
+            ClientCommand::UpdateConversation { conversation } => {
+                let existing = self
+                    .engine
+                    .state()
+                    .conversations
+                    .get(&conversation.id)
+                    .ok_or_else(|| denied("conversation update target does not exist"))?;
+                let caller = existing
+                    .participants
+                    .iter()
+                    .find(|participant| &participant.actor_id == actor_id)
+                    .ok_or_else(|| denied("conversation update requires membership"))?;
+                if !matches!(
+                    caller.role,
+                    crate::actor::ParticipantRole::Owner | crate::actor::ParticipantRole::Admin
+                ) {
+                    return Err(denied("conversation update requires owner/admin role"));
+                }
+            }
+            ClientCommand::CreateInvoice { invoice } if &invoice.seller_id != actor_id => {
+                return Err(denied(
+                    "invoice seller id does not match authenticated actor",
+                ));
+            }
+            ClientCommand::GrantMiniApp { grant } if &grant.actor_id != actor_id => {
+                return Err(denied(
+                    "Mini App grant actor does not match authenticated actor",
+                ));
+            }
+            ClientCommand::OpenMiniApp { session } if &session.actor_id != actor_id => {
+                return Err(denied(
+                    "Mini App session actor does not match authenticated actor",
+                ));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn blob_store(&self) -> Result<&FileBlobStore, MessagingServiceError> {
+        self.blob_store
+            .as_ref()
+            .ok_or(MessagingServiceError::BlobStoreUnavailable)
+    }
+
+    fn single_service_event(
+        &mut self,
+        event: ServerEvent,
+        server_time_ms: i64,
+    ) -> Result<Vec<ServerEnvelope>, MessagingServiceError> {
+        self.cursor = self.cursor.saturating_add(1);
+        self.persist(server_time_ms)?;
+        Ok(vec![ServerEnvelope {
+            protocol_version: FABUSHI_MESSAGING_PROTOCOL_VERSION,
+            cursor: Some(self.cursor.to_string()),
+            server_time_ms,
+            event,
+        }])
+    }
+
+    pub fn apply_signed_settlement(
+        &mut self,
+        verifier: &SettlementVerifier,
+        signed: &SignedSettlement,
+        server_time_ms: i64,
+    ) -> Result<LedgerEntry, MessagingServiceError> {
+        let event = verifier.verify(signed, server_time_ms)?;
+        self.credit_wallet_from_settlement(
+            event.idempotency_key(),
+            event.actor_id,
+            event.amount,
+            Some(event.provider_reference),
+            server_time_ms,
+        )
+    }
+
+    pub fn credit_wallet_from_settlement(
+        &mut self,
+        request_id: String,
+        owner_id: ActorId,
+        amount: Money,
+        reference: Option<String>,
+        server_time_ms: i64,
+    ) -> Result<LedgerEntry, MessagingServiceError> {
+        let events = self.engine.execute(Command::CreditWalletSettlement {
+            request_id,
+            owner_id,
+            amount,
+            reference,
+            settled_at_ms: server_time_ms,
+        })?;
+        let entry = events
+            .iter()
+            .find_map(|event| match event {
+                Event::WalletChanged { entry, .. } => Some(entry.clone()),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MessagingServiceError::Invariant(
+                    "wallet settlement produced no ledger entry".into(),
+                )
+            })?;
+        self.cursor = self.cursor.saturating_add(events.len() as u64);
+        self.persist(server_time_ms)?;
+        Ok(entry)
+    }
+
+    fn wallet_status_envelope(&self, actor_id: &ActorId, server_time_ms: i64) -> ServerEnvelope {
+        let account_id = WalletAccountId(format!("wallet:{}", actor_id.0));
+        let account = self
+            .engine
+            .state()
+            .wallet
+            .accounts
+            .get(&account_id)
+            .cloned();
+        let mut recent_entries = self
+            .engine
+            .state()
+            .wallet
+            .entries
+            .values()
+            .filter(|entry| {
+                entry.from_account_id.as_ref() == Some(&account_id)
+                    || entry.to_account_id.as_ref() == Some(&account_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        recent_entries.sort_by_key(|entry| std::cmp::Reverse(entry.created_at_ms));
+        recent_entries.truncate(50);
+        ServerEnvelope {
+            protocol_version: FABUSHI_MESSAGING_PROTOCOL_VERSION,
+            cursor: Some(self.cursor.to_string()),
+            server_time_ms,
+            event: ServerEvent::WalletStatus {
+                account,
+                recent_entries,
+            },
+        }
+    }
+
+    fn sync_envelope(&self, actor_id: &ActorId, limit: u32, server_time_ms: i64) -> ServerEnvelope {
+        let state = self.engine.state();
+        let max_items = usize::try_from(limit.max(1)).unwrap_or(usize::MAX);
+        let visible_conversation_ids = state
+            .conversations
+            .values()
+            .filter(|conversation| {
+                conversation
+                    .participants
+                    .iter()
+                    .any(|participant| &participant.actor_id == actor_id)
+                    || conversation.owner_id.as_ref() == Some(actor_id)
+            })
+            .map(|conversation| conversation.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let visible_actor_ids = visible_conversation_ids
+            .iter()
+            .filter_map(|conversation_id| state.conversations.get(conversation_id))
+            .flat_map(|conversation| {
+                conversation
+                    .participants
+                    .iter()
+                    .map(|participant| participant.actor_id.clone())
+            })
+            .chain(std::iter::once(actor_id.clone()))
+            .collect::<std::collections::BTreeSet<_>>();
+        ServerEnvelope {
+            protocol_version: FABUSHI_MESSAGING_PROTOCOL_VERSION,
+            cursor: Some(self.cursor.to_string()),
+            server_time_ms,
+            event: ServerEvent::SyncBatch {
+                actors: visible_actor_ids
+                    .iter()
+                    .filter_map(|id| state.actors.get(id))
+                    .take(max_items)
+                    .cloned()
+                    .collect(),
+                conversations: visible_conversation_ids
+                    .iter()
+                    .filter_map(|id| state.conversations.get(id))
+                    .take(max_items)
+                    .cloned()
+                    .collect(),
+                messages: visible_conversation_ids
+                    .iter()
+                    .filter_map(|id| state.messages.get(id))
+                    .flat_map(|messages| messages.values())
+                    .take(max_items)
+                    .cloned()
+                    .collect(),
+                folders: state
+                    .folders
+                    .values()
+                    .filter(|folder| {
+                        folder
+                            .conversation_ids
+                            .iter()
+                            .any(|id| visible_conversation_ids.contains(id))
+                    })
+                    .take(max_items)
+                    .cloned()
+                    .collect(),
+                invoices: state
+                    .invoices
+                    .values()
+                    .filter(|invoice| visible_conversation_ids.contains(&invoice.conversation_id))
+                    .take(max_items)
+                    .cloned()
+                    .collect(),
+                orders: state
+                    .orders
+                    .values()
+                    .filter(|order| {
+                        &order.buyer_id == actor_id
+                            || state
+                                .invoices
+                                .get(&order.invoice_id)
+                                .is_some_and(|invoice| &invoice.seller_id == actor_id)
+                    })
+                    .take(max_items)
+                    .cloned()
+                    .collect(),
+                stories: state
+                    .stories
+                    .values()
+                    .filter(|story| {
+                        (story.pinned_to_profile || story.expires_at_ms > server_time_ms)
+                            && story.is_visible_to(actor_id, false, false)
+                    })
+                    .take(max_items)
+                    .cloned()
+                    .collect(),
+                communities: visible_conversation_ids
+                    .iter()
+                    .filter_map(|id| state.communities.get(id))
+                    .take(max_items)
+                    .cloned()
+                    .collect(),
+                bots: state.bots.bots.values().take(max_items).cloned().collect(),
+                bot_executions: state
+                    .bots
+                    .executions
+                    .values()
+                    .filter(|execution| {
+                        &execution.bot_id == actor_id
+                            || visible_actor_ids.contains(&execution.bot_id)
+                    })
+                    .take(max_items)
+                    .cloned()
+                    .collect(),
+                mini_apps: state.mini_apps.values().take(max_items).cloned().collect(),
+                next_cursor: Some(self.cursor.to_string()),
+            },
+        }
+    }
+
+    fn project_command(
+        &self,
+        actor_id: &ActorId,
+        command: ClientCommand,
+        now_ms: i64,
+    ) -> Vec<Command> {
+        match command {
+            ClientCommand::Sync { .. } => Vec::new(),
+            ClientCommand::UpsertProfile { actor } => vec![Command::UpsertActor { actor }],
+            ClientCommand::SetPresence { presence } => vec![Command::SetPresence {
+                actor_id: actor_id.clone(),
+                presence,
+            }],
+            ClientCommand::CreateConversation { conversation }
+            | ClientCommand::UpdateConversation { conversation } => {
+                vec![Command::UpsertConversation { conversation }]
+            }
+            ClientCommand::ArchiveConversation {
+                conversation_id,
+                archived,
+            } => vec![Command::ArchiveConversation {
+                conversation_id,
+                archived,
+            }],
+            ClientCommand::PinConversation {
+                conversation_id,
+                pinned,
+            } => vec![Command::PinConversation {
+                conversation_id,
+                pinned,
+            }],
+            ClientCommand::SetConversationNotifications {
+                conversation_id,
+                settings,
+            } => vec![Command::SetConversationNotifications {
+                conversation_id,
+                settings,
+            }],
+            ClientCommand::UpsertFolder { folder } => vec![Command::UpsertFolder { folder }],
+            ClientCommand::DeleteFolder { folder_id } => vec![Command::DeleteFolder { folder_id }],
+            ClientCommand::SendMessage {
+                conversation_id,
+                client_message_id,
+                content,
+                reply_to_message_id,
+                thread_root_message_id,
+                scheduled_at_ms,
+                silent,
+                protected_content,
+            } => vec![Command::QueueMessage {
+                conversation_id,
+                local_message_id: MessageId::new(format!("local:{}", client_message_id.0)),
+                client_message_id,
+                sender_id: actor_id.clone(),
+                content,
+                reply_to_message_id,
+                thread_root_message_id,
+                created_at_ms: now_ms,
+                scheduled_at_ms,
+                silent,
+                protected_content,
+            }],
+            ClientCommand::ForwardMessage {
+                source_conversation_id,
+                message_id,
+                destination_conversation_id,
+                client_message_id,
+            } => vec![Command::ForwardMessage {
+                source_conversation_id,
+                message_id,
+                destination_conversation_id,
+                local_message_id: MessageId::new(format!("local:{}", client_message_id.0)),
+                client_message_id,
+                sender_id: actor_id.clone(),
+                created_at_ms: now_ms,
+            }],
+            ClientCommand::EditMessage {
+                conversation_id,
+                message_id,
+                content,
+            } => vec![Command::EditMessage {
+                conversation_id,
+                message_id,
+                content,
+                edited_at_ms: now_ms,
+            }],
+            ClientCommand::DeleteMessages {
+                conversation_id,
+                message_ids,
+                ..
+            } => vec![Command::DeleteMessages {
+                conversation_id,
+                message_ids,
+            }],
+            ClientCommand::MarkRead {
+                conversation_id,
+                message_id,
+            } => vec![Command::MarkRead {
+                conversation_id,
+                actor_id: actor_id.clone(),
+                message_id,
+            }],
+            ClientCommand::SetReaction {
+                conversation_id,
+                message_id,
+                reaction,
+            } => vec![Command::SetReaction {
+                conversation_id,
+                message_id,
+                reaction,
+            }],
+            ClientCommand::PinMessage {
+                conversation_id,
+                message_id,
+                pinned,
+            } => vec![Command::PinMessage {
+                conversation_id,
+                message_id,
+                pinned,
+            }],
+            ClientCommand::StartTyping { .. } | ClientCommand::StopTyping { .. } => Vec::new(),
+            ClientCommand::CreateInvoice { invoice } => vec![Command::CreateInvoice { invoice }],
+            ClientCommand::CheckoutInvoice {
+                invoice_id,
+                order_id,
+                customer,
+            } => vec![Command::CheckoutInvoice {
+                invoice_id,
+                order_id,
+                buyer_id: actor_id.clone(),
+                customer,
+                created_at_ms: now_ms,
+            }],
+            ClientCommand::RefundOrder {
+                order_id,
+                request_id,
+            } => vec![Command::RefundOrder {
+                order_id,
+                seller_id: actor_id.clone(),
+                request_id,
+                refunded_at_ms: now_ms,
+            }],
+            ClientCommand::WalletStatus => Vec::new(),
+            ClientCommand::PublishStory { story } => vec![Command::PublishStory {
+                actor_id: actor_id.clone(),
+                story,
+            }],
+            ClientCommand::DeleteStory { story_id } => vec![Command::DeleteStory {
+                actor_id: actor_id.clone(),
+                story_id,
+            }],
+            ClientCommand::ViewStory { story_id } => vec![Command::ViewStory {
+                actor_id: actor_id.clone(),
+                story_id,
+                viewed_at_ms: now_ms,
+            }],
+            ClientCommand::ReactStory { story_id, reaction } => vec![Command::ReactStory {
+                actor_id: actor_id.clone(),
+                story_id,
+                reaction,
+            }],
+            ClientCommand::UpdateCommunity { community } => vec![Command::UpdateCommunity {
+                actor_id: actor_id.clone(),
+                community,
+            }],
+            ClientCommand::SetCommunityMember {
+                conversation_id,
+                member,
+            } => vec![Command::SetCommunityMember {
+                actor_id: actor_id.clone(),
+                conversation_id,
+                member,
+            }],
+            ClientCommand::CreateInviteLink { invite } => vec![Command::CreateInviteLink {
+                actor_id: actor_id.clone(),
+                invite,
+            }],
+            ClientCommand::RevokeInviteLink {
+                conversation_id,
+                invite_id,
+            } => vec![Command::RevokeInviteLink {
+                actor_id: actor_id.clone(),
+                conversation_id,
+                invite_id,
+            }],
+            ClientCommand::RequestCommunityJoin { request } => {
+                vec![Command::RequestCommunityJoin {
+                    actor_id: actor_id.clone(),
+                    request,
+                }]
+            }
+            ClientCommand::RespondCommunityJoin {
+                conversation_id,
+                requester_id,
+                approved,
+            } => vec![Command::RespondCommunityJoin {
+                actor_id: actor_id.clone(),
+                conversation_id,
+                requester_id,
+                approved,
+                decided_at_ms: now_ms,
+            }],
+            ClientCommand::UpsertForumTopic { topic } => vec![Command::UpsertForumTopic {
+                actor_id: actor_id.clone(),
+                topic,
+            }],
+            ClientCommand::DeleteForumTopic {
+                conversation_id,
+                topic_id,
+            } => vec![Command::DeleteForumTopic {
+                actor_id: actor_id.clone(),
+                conversation_id,
+                topic_id,
+            }],
+            ClientCommand::RegisterBot { profile } => vec![Command::RegisterBot {
+                actor_id: actor_id.clone(),
+                profile,
+            }],
+            ClientCommand::InvokeBot { invocation } => vec![Command::BeginBotInvocation {
+                actor_id: actor_id.clone(),
+                invocation,
+                created_at_ms: now_ms,
+            }],
+            ClientCommand::FinishBotExecution {
+                execution_id,
+                success,
+                error,
+            } => vec![Command::FinishBotExecution {
+                actor_id: actor_id.clone(),
+                execution_id,
+                success,
+                finished_at_ms: now_ms,
+                error,
+            }],
+            ClientCommand::InstallMiniApp { manifest } => {
+                vec![Command::InstallMiniApp { manifest }]
+            }
+            ClientCommand::GrantMiniApp { grant } => vec![Command::GrantMiniApp { grant }],
+            ClientCommand::OpenMiniApp { session } => vec![Command::OpenMiniApp { session }],
+            ClientCommand::MiniAppCall {
+                session_id,
+                request_id,
+                request,
+            } => vec![Command::MiniAppCall {
+                session_id,
+                request_id,
+                request,
+            }],
+            ClientCommand::BeginBlobUpload { .. }
+            | ClientCommand::AppendBlobChunk { .. }
+            | ClientCommand::FinishBlobUpload { .. }
+            | ClientCommand::DeleteBlob { .. } => Vec::new(),
+        }
+    }
+
+    fn project_event(&self, event: Event, server_time_ms: i64) -> Option<ServerEnvelope> {
+        let server_event = match event {
+            Event::ActorUpserted { actor } => ServerEvent::ActorChanged { actor },
+            Event::PresenceUpdated { actor_id, presence } => {
+                ServerEvent::PresenceChanged { actor_id, presence }
+            }
+            Event::ConversationUpserted { conversation } => {
+                ServerEvent::ConversationChanged { conversation }
+            }
+            Event::ConversationArchived {
+                conversation_id, ..
+            }
+            | Event::ConversationPinned {
+                conversation_id, ..
+            }
+            | Event::ConversationNotificationsUpdated {
+                conversation_id, ..
+            } => self
+                .engine
+                .state()
+                .conversations
+                .get(&conversation_id)
+                .cloned()
+                .map(|conversation| ServerEvent::ConversationChanged { conversation })?,
+            Event::FolderUpserted { folder } => ServerEvent::FolderChanged { folder },
+            Event::FolderDeleted { folder_id } => ServerEvent::FolderDeleted { folder_id },
+            Event::MessageQueued { message } => ServerEvent::MessageAdded { message },
+            Event::MessageAcknowledged {
+                conversation_id,
+                server_message_id,
+                ..
+            }
+            | Event::DeliveryStateUpdated {
+                conversation_id,
+                message_id: server_message_id,
+                ..
+            }
+            | Event::MessageEdited {
+                conversation_id,
+                message_id: server_message_id,
+                ..
+            }
+            | Event::ReactionUpdated {
+                conversation_id,
+                message_id: server_message_id,
+                ..
+            }
+            | Event::MessagePinned {
+                conversation_id,
+                message_id: server_message_id,
+                ..
+            } => self
+                .engine
+                .state()
+                .messages
+                .get(&conversation_id)
+                .and_then(|messages| messages.get(&server_message_id))
+                .cloned()
+                .map(|message| ServerEvent::MessageChanged { message })?,
+            Event::MessagesDeleted {
+                conversation_id,
+                message_ids,
+            } => ServerEvent::MessagesDeleted {
+                conversation_id,
+                message_ids,
+            },
+            Event::ConversationRead {
+                conversation_id,
+                actor_id,
+                message_id,
+            } => ServerEvent::ReadChanged {
+                conversation_id,
+                actor_id,
+                message_id,
+            },
+            Event::InvoiceCreated { invoice } => ServerEvent::InvoiceChanged { invoice },
+            Event::OrderUpserted { order } => ServerEvent::OrderChanged { order },
+            Event::WalletChanged { .. } => return None,
+            Event::StoryChanged { story } => ServerEvent::StoryChanged { story },
+            Event::StoryDeleted { story_id } => ServerEvent::StoryDeleted { story_id },
+            Event::CommunityChanged { community } => ServerEvent::CommunityChanged { community },
+            Event::BotRegistryChanged {
+                profile, execution, ..
+            } => ServerEvent::BotChanged { profile, execution },
+            Event::MiniAppInstalled { manifest } => ServerEvent::MiniAppChanged { manifest },
+            Event::MiniAppGrantUpdated { .. } => return None,
+            Event::MiniAppOpened { session } => ServerEvent::MiniAppOpened { session },
+            Event::MiniAppResponded {
+                session_id,
+                request_id,
+                response,
+            } => ServerEvent::MiniAppResult {
+                session_id,
+                request_id,
+                response,
+            },
+        };
+        Some(ServerEnvelope {
+            protocol_version: FABUSHI_MESSAGING_PROTOCOL_VERSION,
+            cursor: Some(self.cursor.to_string()),
+            server_time_ms,
+            event: server_event,
+        })
+    }
+
+    fn persist(&mut self, now_ms: i64) -> Result<(), MessagingServiceError> {
+        let snapshot = MessagingSnapshot::new(self.engine.state().clone(), self.cursor, now_ms);
+        self.store.save(&snapshot)?;
+        Ok(())
+    }
+}

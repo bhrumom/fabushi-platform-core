@@ -1,7 +1,13 @@
 //! Fabushi software-contact conversation provider.
+//!
+//! Platform friends are projected into the same Fabushi messaging `Actor`
+//! model used by AI assistants and bots before they enter the generic
+//! conversation provider. This keeps identity semantics unified at the source
+//! instead of merging incompatible contact/bot models in the renderer.
 
 use async_trait::async_trait;
 use chrono::DateTime;
+use fabushi_messaging_core::Actor;
 use mahayana_conversation::ConversationError;
 use mahayana_conversation::ConversationProvider;
 use mahayana_conversation::ResolveApprovalRequest;
@@ -20,6 +26,7 @@ use serde_json::Value;
 use serde_json::json;
 
 const CONVERSATION_PREFIX: &str = "mahayana:contact:";
+const MESSAGING_ACTOR_PREFIX: &str = "human:platform:";
 
 #[derive(Clone)]
 pub struct MahayanaSocialConversationProvider {
@@ -138,15 +145,10 @@ fn conversations_from_response(response: &Value) -> Result<Vec<Conversation>, Co
             let contact_id = contact_identifier(friend).ok_or_else(|| {
                 ConversationError::Provider("contact has no stable identifier".into())
             })?;
-            let title = ["displayName", "nickname", "username", "userNo"]
-                .iter()
-                .find_map(|key| friend.get(key).and_then(Value::as_str))
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or(&contact_id)
-                .to_string();
+            let actor = messaging_actor_from_contact(friend)?;
             Ok(Conversation {
                 id: ConversationId(format!("{CONVERSATION_PREFIX}{contact_id}")),
-                title,
+                title: actor.display_name,
                 peer: PeerKind::MahayanaContact {
                     contact_id: contact_id.clone(),
                 },
@@ -165,6 +167,42 @@ fn conversations_from_response(response: &Value) -> Result<Vec<Conversation>, Co
             })
         })
         .collect()
+}
+
+fn messaging_actor_from_contact(contact: &Value) -> Result<Actor, ConversationError> {
+    let contact_id = contact_identifier(contact)
+        .ok_or_else(|| ConversationError::Provider("contact has no stable identifier".into()))?;
+    let display_name = ["displayName", "nickname", "username", "userNo"]
+        .iter()
+        .find_map(|key| contact.get(key).and_then(Value::as_str))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(&contact_id)
+        .to_string();
+    let mut actor = Actor::human(
+        format!("{MESSAGING_ACTOR_PREFIX}{contact_id}"),
+        display_name,
+    );
+    actor.username = contact
+        .get("username")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string);
+    actor.avatar_url = ["avatar", "avatarUrl", "profilePhoto"]
+        .iter()
+        .find_map(|key| contact.get(key).and_then(Value::as_str))
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string);
+    actor.bio = ["bio", "description", "signature"]
+        .iter()
+        .find_map(|key| contact.get(key).and_then(Value::as_str))
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string);
+    actor.verified = contact
+        .get("verified")
+        .or_else(|| contact.get("isVerified"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    Ok(actor)
 }
 
 fn messages_from_response(
@@ -240,20 +278,28 @@ fn timestamp_ms(value: Option<&Value>) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fabushi_messaging_core::ActorKind;
 
     #[test]
     fn maps_contacts_and_messages_to_common_contract() {
-        let conversations = conversations_from_response(&json!({
+        let response = json!({
             "data": {"friends": [{
                 "id": 42,
                 "username": "shanyou",
                 "displayName": "善友",
                 "friendshipUpdatedAt": "2026-07-13T10:00:00Z"
             }]}
-        }))
-        .expect("contacts");
+        });
+        let conversations = conversations_from_response(&response).expect("contacts");
         assert_eq!(conversations[0].id.as_str(), "mahayana:contact:42");
         assert_eq!(conversations[0].title, "善友");
+
+        let actor =
+            messaging_actor_from_contact(&response["data"]["friends"][0]).expect("messaging actor");
+        assert_eq!(actor.id.0, "human:platform:42");
+        assert_eq!(actor.kind, ActorKind::Human);
+        assert_eq!(actor.display_name, "善友");
+        assert_eq!(actor.username.as_deref(), Some("shanyou"));
 
         let messages = messages_from_response(
             &conversations[0].id,

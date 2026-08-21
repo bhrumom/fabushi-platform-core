@@ -23,6 +23,7 @@ telemetry = ["production", "mahayana-host/telemetry"]
 [dependencies]
 base64 = "0.22"
 chrono.workspace = true
+fabushi-messaging-core.workspace = true
 mahayana-core = { workspace = true, optional = true }
 mahayana-computer.workspace = true
 mahayana-host = { workspace = true, default-features = false, optional = true }
