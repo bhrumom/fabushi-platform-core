@@ -310,7 +310,7 @@ pub fn aes_ige_encrypt(
     let mut previous_ciphertext: [u8; 16] = iv[..16].try_into().expect("IGE IV half");
     let mut previous_plaintext: [u8; 16] = iv[16..].try_into().expect("IGE IV half");
     let mut output = Vec::with_capacity(plaintext.len());
-    for plaintext_block in plaintext.chunks_exact(AES_BLOCK_LENGTH) {
+    for plaintext_block in plaintext.as_chunks::<AES_BLOCK_LENGTH>().0 {
         let mut block = [0_u8; 16];
         xor_into(&mut block, plaintext_block, &previous_ciphertext);
         let mut encrypted = GenericArray::clone_from_slice(&block);
@@ -338,7 +338,7 @@ pub fn aes_ige_decrypt(
     let mut previous_ciphertext: [u8; 16] = iv[..16].try_into().expect("IGE IV half");
     let mut previous_plaintext: [u8; 16] = iv[16..].try_into().expect("IGE IV half");
     let mut output = Vec::with_capacity(ciphertext.len());
-    for ciphertext_block in ciphertext.chunks_exact(AES_BLOCK_LENGTH) {
+    for ciphertext_block in ciphertext.as_chunks::<AES_BLOCK_LENGTH>().0 {
         let mut block = [0_u8; 16];
         xor_into(&mut block, ciphertext_block, &previous_plaintext);
         let mut decrypted = GenericArray::clone_from_slice(&block);

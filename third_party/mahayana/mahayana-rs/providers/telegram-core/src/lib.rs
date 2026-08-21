@@ -1,6 +1,6 @@
 //! Platform-neutral messaging domain used by every Fabushi client.
 //!
-//! The crate intentionally contains no Flutter, Android, Apple, desktop, web,
+//! The crate intentionally contains no Android, Apple, Electron, web,
 //! or Telegram transport code. Platform adapters consume the same commands and
 //! events, while protocol implementations live behind a separate boundary.
 

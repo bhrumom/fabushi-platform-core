@@ -16,4 +16,4 @@
 cargo test --manifest-path native/telegram-core/Cargo.toml
 ```
 
-协议、加密存储、媒体管线和平台适配器必须作为后续独立 crate 接入，不能把网络或 Flutter 代码塞入本 crate。
+协议、加密存储、媒体管线和平台适配器必须作为后续独立 crate 接入，不能把网络或 UI 平台代码塞入本 crate。

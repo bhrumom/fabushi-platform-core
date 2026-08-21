@@ -2,7 +2,7 @@
 name = "fabushi-telegram-runtime"
 version = "0.1.0"
 edition = "2021"
-description = "C/JSON ABI runtime bridging Fabushi Flutter clients to the Telegram Rust core."
+description = "C/JSON ABI runtime bridging Fabushi application hosts to the Telegram Rust core."
 publish = false
 
 [lib]

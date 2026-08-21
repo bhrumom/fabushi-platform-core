@@ -1,7 +1,7 @@
 //! Direct Rust host API for the long-lived Mahayana Runtime.
 //!
-//! Native shells such as Tauri, Swift, and Kotlin should depend on this crate.
-//! The C/JSON ABI remains a compatibility adapter for the legacy Flutter host.
+//! Native shells such as Electron, Swift, and Kotlin should depend on this crate.
+//! The C/JSON ABI is the stable boundary used by native host adapters.
 
 use fabushi_official_miniapps::OFFICIAL_PLUGIN_IDS;
 use fabushi_official_miniapps::app_definition;

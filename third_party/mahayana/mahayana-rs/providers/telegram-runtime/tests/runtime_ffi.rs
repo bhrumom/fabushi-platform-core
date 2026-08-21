@@ -16,7 +16,7 @@ fn execute(client_id: u64, request: Value) -> Value {
 }
 
 #[test]
-fn flutter_friend_chat_payload_is_accepted_without_shape_translation() {
+fn native_friend_chat_payload_is_accepted_without_shape_translation() {
     assert_eq!(fabushi_telegram_force_link(), 1);
     let client = create_client();
     let chat = execute(
@@ -58,7 +58,7 @@ fn flutter_friend_chat_payload_is_accepted_without_shape_translation() {
                 "chatId": 1_234_567_890,
                 "localMessageId": -1,
                 "senderUserId": 1,
-                "clientRequestId": "flutter-queue-1",
+                "clientRequestId": "native-queue-1",
                 "dateUnixMs": 1_720_000_000_000_i64,
                 "content": {
                     "type": "text",

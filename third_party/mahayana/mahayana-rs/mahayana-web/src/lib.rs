@@ -201,6 +201,7 @@ impl MahayanaWebRuntime {
                     conversation_id: conversation_id.clone(),
                     text,
                     client_message_id,
+                    hidden: false,
                 };
                 let send_command = serde_json::to_string(&send_command).map_err(js_error)?;
                 let accepted = self.execute(&send_command)?;
@@ -307,9 +308,18 @@ impl MahayanaWebRuntime {
             | RuntimeCommand::McpApps
             | RuntimeCommand::McpOauthLogin { .. }
             | RuntimeCommand::McpOauthLogout { .. }
+            | RuntimeCommand::McpRemove { .. }
+            | RuntimeCommand::McpCustomInstructions
+            | RuntimeCommand::McpSetCustomInstructions { .. }
+            | RuntimeCommand::McpSetToolDisabled { .. }
             | RuntimeCommand::McpRefresh => {
                 return Err(JsValue::from_str(
-                    "native MCP account management is unavailable in the WebAssembly runtime",
+                    "native MCP management is unavailable in the WebAssembly runtime",
+                ));
+            }
+            RuntimeCommand::McpToolCall { .. } => {
+                return Err(JsValue::from_str(
+                    "native MCP tool execution is unavailable in the WebAssembly runtime",
                 ));
             }
             RuntimeCommand::ConversationHistory {
@@ -333,6 +343,7 @@ impl MahayanaWebRuntime {
                 conversation_id,
                 text,
                 client_message_id,
+                hidden,
             } => {
                 ensure_browser_conversation(&self.state.borrow().plugins, &conversation_id)?;
                 if text.trim().is_empty() {
@@ -380,18 +391,20 @@ impl MahayanaWebRuntime {
                     let message_id = client_message_id
                         .and_then(|id| MessageId::new(id).ok())
                         .unwrap_or_else(|| MessageId(state.next_id("message")));
-                    state
-                        .histories
-                        .entry(conversation_id.clone())
-                        .or_default()
-                        .push(Message {
-                            id: message_id,
-                            conversation_id: conversation_id.clone(),
-                            role: MessageRole::User,
-                            text: text.clone(),
-                            created_at_ms: now_ms(),
-                            metadata: json!({"sandbox": "web-wasm"}),
-                        });
+                    if !hidden {
+                        state
+                            .histories
+                            .entry(conversation_id.clone())
+                            .or_default()
+                            .push(Message {
+                                id: message_id,
+                                conversation_id: conversation_id.clone(),
+                                role: MessageRole::User,
+                                text: text.clone(),
+                                created_at_ms: now_ms(),
+                                metadata: json!({"sandbox": "web-wasm"}),
+                            });
+                    }
                     let input = state
                         .model_inputs
                         .entry(conversation_id.clone())
@@ -430,7 +443,7 @@ impl MahayanaWebRuntime {
 
     /// Executes account, marketplace, payment, and social commands inside the
     /// browser-local Rust Worker. Credentials are retained in Rust state and
-    /// are removed from every response before it crosses into Flutter/Dart.
+    /// are removed from every response before it crosses into a UI host.
     pub async fn execute_product(&self, command_json: &str) -> Result<String, JsValue> {
         let command: Value = serde_json::from_str(command_json).map_err(js_error)?;
         let response = execute_product_command(Rc::clone(&self.state), command).await?;

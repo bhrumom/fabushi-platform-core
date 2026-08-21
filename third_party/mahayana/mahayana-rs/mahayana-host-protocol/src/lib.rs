@@ -1,5 +1,5 @@
 //! Versioned product-level commands and events shared by React/Electron, native
-//! mobile shells, legacy Tauri, deterministic tests, and WebAssembly hosts.
+//! native mobile shells, deterministic tests, and WebAssembly hosts.
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -29,9 +29,7 @@ pub enum SurfacePlatform {
     Electron,
     Ios,
     Android,
-    Tauri,
     Wasm,
-    Flutter,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

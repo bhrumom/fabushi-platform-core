@@ -1977,7 +1977,7 @@ impl MahayanaProductClient {
     }
 
     /// Restores UI-safe account state. Access and refresh credentials never
-    /// cross the Rust ABI into Flutter or another host shell.
+    /// cross the Rust ABI into a native host shell.
     fn restore_session(&self) -> Result<Value, ProductError> {
         let session = self.required_session()?;
         let mut output = session.as_object().cloned().unwrap_or_default();
@@ -2144,7 +2144,7 @@ impl MahayanaProductClient {
     }
 
     /// Executes one same-origin platform request with the active Rust-owned
-    /// session. Flutter supplies business data but never receives bearer or
+    /// session. UI shells supply business data but never receive bearer or
     /// refresh credentials.
     fn platform_request(&self, request: &Value) -> Result<Value, ProductError> {
         let method = required_string(request, "method")?.to_ascii_uppercase();

@@ -1145,7 +1145,7 @@ fn tool(
     let mut descriptor = json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},"annotations":annotation});
     if ui {
         descriptor["_meta"] =
-            json!({"ui/resourceUri":format!("ui://fabushi/{{pluginId}}/home-v1.html")});
+            json!({"ui/resourceUri":"ui://fabushi/{pluginId}/home-v1.html".to_string()});
     }
     descriptor
 }

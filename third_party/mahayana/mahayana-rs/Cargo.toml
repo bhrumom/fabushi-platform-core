@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "../../../apps/fabushi-tauri/src-tauri",
     "mahayana-cli",
     "mahayana-agent",
     "mahayana-agent-codex",

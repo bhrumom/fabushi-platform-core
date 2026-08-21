@@ -8604,7 +8604,7 @@ fn sha1_digest(input: &[u8]) -> [u8; 20] {
         padded.push(0);
     }
     padded.extend_from_slice(&bit_len.to_be_bytes());
-    for chunk in padded.chunks_exact(64) {
+    for chunk in padded.as_chunks::<64>().0 {
         let mut words = [0u32; 80];
         for (index, word) in words[..16].iter_mut().enumerate() {
             let offset = index * 4;
@@ -10852,7 +10852,7 @@ mod tests {
                 profile_id: "fast-e2e".into(),
                 mode: HostMode::Test,
             },
-            SurfacePlatform::Tauri,
+            SurfacePlatform::Electron,
         )
         .expect("create feature Host")
     }
@@ -11957,7 +11957,7 @@ mod tests {
                 profile_id: "production".into(),
                 mode: HostMode::Production,
             },
-            SurfacePlatform::Tauri,
+            SurfacePlatform::Electron,
         )
         .err()
         .expect("production must not fall back to the test backend");
@@ -11972,7 +11972,7 @@ mod tests {
                 profile_id: "production".into(),
                 mode: HostMode::Production,
             },
-            SurfacePlatform::Tauri,
+            SurfacePlatform::Electron,
             isolated_host_config("production"),
         )
         .expect("create feature Host");
@@ -12066,7 +12066,7 @@ mod tests {
                 profile_id: "production-events".into(),
                 mode: HostMode::Production,
             },
-            SurfacePlatform::Tauri,
+            SurfacePlatform::Electron,
             isolated_host_config("production-events"),
         )
         .expect("create production event Host");

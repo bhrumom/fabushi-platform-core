@@ -1,4 +1,4 @@
-//! Conversation provider routing shared by CLI, Flutter, and Web surfaces.
+//! Conversation provider routing shared by CLI, native app, Electron, and Web surfaces.
 
 use async_trait::async_trait;
 use mahayana_core::ApprovalDecision;

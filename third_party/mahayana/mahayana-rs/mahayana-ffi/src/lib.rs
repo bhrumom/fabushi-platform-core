@@ -2,7 +2,7 @@
 //!
 //! Runtime construction and behavior live in `mahayana-host`. This crate owns
 //! only C pointers, JSON conversion, process-local numeric handles, and the
-//! legacy symbols used by Flutter during migration.
+//! stable native ABI symbols used by application host adapters.
 
 use mahayana_core::ApprovalDecision;
 use mahayana_core::ApprovalId;
@@ -199,7 +199,7 @@ pub unsafe extern "C" fn mahayana_product_execute(request_json: *const c_char) -
     })
 }
 
-/// Linker anchor for legacy Flutter builds that resolve Runtime and Telegram
+/// Linker anchor for native builds that resolve Runtime and Telegram
 /// symbols from one shared artifact.
 #[unsafe(no_mangle)]
 pub extern "C" fn mahayana_runtime_force_link() -> u32 {
