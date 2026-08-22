@@ -228,7 +228,10 @@ impl<S: MessagingStateStore> MessagingService<S> {
                     conversation_id: message.conversation_id.clone(),
                     command: command.clone(),
                     text: text.clone(),
-                    reply_to_message_id: message.reply_to_message_id.clone(),
+                    reply_to_message_id: message
+                        .reply_to_message_id
+                        .as_ref()
+                        .map(|id| id.0.clone()),
                     metadata: std::collections::BTreeMap::from([
                         ("source".into(), "messaging-service".into()),
                         ("messageId".into(), message.id.0.clone()),
