@@ -79,6 +79,57 @@ fn oauth_attempt_terminal_states_include_failed() {
 }
 
 #[test]
+fn principal_schema_keeps_profile_identity_and_connected_accounts_separate() {
+    assert_eq!(
+        validate_account_principal_schema(ACCOUNT_PRINCIPAL_SCHEMA_V6),
+        Ok(())
+    );
+    let principal_table = ACCOUNT_PRINCIPAL_SCHEMA_V6
+        .split("CREATE TABLE IF NOT EXISTS account_principals")
+        .nth(1)
+        .and_then(|rest| rest.split("CREATE").next())
+        .expect("principal table");
+    for forbidden in [
+        "password",
+        "apple",
+        "alipay",
+        "firebase",
+        "membership",
+        "payment",
+    ] {
+        assert!(
+            !principal_table.to_ascii_lowercase().contains(forbidden),
+            "principal row must not contain provider/product field {forbidden}"
+        );
+    }
+    assert!(ACCOUNT_PRINCIPAL_SCHEMA_V6.contains("account_connections"));
+    assert!(ACCOUNT_PRINCIPAL_SCHEMA_V6.contains("account_connection_grants"));
+    assert!(ACCOUNT_PRINCIPAL_SCHEMA_V6.contains("credential_ref TEXT NOT NULL"));
+    assert!(!ACCOUNT_PRINCIPAL_SCHEMA_V6.contains("access_token TEXT"));
+    assert!(!ACCOUNT_PRINCIPAL_SCHEMA_V6.contains("refresh_token TEXT"));
+}
+
+#[test]
+fn workspace_schema_unifies_human_and_agent_messaging() {
+    assert_eq!(
+        validate_workspace_messaging_schema(WORKSPACE_MESSAGING_SCHEMA_V7),
+        Ok(())
+    );
+    assert!(
+        WORKSPACE_MESSAGING_SCHEMA_V7.contains("peer_type IN ('principal', 'agent', 'system')")
+    );
+    assert!(WORKSPACE_MESSAGING_SCHEMA_V7.contains("UNIQUE (conversation_id, seq)"));
+    assert!(WORKSPACE_MESSAGING_SCHEMA_V7.contains("UNIQUE (conversation_id, client_nonce)"));
+    assert!(WORKSPACE_MESSAGING_SCHEMA_V7.contains("last_read_seq"));
+    assert!(WORKSPACE_MESSAGING_SCHEMA_V7.contains("capability_policy_json"));
+    assert!(
+        !WORKSPACE_MESSAGING_SCHEMA_V7
+            .to_ascii_lowercase()
+            .contains("leaderboard")
+    );
+}
+
+#[test]
 fn validation_rejects_floating_point_money() {
     let schema = PLATFORM_SCHEMA_V1.replace("amount INTEGER", "amount REAL");
     assert_eq!(

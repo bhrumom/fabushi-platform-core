@@ -160,7 +160,7 @@ pub(crate) fn configured_provider(env: &Env, provider: &str) -> Option<IdentityP
             authorization_endpoint: "https://dash.cloudflare.com/oauth2/auth",
             token_endpoint: "https://dash.cloudflare.com/oauth2/token",
             userinfo_endpoint: CLOUDFLARE_API_USER_URL,
-            scopes: "offline_access user-details.read",
+            scopes: "user-details.read",
             client_id: env_text(env, "OAUTH_CLOUDFLARE_CLIENT_ID")?,
             client_secret: Some(required_secret(env, "OAUTH_CLOUDFLARE_CLIENT_SECRET")?),
         }),

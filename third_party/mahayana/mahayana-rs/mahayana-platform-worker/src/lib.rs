@@ -6,6 +6,8 @@ mod auth;
 pub const PLATFORM_SCHEMA_V1: &str = include_str!("../migrations/0001_platform.sql");
 pub const LISTENER_RELAY_SCHEMA_V5: &str = include_str!("../migrations/0005_listener_relay.sql");
 pub const REMOTE_COMPUTER_SCHEMA_V6: &str = include_str!("../migrations/0006_remote_computer.sql");
+pub const WORKSPACE_MESSAGING_SCHEMA_V7: &str =
+    include_str!("../migrations/0007_workspace_messaging.sql");
 pub const FABUSHI_PAY_SCHEMA_V7: &str = include_str!("../migrations/0007_fabushi_pay.sql");
 pub const ACCOUNT_AUTH_SCHEMA_V2: &str =
     include_str!("../account-migrations/0001_account_auth.sql");
@@ -15,6 +17,8 @@ pub const ACCOUNT_OAUTH_STATUS_SCHEMA_V4: &str =
     include_str!("../account-migrations/0003_oauth_attempt_failed_status.sql");
 pub const ACCOUNT_REGISTRATION_SCHEMA_V5: &str =
     include_str!("../account-migrations/0004_email_registration_challenges.sql");
+pub const ACCOUNT_PRINCIPAL_SCHEMA_V6: &str =
+    include_str!("../account-migrations/0005_principals_connections.sql");
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SchemaError {
@@ -30,28 +34,36 @@ pub enum SchemaError {
     FloatingPointAmount,
 }
 
-pub fn validate_platform_schema(schema: &str) -> Result<(), SchemaError> {
-    for table in [
-        "wallet_accounts",
-        "journal_entries",
-        "journal_lines",
-        "products",
-        "prices",
-        "orders",
-        "payment_attempts",
-        "entitlements",
-        "consumption_reservations",
-        "refunds",
-        "audit_events",
-        "ai_usage_budgets",
-        "ai_usage_reservations",
-        "ai_usage_events",
-    ] {
+fn require_tables(schema: &str, tables: &[&'static str]) -> Result<(), SchemaError> {
+    for table in tables {
         let declaration = format!("CREATE TABLE IF NOT EXISTS {table}");
         if !schema.contains(&declaration) {
             return Err(SchemaError::MissingTable(table));
         }
     }
+    Ok(())
+}
+
+pub fn validate_platform_schema(schema: &str) -> Result<(), SchemaError> {
+    require_tables(
+        schema,
+        &[
+            "wallet_accounts",
+            "journal_entries",
+            "journal_lines",
+            "products",
+            "prices",
+            "orders",
+            "payment_attempts",
+            "entitlements",
+            "consumption_reservations",
+            "refunds",
+            "audit_events",
+            "ai_usage_budgets",
+            "ai_usage_reservations",
+            "ai_usage_events",
+        ],
+    )?;
     if !schema.contains("journal_balance_enforced_by_worker_batch") {
         return Err(SchemaError::MissingJournalBalanceInvariant);
     }
@@ -94,63 +106,69 @@ fn validate_integer_amounts(schema: &str) -> Result<(), SchemaError> {
 }
 
 pub fn validate_listener_relay_schema(schema: &str) -> Result<(), SchemaError> {
-    for table in ["listener_registrations", "listener_events"] {
-        let declaration = format!("CREATE TABLE IF NOT EXISTS {table}");
-        if !schema.contains(&declaration) {
-            return Err(SchemaError::MissingTable(table));
-        }
-    }
-    Ok(())
+    require_tables(schema, &["listener_registrations", "listener_events"])
 }
 
 pub fn validate_remote_computer_schema(schema: &str) -> Result<(), SchemaError> {
-    for table in [
-        "remote_computers",
-        "remote_computer_clients",
-        "remote_computer_sessions",
-        "remote_computer_signals",
-    ] {
-        let declaration = format!("CREATE TABLE IF NOT EXISTS {table}");
-        if !schema.contains(&declaration) {
-            return Err(SchemaError::MissingTable(table));
-        }
-    }
-    Ok(())
+    require_tables(
+        schema,
+        &[
+            "remote_computers",
+            "remote_computer_clients",
+            "remote_computer_sessions",
+            "remote_computer_signals",
+        ],
+    )
+}
+
+pub fn validate_workspace_messaging_schema(schema: &str) -> Result<(), SchemaError> {
+    require_tables(
+        schema,
+        &[
+            "platform_workspaces",
+            "platform_workspace_members",
+            "platform_agents",
+            "platform_peers",
+            "platform_conversations",
+            "platform_conversation_members",
+            "platform_messages",
+            "platform_message_attachments",
+            "platform_workspace_audit_events",
+        ],
+    )
 }
 
 pub fn validate_account_auth_schema(schema: &str) -> Result<(), SchemaError> {
-    for table in [
-        "account_password_credentials",
-        "account_sessions",
-        "account_refresh_tokens",
-        "account_auth_events",
-    ] {
-        let declaration = format!("CREATE TABLE IF NOT EXISTS {table}");
-        if !schema.contains(&declaration) {
-            return Err(SchemaError::MissingTable(table));
-        }
-    }
-    Ok(())
+    require_tables(
+        schema,
+        &[
+            "account_password_credentials",
+            "account_sessions",
+            "account_refresh_tokens",
+            "account_auth_events",
+        ],
+    )
 }
 
 pub fn validate_account_registration_schema(schema: &str) -> Result<(), SchemaError> {
-    for table in ["account_email_challenges"] {
-        let declaration = format!("CREATE TABLE IF NOT EXISTS {table}");
-        if !schema.contains(&declaration) {
-            return Err(SchemaError::MissingTable(table));
-        }
-    }
-    Ok(())
+    require_tables(schema, &["account_email_challenges"])
 }
 
 pub fn validate_account_oauth_schema(schema: &str) -> Result<(), SchemaError> {
-    for table in ["account_identities", "account_oauth_attempts"] {
-        let declaration = format!("CREATE TABLE IF NOT EXISTS {table}");
-        if !schema.contains(&declaration) {
-            return Err(SchemaError::MissingTable(table));
-        }
-    }
-    Ok(())
+    require_tables(schema, &["account_identities", "account_oauth_attempts"])
+}
+
+pub fn validate_account_principal_schema(schema: &str) -> Result<(), SchemaError> {
+    require_tables(
+        schema,
+        &[
+            "account_principals",
+            "account_identity_principals",
+            "account_contact_points",
+            "account_connections",
+            "account_connection_grants",
+        ],
+    )
 }
 
 #[cfg(target_arch = "wasm32")]
