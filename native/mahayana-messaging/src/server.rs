@@ -102,33 +102,18 @@ pub enum MessagingServerError {
     Poisoned,
 }
 
-/// Production self-hosted messaging server.
-///
-/// Durable product state is authoritative in SQLite. A configured legacy JSON
-/// snapshot is only an import source while that SQLite database is still empty.
+pub(crate) type SharedMessagingService = Arc<Mutex<MessagingService<SqliteStateStore>>>;
+
 pub struct MessagingTcpServer {
     config: MessagingServerConfig,
-    service: Arc<Mutex<MessagingService<SqliteStateStore>>>,
+    service: SharedMessagingService,
 }
 
 impl MessagingTcpServer {
     pub fn load(config: MessagingServerConfig) -> Result<Self, MessagingServerError> {
         config.validate()?;
-        let mut store = SqliteStateStore::new(config.database_path.clone());
-        if let Some(legacy_path) = config.legacy_snapshot_path.as_ref() {
-            let legacy = JsonFileStateStore::new(legacy_path);
-            store.import_json_if_empty(&legacy)?;
-        }
-        let blob_root = config
-            .database_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("blobs");
-        let service = MessagingService::load_with_blob_store(store, FileBlobStore::new(blob_root))?;
-        Ok(Self {
-            config,
-            service: Arc::new(Mutex::new(service)),
-        })
+        let service = load_shared_messaging_service(&config)?;
+        Ok(Self { config, service })
     }
 
     pub fn database_path(&self) -> &Path {
@@ -167,9 +152,57 @@ impl MessagingTcpServer {
     }
 }
 
+pub(crate) fn load_shared_messaging_service(
+    config: &MessagingServerConfig,
+) -> Result<SharedMessagingService, MessagingServerError> {
+    let mut store = SqliteStateStore::new(config.database_path.clone());
+    if let Some(legacy_path) = config.legacy_snapshot_path.as_ref() {
+        let legacy = JsonFileStateStore::new(legacy_path);
+        store.import_json_if_empty(&legacy)?;
+    }
+    let blob_root = config
+        .database_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("blobs");
+    let service = MessagingService::load_with_blob_store(store, FileBlobStore::new(blob_root))?;
+    Ok(Arc::new(Mutex::new(service)))
+}
+
+pub(crate) fn execute_authenticated_frame(
+    service: &SharedMessagingService,
+    access_store: &FileAccessTokenStore,
+    request: AuthenticatedClientFrame,
+    now_ms: i64,
+) -> Result<ServerFrame, MessagingServerError> {
+    let context = &request.envelope.context;
+    if let Err(error) = access_store.authorize(
+        request.access_token.as_bytes(),
+        &context.actor_id,
+        &context.device_id,
+        &context.session_id,
+        required_scope(&request.envelope.command),
+        now_ms,
+    ) {
+        return Ok(ServerFrame::Error {
+            code: "unauthorized".into(),
+            message: format!("messaging access denied: {error}"),
+        });
+    }
+    let mut service = service.lock().map_err(|_| MessagingServerError::Poisoned)?;
+    let frame = match service.handle(request.envelope, now_ms) {
+        Ok(events) => ServerFrame::Events { events },
+        Err(error) => ServerFrame::Error {
+            code: "messaging_error".into(),
+            message: error.to_string(),
+        },
+    };
+    Ok(frame)
+}
+
 fn handle_connection(
     stream: TcpStream,
-    service: Arc<Mutex<MessagingService<SqliteStateStore>>>,
+    service: SharedMessagingService,
     access_store: Arc<FileAccessTokenStore>,
     max_frame_bytes: usize,
 ) -> Result<(), MessagingServerError> {
@@ -214,42 +247,8 @@ fn handle_connection(
                 continue;
             }
         };
-        let now_ms = now_millis();
-        let context = &request.envelope.context;
-        if let Err(error) = access_store.authorize(
-            request.access_token.as_bytes(),
-            &context.actor_id,
-            &context.device_id,
-            &context.session_id,
-            required_scope(&request.envelope.command),
-            now_ms,
-        ) {
-            write_frame(
-                &mut writer,
-                &ServerFrame::Error {
-                    code: "unauthorized".into(),
-                    message: format!("messaging access denied: {error}"),
-                },
-            )?;
-            continue;
-        }
-        let events = {
-            let mut service = service.lock().map_err(|_| MessagingServerError::Poisoned)?;
-            match service.handle(request.envelope, now_ms) {
-                Ok(events) => events,
-                Err(error) => {
-                    write_frame(
-                        &mut writer,
-                        &ServerFrame::Error {
-                            code: "messaging_error".into(),
-                            message: error.to_string(),
-                        },
-                    )?;
-                    continue;
-                }
-            }
-        };
-        write_frame(&mut writer, &ServerFrame::Events { events })?;
+        let frame = execute_authenticated_frame(&service, &access_store, request, now_millis())?;
+        write_frame(&mut writer, &frame)?;
     }
     Ok(())
 }
@@ -264,7 +263,7 @@ fn write_frame(
     Ok(())
 }
 
-fn required_scope(command: &ClientCommand) -> AccessScope {
+pub(crate) fn required_scope(command: &ClientCommand) -> AccessScope {
     match command {
         ClientCommand::BeginBlobUpload { .. }
         | ClientCommand::AppendBlobChunk { .. }
@@ -282,7 +281,7 @@ fn required_scope(command: &ClientCommand) -> AccessScope {
     }
 }
 
-fn now_millis() -> i64 {
+pub(crate) fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)

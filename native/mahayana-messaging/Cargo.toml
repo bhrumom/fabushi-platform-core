@@ -19,6 +19,7 @@ hkdf = "0.12"
 hmac = "0.12"
 rusqlite = { version = "0.39", features = ["bundled"] }
 sha2 = "0.10"
+tungstenite = "0.30"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 zeroize = "1"
 serde = { version = "1", features = ["derive"] }
