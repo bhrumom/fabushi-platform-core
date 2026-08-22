@@ -1,16 +1,20 @@
 use crate::actor::{ActorId, ActorKind};
 use crate::blob_store::{BlobStoreError, FileBlobStore};
 use crate::bot::BotInvocation;
+use crate::conversation::{ConversationId, ConversationKind};
 use crate::engine::{Command, EngineError, Event, MessagingEngine};
-use crate::message::{Message, MessageContent, MessageId};
+use crate::message::{ClientMessageId, DeliveryState, Message, MessageContent, MessageId};
 use crate::payment::Money;
 use crate::protocol::{
     ClientCommand, ClientEnvelope, ServerEnvelope, ServerEvent, FABUSHI_MESSAGING_PROTOCOL_VERSION,
 };
 use crate::settlement::{SettlementError, SettlementVerifier, SignedSettlement};
-use crate::store::{MessagingSnapshot, MessagingStateStore, StoreError};
+use crate::store::{JournalEntry, MessagingSnapshot, MessagingStateStore, StoreError};
 use crate::wallet::{LedgerEntry, WalletAccountId};
 use base64::Engine as _;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -31,6 +35,8 @@ pub enum MessagingServiceError {
     Invariant(String),
     #[error("messaging command is not authorized for the authenticated actor: {0}")]
     UnauthorizedCommand(String),
+    #[error("client message id {0} was replayed with conflicting message content")]
+    IdempotencyConflict(String),
     #[error(transparent)]
     Settlement(#[from] SettlementError),
 }
@@ -47,6 +53,19 @@ fn sanitize_invocation_component(value: &str) -> String {
         })
         .take(160)
         .collect()
+}
+
+fn stable_message_id(actor_id: &ActorId, client_message_id: &ClientMessageId) -> MessageId {
+    let mut hasher = Sha256::new();
+    hasher.update(actor_id.0.as_bytes());
+    hasher.update([0]);
+    hasher.update(client_message_id.0.as_bytes());
+    let digest = hasher.finalize();
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    MessageId::new(format!("msg:{encoded}"))
 }
 
 pub struct MessagingService<S: MessagingStateStore> {
@@ -110,7 +129,11 @@ impl<S: MessagingStateStore> MessagingService<S> {
         match command {
             ClientCommand::BeginBlobUpload { metadata } => {
                 let status = self.blob_store()?.begin_upload(&metadata)?;
-                self.single_service_event(ServerEvent::BlobUploadChanged { status }, server_time_ms)
+                self.single_service_event(
+                    &actor_id,
+                    ServerEvent::BlobUploadChanged { status },
+                    server_time_ms,
+                )
             }
             ClientCommand::AppendBlobChunk {
                 blob_id,
@@ -121,22 +144,40 @@ impl<S: MessagingStateStore> MessagingService<S> {
                     .decode(data_base64.as_bytes())
                     .map_err(|error| MessagingServiceError::InvalidBlobBase64(error.to_string()))?;
                 let status = self.blob_store()?.append_chunk(&blob_id, offset, &bytes)?;
-                self.single_service_event(ServerEvent::BlobUploadChanged { status }, server_time_ms)
+                self.single_service_event(
+                    &actor_id,
+                    ServerEvent::BlobUploadChanged { status },
+                    server_time_ms,
+                )
             }
             ClientCommand::FinishBlobUpload { blob_id } => {
                 let metadata = self.blob_store()?.finish_upload(&blob_id)?;
-                self.single_service_event(ServerEvent::BlobReady { metadata }, server_time_ms)
+                self.single_service_event(
+                    &actor_id,
+                    ServerEvent::BlobReady { metadata },
+                    server_time_ms,
+                )
             }
             ClientCommand::DeleteBlob { blob_id } => {
                 self.blob_store()?.delete(&blob_id)?;
-                self.single_service_event(ServerEvent::BlobDeleted { blob_id }, server_time_ms)
+                self.single_service_event(
+                    &actor_id,
+                    ServerEvent::BlobDeleted { blob_id },
+                    server_time_ms,
+                )
             }
             ClientCommand::WalletStatus => {
                 Ok(vec![self.wallet_status_envelope(&actor_id, server_time_ms)])
             }
+            ClientCommand::Sync { cursor, limit } => {
+                self.mark_direct_messages_delivered(&actor_id, server_time_ms)?;
+                self.sync_response(&actor_id, cursor.as_deref(), limit, server_time_ms)
+            }
             command => {
-                if let ClientCommand::Sync { limit, .. } = &command {
-                    return Ok(vec![self.sync_envelope(&actor_id, *limit, server_time_ms)]);
+                if let Some(replay) =
+                    self.idempotent_send_replay(&actor_id, &command, server_time_ms)?
+                {
+                    return Ok(replay);
                 }
 
                 let commands = self.project_command(&actor_id, command, server_time_ms);
@@ -157,7 +198,6 @@ impl<S: MessagingStateStore> MessagingService<S> {
                     .flat_map(|message| self.bot_invocations_for_message(message))
                     .collect::<Vec<_>>();
                 self.cursor = self.cursor.saturating_add(events.len() as u64);
-                self.persist(server_time_ms)?;
                 let mut responses = events
                     .into_iter()
                     .filter_map(|event| self.project_event(event, server_time_ms))
@@ -172,9 +212,69 @@ impl<S: MessagingStateStore> MessagingService<S> {
                             event: ServerEvent::BotInvocationRequested { invocation },
                         }),
                 );
+                let journal = self.journal_entries(&actor_id, &responses);
+                self.persist_with_events(server_time_ms, &journal)?;
                 Ok(responses)
             }
         }
+    }
+
+    fn idempotent_send_replay(
+        &self,
+        actor_id: &ActorId,
+        command: &ClientCommand,
+        server_time_ms: i64,
+    ) -> Result<Option<Vec<ServerEnvelope>>, MessagingServiceError> {
+        let ClientCommand::SendMessage {
+            conversation_id,
+            client_message_id,
+            content,
+            reply_to_message_id,
+            thread_root_message_id,
+            scheduled_at_ms,
+            silent,
+            protected_content,
+        } = command
+        else {
+            return Ok(None);
+        };
+        let stable_id = stable_message_id(actor_id, client_message_id);
+        let legacy_id = MessageId::new(format!("local:{}", client_message_id.0));
+        let existing = self
+            .engine
+            .state()
+            .messages
+            .get(conversation_id)
+            .and_then(|messages| {
+                messages
+                    .get(&stable_id)
+                    .or_else(|| messages.get(&legacy_id))
+            });
+        let Some(existing) = existing else {
+            return Ok(None);
+        };
+        // The stable/legacy lookup key already binds this replay to the authenticated
+        // actor + client_message_id, without extending the canonical Message schema.
+        if &existing.sender_id != actor_id
+            || &existing.content != content
+            || &existing.reply_to_message_id != reply_to_message_id
+            || &existing.thread_root_message_id != thread_root_message_id
+            || &existing.scheduled_at_ms != scheduled_at_ms
+            || &existing.silent != silent
+            || &existing.protected_content != protected_content
+        {
+            return Err(MessagingServiceError::IdempotencyConflict(
+                client_message_id.0.clone(),
+            ));
+        }
+        Ok(Some(vec![ServerEnvelope {
+            protocol_version: FABUSHI_MESSAGING_PROTOCOL_VERSION,
+            cursor: Some(self.cursor.to_string()),
+            server_time_ms,
+            event: ServerEvent::MessageChanged {
+                message: existing.clone(),
+            },
+        }]))
     }
 
     fn bot_invocations_for_message(&self, message: &Message) -> Vec<BotInvocation> {
@@ -315,17 +415,20 @@ impl<S: MessagingStateStore> MessagingService<S> {
 
     fn single_service_event(
         &mut self,
+        actor_id: &ActorId,
         event: ServerEvent,
         server_time_ms: i64,
     ) -> Result<Vec<ServerEnvelope>, MessagingServiceError> {
         self.cursor = self.cursor.saturating_add(1);
-        self.persist(server_time_ms)?;
-        Ok(vec![ServerEnvelope {
+        let response = ServerEnvelope {
             protocol_version: FABUSHI_MESSAGING_PROTOCOL_VERSION,
             cursor: Some(self.cursor.to_string()),
             server_time_ms,
             event,
-        }])
+        };
+        let journal = self.journal_entries(actor_id, std::slice::from_ref(&response));
+        self.persist_with_events(server_time_ms, &journal)?;
+        Ok(vec![response])
     }
 
     pub fn apply_signed_settlement(
@@ -409,6 +512,63 @@ impl<S: MessagingStateStore> MessagingService<S> {
         }
     }
 
+    fn sync_response(
+        &self,
+        actor_id: &ActorId,
+        cursor: Option<&str>,
+        limit: u32,
+        server_time_ms: i64,
+    ) -> Result<Vec<ServerEnvelope>, MessagingServiceError> {
+        let Some(requested_cursor) = cursor.and_then(|value| value.parse::<u64>().ok()) else {
+            return Ok(vec![self.sync_envelope(actor_id, limit, server_time_ms)]);
+        };
+        if requested_cursor > self.cursor {
+            return Ok(vec![self.sync_envelope(actor_id, limit, server_time_ms)]);
+        }
+        let Some(slice) = self.store.load_event_journal_after(
+            requested_cursor,
+            usize::try_from(limit.max(1)).unwrap_or(usize::MAX),
+        )?
+        else {
+            return Ok(vec![self.sync_envelope(actor_id, limit, server_time_ms)]);
+        };
+        if requested_cursor < slice.floor_cursor
+            || (slice.entries.is_empty() && requested_cursor < slice.current_cursor)
+        {
+            return Ok(vec![self.sync_envelope(actor_id, limit, server_time_ms)]);
+        }
+        let mut responses = slice
+            .entries
+            .into_iter()
+            .filter(|entry| entry.audience.iter().any(|candidate| candidate == actor_id))
+            .map(|entry| entry.envelope)
+            .collect::<Vec<_>>();
+        responses.push(self.sync_checkpoint_envelope(slice.checkpoint_cursor, server_time_ms));
+        Ok(responses)
+    }
+
+    fn sync_checkpoint_envelope(&self, cursor: u64, server_time_ms: i64) -> ServerEnvelope {
+        ServerEnvelope {
+            protocol_version: FABUSHI_MESSAGING_PROTOCOL_VERSION,
+            cursor: Some(cursor.to_string()),
+            server_time_ms,
+            event: ServerEvent::SyncBatch {
+                actors: Vec::new(),
+                conversations: Vec::new(),
+                messages: Vec::new(),
+                folders: Vec::new(),
+                invoices: Vec::new(),
+                orders: Vec::new(),
+                stories: Vec::new(),
+                communities: Vec::new(),
+                bots: Vec::new(),
+                bot_executions: Vec::new(),
+                mini_apps: Vec::new(),
+                next_cursor: Some(cursor.to_string()),
+            },
+        }
+    }
+
     fn sync_envelope(&self, actor_id: &ActorId, limit: u32, server_time_ms: i64) -> ServerEnvelope {
         let state = self.engine.state();
         let max_items = usize::try_from(limit.max(1)).unwrap_or(usize::MAX);
@@ -423,7 +583,7 @@ impl<S: MessagingStateStore> MessagingService<S> {
                     || conversation.owner_id.as_ref() == Some(actor_id)
             })
             .map(|conversation| conversation.id.clone())
-            .collect::<std::collections::BTreeSet<_>>();
+            .collect::<BTreeSet<_>>();
         let visible_actor_ids = visible_conversation_ids
             .iter()
             .filter_map(|conversation_id| state.conversations.get(conversation_id))
@@ -434,7 +594,7 @@ impl<S: MessagingStateStore> MessagingService<S> {
                     .map(|participant| participant.actor_id.clone())
             })
             .chain(std::iter::once(actor_id.clone()))
-            .collect::<std::collections::BTreeSet<_>>();
+            .collect::<BTreeSet<_>>();
         ServerEnvelope {
             protocol_version: FABUSHI_MESSAGING_PROTOCOL_VERSION,
             cursor: Some(self.cursor.to_string()),
@@ -525,6 +685,61 @@ impl<S: MessagingStateStore> MessagingService<S> {
         }
     }
 
+    fn mark_direct_messages_delivered(
+        &mut self,
+        actor_id: &ActorId,
+        server_time_ms: i64,
+    ) -> Result<(), MessagingServiceError> {
+        let pending = self
+            .engine
+            .state()
+            .conversations
+            .values()
+            .filter(|conversation| {
+                matches!(
+                    conversation.kind,
+                    ConversationKind::Direct | ConversationKind::Secret
+                ) && conversation
+                    .participants
+                    .iter()
+                    .any(|participant| &participant.actor_id == actor_id)
+            })
+            .flat_map(|conversation| {
+                self.engine
+                    .state()
+                    .messages
+                    .get(&conversation.id)
+                    .into_iter()
+                    .flat_map(|messages| messages.values())
+                    .filter(|message| {
+                        &message.sender_id != actor_id
+                            && message.delivery_state == DeliveryState::Sent
+                    })
+                    .map(|message| (conversation.id.clone(), message.id.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let mut events = Vec::new();
+        for (conversation_id, message_id) in pending {
+            events.extend(self.engine.execute(Command::SetDeliveryState {
+                conversation_id,
+                message_id,
+                state: DeliveryState::Delivered,
+            })?);
+        }
+        self.cursor = self.cursor.saturating_add(events.len() as u64);
+        let responses = events
+            .into_iter()
+            .filter_map(|event| self.project_event(event, server_time_ms))
+            .collect::<Vec<_>>();
+        let journal = self.journal_entries(actor_id, &responses);
+        self.persist_with_events(server_time_ms, &journal)?;
+        Ok(())
+    }
+
     fn project_command(
         &self,
         actor_id: &ActorId,
@@ -574,19 +789,30 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 scheduled_at_ms,
                 silent,
                 protected_content,
-            } => vec![Command::QueueMessage {
-                conversation_id,
-                local_message_id: MessageId::new(format!("local:{}", client_message_id.0)),
-                client_message_id,
-                sender_id: actor_id.clone(),
-                content,
-                reply_to_message_id,
-                thread_root_message_id,
-                created_at_ms: now_ms,
-                scheduled_at_ms,
-                silent,
-                protected_content,
-            }],
+            } => {
+                let message_id = stable_message_id(actor_id, &client_message_id);
+                vec![
+                    Command::QueueMessage {
+                        conversation_id: conversation_id.clone(),
+                        local_message_id: message_id.clone(),
+                        client_message_id,
+                        sender_id: actor_id.clone(),
+                        content,
+                        reply_to_message_id,
+                        thread_root_message_id,
+                        created_at_ms: now_ms,
+                        scheduled_at_ms,
+                        silent,
+                        protected_content,
+                    },
+                    Command::AcknowledgeMessage {
+                        conversation_id,
+                        local_message_id: message_id.clone(),
+                        server_message_id: message_id,
+                        accepted_at_ms: now_ms,
+                    },
+                ]
+            }
             ClientCommand::ForwardMessage {
                 source_conversation_id,
                 message_id,
@@ -622,11 +848,39 @@ impl<S: MessagingStateStore> MessagingService<S> {
             ClientCommand::MarkRead {
                 conversation_id,
                 message_id,
-            } => vec![Command::MarkRead {
-                conversation_id,
-                actor_id: actor_id.clone(),
-                message_id,
-            }],
+            } => {
+                let mut commands = vec![Command::MarkRead {
+                    conversation_id: conversation_id.clone(),
+                    actor_id: actor_id.clone(),
+                    message_id: message_id.clone(),
+                }];
+                let should_mark_message_read = self
+                    .engine
+                    .state()
+                    .conversations
+                    .get(&conversation_id)
+                    .is_some_and(|conversation| {
+                        matches!(
+                            conversation.kind,
+                            ConversationKind::Direct | ConversationKind::Secret
+                        )
+                    })
+                    && self
+                        .engine
+                        .state()
+                        .messages
+                        .get(&conversation_id)
+                        .and_then(|messages| messages.get(&message_id))
+                        .is_some_and(|message| &message.sender_id != actor_id);
+                if should_mark_message_read {
+                    commands.push(Command::SetDeliveryState {
+                        conversation_id,
+                        message_id,
+                        state: DeliveryState::Read,
+                    });
+                }
+                commands
+            }
             ClientCommand::SetReaction {
                 conversation_id,
                 message_id,
@@ -883,6 +1137,160 @@ impl<S: MessagingStateStore> MessagingService<S> {
             server_time_ms,
             event: server_event,
         })
+    }
+
+    fn journal_entries(
+        &self,
+        initiator: &ActorId,
+        responses: &[ServerEnvelope],
+    ) -> Vec<JournalEntry> {
+        responses
+            .iter()
+            .filter(|response| !matches!(&response.event, ServerEvent::SyncBatch { .. }))
+            .map(|response| JournalEntry {
+                envelope: response.clone(),
+                audience: self.event_audience(initiator, &response.event),
+            })
+            .collect()
+    }
+
+    fn event_audience(&self, initiator: &ActorId, event: &ServerEvent) -> Vec<ActorId> {
+        let mut audience = BTreeSet::from([initiator.clone()]);
+        match event {
+            ServerEvent::ActorChanged { actor } => {
+                audience.insert(actor.id.clone());
+                for conversation in
+                    self.engine
+                        .state()
+                        .conversations
+                        .values()
+                        .filter(|conversation| {
+                            conversation
+                                .participants
+                                .iter()
+                                .any(|participant| participant.actor_id == actor.id)
+                        })
+                {
+                    Self::extend_conversation_audience(&mut audience, conversation);
+                }
+            }
+            ServerEvent::PresenceChanged { actor_id, .. } => {
+                audience.insert(actor_id.clone());
+                for conversation in
+                    self.engine
+                        .state()
+                        .conversations
+                        .values()
+                        .filter(|conversation| {
+                            conversation
+                                .participants
+                                .iter()
+                                .any(|participant| &participant.actor_id == actor_id)
+                        })
+                {
+                    Self::extend_conversation_audience(&mut audience, conversation);
+                }
+            }
+            ServerEvent::ConversationChanged { conversation } => {
+                Self::extend_conversation_audience(&mut audience, conversation);
+            }
+            ServerEvent::MessageAdded { message } | ServerEvent::MessageChanged { message } => {
+                self.extend_conversation_id_audience(&mut audience, &message.conversation_id);
+            }
+            ServerEvent::MessagesDeleted {
+                conversation_id, ..
+            }
+            | ServerEvent::ReadChanged {
+                conversation_id, ..
+            }
+            | ServerEvent::TypingChanged {
+                conversation_id, ..
+            } => {
+                self.extend_conversation_id_audience(&mut audience, conversation_id);
+            }
+            ServerEvent::InvoiceChanged { invoice } => {
+                self.extend_conversation_id_audience(&mut audience, &invoice.conversation_id);
+            }
+            ServerEvent::OrderChanged { order } => {
+                audience.insert(order.buyer_id.clone());
+                if let Some(invoice) = self.engine.state().invoices.get(&order.invoice_id) {
+                    audience.insert(invoice.seller_id.clone());
+                }
+            }
+            ServerEvent::StoryChanged { story } => {
+                audience.insert(story.owner_id.clone());
+            }
+            ServerEvent::CommunityChanged { community } => {
+                self.extend_conversation_id_audience(&mut audience, &community.conversation_id);
+            }
+            ServerEvent::BotChanged { profile, execution } => {
+                if let Some(profile) = profile {
+                    audience.insert(profile.actor_id.clone());
+                }
+                if let Some(execution) = execution {
+                    audience.insert(execution.bot_id.clone());
+                }
+            }
+            ServerEvent::BotInvocationRequested { invocation } => {
+                audience.insert(invocation.sender_id.clone());
+                audience.insert(invocation.bot_id.clone());
+                self.extend_conversation_id_audience(&mut audience, &invocation.conversation_id);
+            }
+            ServerEvent::MiniAppOpened { session } => {
+                audience.insert(session.actor_id.clone());
+            }
+            ServerEvent::MiniAppResult { session_id, .. } => {
+                if let Some(session) = self.engine.state().mini_app_sessions.get(session_id) {
+                    audience.insert(session.actor_id.clone());
+                }
+            }
+            ServerEvent::SyncBatch { .. }
+            | ServerEvent::FolderChanged { .. }
+            | ServerEvent::FolderDeleted { .. }
+            | ServerEvent::BlobUploadChanged { .. }
+            | ServerEvent::BlobReady { .. }
+            | ServerEvent::BlobDeleted { .. }
+            | ServerEvent::WalletStatus { .. }
+            | ServerEvent::StoryDeleted { .. }
+            | ServerEvent::MiniAppChanged { .. }
+            | ServerEvent::Error { .. } => {}
+        }
+        audience.into_iter().collect()
+    }
+
+    fn extend_conversation_id_audience(
+        &self,
+        audience: &mut BTreeSet<ActorId>,
+        conversation_id: &ConversationId,
+    ) {
+        if let Some(conversation) = self.engine.state().conversations.get(conversation_id) {
+            Self::extend_conversation_audience(audience, conversation);
+        }
+    }
+
+    fn extend_conversation_audience(
+        audience: &mut BTreeSet<ActorId>,
+        conversation: &crate::conversation::Conversation,
+    ) {
+        audience.extend(
+            conversation
+                .participants
+                .iter()
+                .map(|participant| participant.actor_id.clone()),
+        );
+        if let Some(owner_id) = &conversation.owner_id {
+            audience.insert(owner_id.clone());
+        }
+    }
+
+    fn persist_with_events(
+        &mut self,
+        now_ms: i64,
+        events: &[JournalEntry],
+    ) -> Result<(), MessagingServiceError> {
+        let snapshot = MessagingSnapshot::new(self.engine.state().clone(), self.cursor, now_ms);
+        self.store.save_with_events(&snapshot, events)?;
+        Ok(())
     }
 
     fn persist(&mut self, now_ms: i64) -> Result<(), MessagingServiceError> {
