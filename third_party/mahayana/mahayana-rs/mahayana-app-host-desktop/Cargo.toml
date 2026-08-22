@@ -9,4 +9,4 @@ name = "mahayana-app-host"
 path = "src/main.rs"
 
 [dependencies]
-mahayana-app-host = { path = "../mahayana-app-host" }
+mahayana-unified-app-host.workspace = true

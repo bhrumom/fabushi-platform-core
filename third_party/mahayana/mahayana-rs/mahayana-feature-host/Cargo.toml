@@ -11,7 +11,7 @@ doctest = false
 
 [features]
 default = ["production", "local-only"]
-production = ["dep:mahayana-core", "dep:mahayana-host"]
+production = ["dep:mahayana-host"]
 desktop-full = ["production", "mahayana-host/desktop-full"]
 mobile-embedded = ["production", "mahayana-host/mobile-embedded"]
 linux-shared = ["production", "mahayana-host/linux-shared"]
@@ -24,8 +24,10 @@ telemetry = ["production", "mahayana-host/telemetry"]
 base64 = "0.22"
 chrono.workspace = true
 fabushi-messaging-core.workspace = true
-mahayana-core = { workspace = true, optional = true }
+mahayana-core.workspace = true
 mahayana-computer.workspace = true
+mahayana-harness.workspace = true
+mahayana-harness-services.workspace = true
 mahayana-host = { workspace = true, default-features = false, optional = true }
 mahayana-host-protocol.workspace = true
 serde.workspace = true

@@ -1,11 +1,11 @@
-use mahayana_app_host::{AppHost, default_app_data_dir, dispatch_json};
+use mahayana_unified_app_host::{UnifiedAppHost, default_unified_app_data_dir, dispatch_json};
 use std::io::{self, BufRead, Write};
 
 fn main() {
-    let host = match AppHost::new(default_app_data_dir()) {
+    let host = match UnifiedAppHost::new(default_unified_app_data_dir()) {
         Ok(host) => host,
         Err(error) => {
-            eprintln!("failed to initialize Mahayana app host: {error}");
+            eprintln!("failed to initialize unified Mahayana app host: {error}");
             std::process::exit(1);
         }
     };

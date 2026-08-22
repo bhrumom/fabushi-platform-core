@@ -41,6 +41,7 @@ mahayana-agent.workspace = true
 mahayana-agent-codex = { path = "../mahayana-agent-codex", optional = true }
 mahayana-conversation.workspace = true
 mahayana-core.workspace = true
+mahayana-harness.workspace = true
 mahayana-miniapp.workspace = true
 mahayana-platform-core.workspace = true
 mahayana-product = { package = "mahayana-platform-client", path = "../mahayana-product" }

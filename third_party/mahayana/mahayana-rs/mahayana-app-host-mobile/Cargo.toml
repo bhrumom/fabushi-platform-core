@@ -9,7 +9,8 @@ name = "mahayana_app_host"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
-mahayana-app-host = { path = "../mahayana-app-host" }
+mahayana-app-host.workspace = true
+mahayana-unified-app-host.workspace = true
 serde_json.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]

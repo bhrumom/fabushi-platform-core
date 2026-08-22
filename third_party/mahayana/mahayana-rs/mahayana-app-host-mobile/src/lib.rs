@@ -1,6 +1,5 @@
-use mahayana_app_host::{
-    AppHost, AppHostFeatureMode, HostResponse, default_app_data_dir, dispatch_json,
-};
+use mahayana_app_host::{AppHostFeatureMode, HostResponse, default_app_data_dir};
+use mahayana_unified_app_host::{UnifiedAppHost, dispatch_json};
 use std::ffi::{CStr, CString, c_char};
 use std::path::PathBuf;
 
@@ -10,7 +9,9 @@ use std::path::PathBuf;
 /// If `app_data_dir` is non-null, it must point to a valid NUL-terminated C string
 /// for the duration of this call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mahayana_app_host_create(app_data_dir: *const c_char) -> *mut AppHost {
+pub unsafe extern "C" fn mahayana_app_host_create(
+    app_data_dir: *const c_char,
+) -> *mut UnifiedAppHost {
     let path = if app_data_dir.is_null() {
         default_app_data_dir()
     } else {
@@ -20,7 +21,7 @@ pub unsafe extern "C" fn mahayana_app_host_create(app_data_dir: *const c_char) -
                 .into_owned(),
         )
     };
-    match AppHost::new(path) {
+    match UnifiedAppHost::new(path) {
         Ok(host) => Box::into_raw(Box::new(host)),
         Err(_) => std::ptr::null_mut(),
     }
@@ -35,7 +36,7 @@ pub unsafe extern "C" fn mahayana_app_host_create(app_data_dir: *const c_char) -
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mahayana_app_host_create_test(
     app_data_dir: *const c_char,
-) -> *mut AppHost {
+) -> *mut UnifiedAppHost {
     let path = if app_data_dir.is_null() {
         default_app_data_dir()
     } else {
@@ -45,7 +46,7 @@ pub unsafe extern "C" fn mahayana_app_host_create_test(
                 .into_owned(),
         )
     };
-    match AppHost::new_with_feature_mode(path, AppHostFeatureMode::Test) {
+    match UnifiedAppHost::new_with_feature_mode(path, AppHostFeatureMode::Test) {
         Ok(host) => Box::into_raw(Box::new(host)),
         Err(_) => std::ptr::null_mut(),
     }
@@ -58,7 +59,7 @@ pub unsafe extern "C" fn mahayana_app_host_create_test(
 /// `request_json` must point to a valid NUL-terminated C string for this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mahayana_app_host_dispatch_with_handle(
-    host: *mut AppHost,
+    host: *mut UnifiedAppHost,
     request_json: *const c_char,
 ) -> *mut c_char {
     if host.is_null() || request_json.is_null() {
@@ -79,7 +80,7 @@ pub unsafe extern "C" fn mahayana_app_host_dispatch_with_handle(
 /// `host` must be null or a live pointer returned by `mahayana_app_host_create`
 /// that has not previously been destroyed.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mahayana_app_host_destroy(host: *mut AppHost) {
+pub unsafe extern "C" fn mahayana_app_host_destroy(host: *mut UnifiedAppHost) {
     if !host.is_null() {
         unsafe {
             drop(Box::from_raw(host));
@@ -99,7 +100,7 @@ pub unsafe extern "C" fn mahayana_app_host_dispatch(request_json: *const c_char)
             .into_raw();
     }
     let input = unsafe { CStr::from_ptr(request_json) }.to_string_lossy();
-    let output = match AppHost::new(default_app_data_dir()) {
+    let output = match UnifiedAppHost::new(default_app_data_dir()) {
         Ok(host) => dispatch_json(&host, &input),
         Err(error) => serde_json::to_string(&HostResponse {
             id: None,
@@ -145,7 +146,7 @@ mod android_jni {
             Ok(value) => PathBuf::from(value.to_string_lossy().into_owned()),
             Err(_) => return 0,
         };
-        match AppHost::new(path) {
+        match UnifiedAppHost::new(path) {
             Ok(host) => Box::into_raw(Box::new(host)) as jlong,
             Err(_) => 0,
         }
@@ -161,7 +162,7 @@ mod android_jni {
             Ok(value) => PathBuf::from(value.to_string_lossy().into_owned()),
             Err(_) => return 0,
         };
-        match AppHost::new_with_feature_mode(path, AppHostFeatureMode::Test) {
+        match UnifiedAppHost::new_with_feature_mode(path, AppHostFeatureMode::Test) {
             Ok(host) => Box::into_raw(Box::new(host)) as jlong,
             Err(_) => 0,
         }
@@ -184,7 +185,7 @@ mod android_jni {
             Ok(value) => value.to_string_lossy().into_owned(),
             Err(error) => format!("{{\"ok\":false,\"error\":\"invalid request: {error}\"}}"),
         };
-        let host = unsafe { &*(handle as *mut AppHost) };
+        let host = unsafe { &*(handle as *mut UnifiedAppHost) };
         env.new_string(dispatch_json(host, &input))
             .map(|value| value.into_raw())
             .unwrap_or(std::ptr::null_mut())
@@ -198,7 +199,7 @@ mod android_jni {
     ) {
         if handle != 0 {
             unsafe {
-                drop(Box::from_raw(handle as *mut AppHost));
+                drop(Box::from_raw(handle as *mut UnifiedAppHost));
             }
         }
     }
