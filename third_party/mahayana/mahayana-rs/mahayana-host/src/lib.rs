@@ -6,11 +6,11 @@
 use fabushi_official_miniapps::OFFICIAL_PLUGIN_IDS;
 use fabushi_official_miniapps::app_definition;
 use mahayana_agent::UnavailableAgentBackend;
-#[cfg(any(feature = "desktop-full", feature = "mobile-embedded"))]
+#[cfg(feature = "codex-compat")]
 use mahayana_agent_codex::CodexAgentBackend;
-#[cfg(any(feature = "desktop-full", feature = "mobile-embedded"))]
+#[cfg(feature = "codex-compat")]
 use mahayana_agent_codex::CodexAgentConfig;
-#[cfg(any(feature = "desktop-full", feature = "mobile-embedded"))]
+#[cfg(feature = "codex-compat")]
 use mahayana_conversation::ConversationProvider;
 use mahayana_core::ApprovalDecision;
 use mahayana_core::ApprovalId;
@@ -21,9 +21,17 @@ use mahayana_core::RuntimeConfig;
 use mahayana_core::RuntimeEvent;
 use mahayana_core::RuntimeResponse;
 use mahayana_core::RuntimeStatus;
+use mahayana_kernel::EngineBackend;
+use mahayana_mcp_runtime::NativeMcpRegistry;
 use mahayana_miniapp::EntitlementChecker;
 use mahayana_miniapp::MiniAppConversationProvider;
 use mahayana_miniapp::MiniAppDefinition;
+use mahayana_model::ResponsesModelConfig;
+use mahayana_model::ResponsesModelRuntime;
+use mahayana_native_agent::NativeAgentBackend;
+use mahayana_native_agent::NativeAgentConfig;
+use mahayana_native_engine::NativeEngine;
+use mahayana_native_engine::NativeEngineConfig;
 use mahayana_platform_core::HostPlatform;
 use mahayana_product::MahayanaProductClient;
 use mahayana_product::default_mahayana_home;
@@ -206,15 +214,14 @@ fn build_runtime(
     create: HostCreateConfig,
     product_client: MahayanaProductClient,
 ) -> Result<MahayanaRuntime, HostError> {
-    let runtime_config = create.runtime.clone();
+    let mut runtime_config = create.runtime.clone();
     if runtime_config.remote_agent_enabled {
         return Err(RuntimeError::RemoteAgentForbidden.into());
     }
     #[cfg(all(feature = "mobile-embedded", not(feature = "desktop-full")))]
-    let runtime_config = RuntimeConfig {
-        build_profile: BuildProfile::MobileEmbedded,
-        ..runtime_config
-    };
+    {
+        runtime_config.build_profile = BuildProfile::MobileEmbedded;
+    }
     let host_platform = create
         .host_platform
         .unwrap_or(match runtime_config.build_profile {
@@ -222,10 +229,6 @@ fn build_runtime(
             BuildProfile::MobileEmbedded => HostPlatform::Mobile,
             BuildProfile::WebWasm => HostPlatform::Web,
         });
-    // Runtime construction is intentionally network-free. Remote marketplace
-    // discovery belongs to an explicit product refresh command, not process
-    // startup or every unit test. Valid locally installed repository plugins
-    // are safe to discover from disk before official bundled MiniApps are merged.
     let inherit_installed_plugins = create.inherit_installed_plugins.unwrap_or(
         matches!(runtime_config.build_profile, BuildProfile::DesktopFull) && !cfg!(test),
     );
@@ -236,16 +239,31 @@ fn build_runtime(
     );
     let mini_apps = merge_official_mini_apps(configured_mini_apps);
     let session_token = product_client.session_token().ok();
+
+    let data_dir = runtime_config.data_dir.clone();
+    let cwd = create
+        .cwd
+        .clone()
+        .or_else(|| runtime_config.workspace_roots.first().cloned())
+        .or_else(|| data_dir.as_ref().map(|path| path.join("workspace")))
+        .or_else(|| std::env::current_dir().ok());
+    if runtime_config.workspace_roots.is_empty() {
+        if let Some(cwd) = cwd.as_ref() {
+            runtime_config.workspace_roots.push(cwd.clone());
+        }
+    }
+
     let mut builder = RuntimeBuilder::new(runtime_config.clone());
-    #[cfg(any(feature = "desktop-full", feature = "mobile-embedded"))]
-    let mut codex_conversation_providers: Vec<Arc<dyn ConversationProvider>> = Vec::new();
+    #[cfg(feature = "codex-compat")]
+    let mut compatibility_conversation_providers: Vec<Arc<dyn ConversationProvider>> = Vec::new();
     if let Some(token) = session_token.as_ref() {
         let provider = Arc::new(MahayanaSocialConversationProvider::new(
             product_client.clone(),
             Some(token.clone()),
         ));
-        #[cfg(any(feature = "desktop-full", feature = "mobile-embedded"))]
-        codex_conversation_providers.push(Arc::clone(&provider) as Arc<dyn ConversationProvider>);
+        #[cfg(feature = "codex-compat")]
+        compatibility_conversation_providers
+            .push(Arc::clone(&provider) as Arc<dyn ConversationProvider>);
         builder = builder.with_provider(provider)?;
     }
     if let Some(telegram_client_id) = create.telegram_client_id {
@@ -253,54 +271,48 @@ fn build_runtime(
             telegram_client_id,
             create.telegram_self_user_id.unwrap_or_default(),
         ));
-        #[cfg(any(feature = "desktop-full", feature = "mobile-embedded"))]
-        codex_conversation_providers.push(Arc::clone(&provider) as Arc<dyn ConversationProvider>);
+        #[cfg(feature = "codex-compat")]
+        compatibility_conversation_providers
+            .push(Arc::clone(&provider) as Arc<dyn ConversationProvider>);
         builder = builder.with_provider(provider)?;
     }
 
-    #[cfg(any(feature = "desktop-full", feature = "mobile-embedded"))]
-    if matches!(
-        runtime_config.build_profile,
-        BuildProfile::DesktopFull | BuildProfile::MobileEmbedded
-    ) {
-        let data_dir = runtime_config.data_dir.clone();
-        let cwd = create
-            .cwd
-            .or_else(|| runtime_config.workspace_roots.first().cloned())
-            .or_else(|| data_dir.as_ref().map(|path| path.join("workspace")))
-            .or_else(|| std::env::current_dir().ok())
+    #[cfg(feature = "codex-compat")]
+    if std::env::var("MAHAYANA_AGENT_ENGINE").ok().as_deref() == Some("codex")
+        && matches!(
+            runtime_config.build_profile,
+            BuildProfile::DesktopFull | BuildProfile::MobileEmbedded
+        )
+    {
+        let cwd = cwd
+            .clone()
             .ok_or_else(|| HostError::new("current working directory is unavailable"))?;
-        let workspace_roots = if runtime_config.workspace_roots.is_empty() {
-            vec![cwd.clone()]
-        } else {
-            runtime_config.workspace_roots.clone()
-        };
         let codex_home = create
             .codex_home
-            .or_else(|| data_dir.map(|path| path.join("codex")))
+            .clone()
+            .or_else(|| data_dir.clone().map(|path| path.join("codex")))
             .or_else(default_codex_home_if_available)
             .ok_or_else(|| {
-                HostError::new("embedded Mahayana requires an application data directory")
+                HostError::new("Codex compatibility mode requires an application data directory")
             })?;
-        let responses_base_url = create
-            .runtime
+        let responses_base_url = runtime_config
             .model
             .base_url
             .clone()
-            .ok_or_else(|| HostError::new("Dacheng Responses base URL is required"))?;
+            .ok_or_else(|| HostError::new("Mahayana Responses base URL is required"))?;
         let settings = CodexAgentConfig {
             codex_home,
             inherit_installed_plugins,
             cwd,
-            workspace_roots,
+            workspace_roots: runtime_config.workspace_roots.clone(),
             model: runtime_config.model.model.clone(),
             responses_base_url,
             use_codex_account: create.use_codex_account,
             product_session_token: session_token.clone(),
             sandbox_mode: codex_protocol::config_types::SandboxMode::WorkspaceWrite,
             approval_policy: codex_protocol::protocol::AskForApproval::OnRequest,
-            codex_executable_path: create.codex_executable_path,
-            conversation_providers: codex_conversation_providers,
+            codex_executable_path: create.codex_executable_path.clone(),
+            conversation_providers: compatibility_conversation_providers,
         };
         return builder
             .build_with_agent_backend_and(
@@ -323,7 +335,78 @@ fn build_runtime(
             .map_err(HostError::from);
     }
 
-    let unavailable_reason = "this platform build has no embedded Codex backend";
+    #[cfg(any(feature = "desktop-full", feature = "mobile-embedded"))]
+    if matches!(
+        runtime_config.build_profile,
+        BuildProfile::DesktopFull | BuildProfile::MobileEmbedded
+    ) {
+        let cwd = cwd.ok_or_else(|| HostError::new("current working directory is unavailable"))?;
+        let base_url = runtime_config
+            .model
+            .base_url
+            .clone()
+            .ok_or_else(|| HostError::new("Mahayana model base URL is required"))?;
+        let model_runtime = Arc::new(
+            ResponsesModelRuntime::new(ResponsesModelConfig {
+                base_url,
+                default_model: runtime_config.model.model.clone(),
+                bearer_token: session_token.clone(),
+                provider_mode: runtime_config.model.provider,
+            })
+            .map_err(|error| HostError::new(error.to_string()))?,
+        );
+        let engine_config = match runtime_config.build_profile {
+            BuildProfile::DesktopFull => {
+                NativeEngineConfig::desktop(runtime_config.model.model.clone())
+            }
+            BuildProfile::MobileEmbedded | BuildProfile::WebWasm => {
+                NativeEngineConfig::embedded(runtime_config.model.model.clone())
+            }
+        };
+        let native_engine = Arc::new(
+            NativeEngine::new(model_runtime, engine_config)
+                .map_err(|error| HostError::new(error.to_string()))?,
+        );
+        let engine_backend: Arc<dyn EngineBackend> = native_engine.clone();
+        let mcp_roots = runtime_config
+            .workspace_roots
+            .iter()
+            .map(|root| root.join(".agents/plugins/plugins"))
+            .collect::<Vec<_>>();
+        let mcp_registry = NativeMcpRegistry::new(mcp_roots, session_token.clone());
+        let native_agent: Arc<dyn mahayana_agent::AgentBackend> =
+            Arc::new(NativeAgentBackend::new(
+                native_engine,
+                NativeAgentConfig {
+                    profile: match runtime_config.build_profile {
+                        BuildProfile::DesktopFull => mahayana_kernel::RuntimeProfile::DesktopFull,
+                        BuildProfile::MobileEmbedded => {
+                            mahayana_kernel::RuntimeProfile::MobileEmbedded
+                        }
+                        BuildProfile::WebWasm => mahayana_kernel::RuntimeProfile::WebWasm,
+                    },
+                    workspace_root: Some(cwd),
+                    mcp_registry,
+                },
+            ));
+        let miniapp = MiniAppConversationProvider::new_for_platform_with_entitlements(
+            Arc::clone(&native_agent),
+            mini_apps,
+            host_platform,
+            Some(Arc::new(PlatformEntitlementChecker {
+                client: product_client,
+            })),
+        )
+        .map_err(|error| HostError::new(error.to_string()))?;
+        return builder
+            .with_engine_backend(engine_backend)?
+            .with_agent_control_backend(native_agent)
+            .with_provider(Arc::new(miniapp))?
+            .build()
+            .map_err(HostError::from);
+    }
+
+    let unavailable_reason = "this platform build has no native Mahayana Agent backend";
     let backend: Arc<dyn mahayana_agent::AgentBackend> =
         Arc::new(UnavailableAgentBackend::new(unavailable_reason));
     let miniapp = MiniAppConversationProvider::new_for_platform_with_entitlements(
@@ -439,12 +522,12 @@ fn merge_official_mini_apps(
     definitions.into_values().collect()
 }
 
-#[cfg(feature = "desktop-full")]
+#[cfg(all(feature = "codex-compat", feature = "desktop-full"))]
 fn default_codex_home() -> PathBuf {
     default_mahayana_home().join("codex")
 }
 
-#[cfg(any(feature = "desktop-full", feature = "mobile-embedded"))]
+#[cfg(feature = "codex-compat")]
 fn default_codex_home_if_available() -> Option<PathBuf> {
     #[cfg(feature = "desktop-full")]
     {

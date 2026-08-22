@@ -1,0 +1,14 @@
+[package]
+name = "mahayana-orchestrator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Product-owned prompt queue, memory, workflow, hooks, and subagent orchestration for Mahayana."
+publish = false
+
+[dependencies]
+mahayana-kernel.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true

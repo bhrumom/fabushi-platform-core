@@ -1,0 +1,19 @@
+[package]
+name = "mahayana-native-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Mahayana-owned coding agent loop, tool runtime, policy enforcement, memory, workflows, and subagents."
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+mahayana-kernel.workspace = true
+mahayana-model.workspace = true
+mahayana-orchestrator.workspace = true
+mahayana-workspace-engine.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true

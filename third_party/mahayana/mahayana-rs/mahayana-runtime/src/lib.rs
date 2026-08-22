@@ -1,11 +1,14 @@
 //! Long-lived local conversation runtime used by all Mahayana frontends.
 
+mod kernel_conversation;
+
 use crossbeam_channel::Receiver;
 use crossbeam_channel::RecvTimeoutError;
 use crossbeam_channel::Sender;
 use fabushi_official_miniapps::OfficialMiniAppEngine;
 use fabushi_official_miniapps::app_definition;
 use fabushi_official_miniapps::home_html;
+use kernel_conversation::KernelConversationProvider;
 use mahayana_agent::AgentActivityStatus;
 use mahayana_agent::AgentBackend;
 use mahayana_agent::AgentError;
@@ -15,6 +18,7 @@ use mahayana_agent::AgentMessageRequest;
 use mahayana_agent::ApprovalResolution;
 use mahayana_agent::SharedAgentEventSink;
 use mahayana_agent::StartThreadRequest;
+use mahayana_agent_kernel_bridge::LegacyAgentKernelBridge;
 use mahayana_conversation::ConversationError;
 use mahayana_conversation::ConversationEventSink;
 use mahayana_conversation::ConversationProvider;
@@ -41,6 +45,10 @@ use mahayana_core::RuntimeEvent;
 use mahayana_core::RuntimeResponse;
 use mahayana_core::RuntimeStatus;
 use mahayana_core::capability::CapabilityRegistry;
+use mahayana_kernel::BackendDescriptor;
+use mahayana_kernel::Capability;
+use mahayana_kernel::CapabilitySet;
+use mahayana_kernel::EngineBackend;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -75,16 +83,39 @@ impl RuntimeBuilder {
         Ok(self)
     }
 
-    pub fn with_agent_backend(
+    pub fn with_engine_backend(
         mut self,
-        backend: Arc<dyn AgentBackend>,
+        backend: Arc<dyn EngineBackend>,
     ) -> Result<Self, RuntimeError> {
+        let workspace_root = self
+            .config
+            .workspace_roots
+            .first()
+            .map(|path| path.to_string_lossy().to_string());
+        let model = Some(self.config.model.model.clone());
         self.providers
-            .register(Arc::new(AgentConversationProvider::new(Arc::clone(
-                &backend,
-            ))))?;
-        self.agent_backend = Some(backend);
+            .register(Arc::new(KernelConversationProvider::new(
+                backend,
+                self.config.build_profile,
+                workspace_root,
+                model,
+            )))?;
         Ok(self)
+    }
+
+    pub fn with_agent_control_backend(mut self, backend: Arc<dyn AgentBackend>) -> Self {
+        self.agent_backend = Some(backend);
+        self
+    }
+
+    pub fn with_agent_backend(self, backend: Arc<dyn AgentBackend>) -> Result<Self, RuntimeError> {
+        let kernel_backend: Arc<dyn EngineBackend> = Arc::new(LegacyAgentKernelBridge::new(
+            Arc::clone(&backend),
+            legacy_backend_descriptor(backend.as_ref()),
+        ));
+        Ok(self
+            .with_engine_backend(kernel_backend)?
+            .with_agent_control_backend(backend))
     }
 
     pub fn build(self) -> Result<MahayanaRuntime, RuntimeError> {
@@ -618,6 +649,28 @@ impl MahayanaRuntime {
             Err(RecvTimeoutError::Timeout) => Ok(None),
             Err(RecvTimeoutError::Disconnected) => Err(RuntimeError::EventConsumerClosed),
         }
+    }
+}
+
+fn legacy_backend_descriptor(backend: &dyn AgentBackend) -> BackendDescriptor {
+    BackendDescriptor {
+        id: format!("compat:{}", backend.name()),
+        display_name: format!("{} compatibility backend", backend.name()),
+        native: false,
+        capabilities: CapabilitySet::new([
+            Capability::Model,
+            Capability::FilesystemRead,
+            Capability::FilesystemWrite,
+            Capability::Process,
+            Capability::Git,
+            Capability::Network,
+            Capability::WebSearch,
+            Capability::ComputerUse,
+            Capability::ToolProtocol,
+            Capability::Mcp,
+            Capability::Skills,
+            Capability::Plugins,
+        ]),
     }
 }
 

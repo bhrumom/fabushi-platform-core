@@ -1,16 +1,16 @@
 [package]
-name = "mahayana-model"
+name = "mahayana-mcp-runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Local and explicitly configured model runtime abstraction."
+description = "Product-owned MCP stdio/HTTP transport and Mahayana plugin runtime discovery."
 publish = false
 
 [dependencies]
-async-trait.workspace = true
-mahayana-core.workspace = true
+mahayana-platform-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
 ureq.workspace = true
+url.workspace = true
+uuid.workspace = true

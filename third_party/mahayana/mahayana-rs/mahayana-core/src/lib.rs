@@ -12,7 +12,9 @@ pub mod capability;
 pub const RUNTIME_ABI_VERSION: u32 = 1;
 pub const CONVERSATION_SCHEMA_VERSION: u32 = 1;
 pub const MODEL_RUNTIME_VERSION: u32 = 1;
-pub const CODEX_ASSISTANT_CONVERSATION_ID: &str = "codex:agent:assistant";
+pub const MAHAYANA_AI_CONVERSATION_ID: &str = "mahayana-ai:agent:assistant";
+/// Legacy source-compatible alias. New product surfaces must use `MAHAYANA_AI_CONVERSATION_ID`.
+pub const CODEX_ASSISTANT_CONVERSATION_ID: &str = MAHAYANA_AI_CONVERSATION_ID;
 pub const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-chat";
 pub const DEFAULT_DACHENG_RESPONSES_BASE_URL: &str = "https://api.ombhrum.com/codex-deepseek/v1";
 
@@ -126,16 +128,24 @@ impl Default for RuntimeConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum PeerKind {
+    MahayanaAi,
+    /// Read compatibility for persisted pre-sovereign conversation payloads.
     CodexAi,
-    TelegramContact { user_id: i64 },
-    MahayanaContact { contact_id: String },
-    MiniApp { app_id: String },
+    TelegramContact {
+        user_id: i64,
+    },
+    MahayanaContact {
+        contact_id: String,
+    },
+    MiniApp {
+        app_id: String,
+    },
 }
 
 impl PeerKind {
     pub fn provider_key(&self) -> &'static str {
         match self {
-            Self::CodexAi => "codex",
+            Self::MahayanaAi | Self::CodexAi => "mahayana-ai",
             Self::TelegramContact { .. } => "telegram",
             Self::MahayanaContact { .. } => "mahayana-social",
             Self::MiniApp { .. } => "miniapp",
@@ -155,15 +165,21 @@ pub struct Conversation {
 }
 
 impl Conversation {
-    pub fn codex_assistant() -> Self {
+    pub fn mahayana_assistant() -> Self {
         Self {
-            id: ConversationId(CODEX_ASSISTANT_CONVERSATION_ID.to_string()),
+            id: ConversationId(MAHAYANA_AI_CONVERSATION_ID.to_string()),
             title: "Mahayana（大乘 AI）".to_string(),
-            peer: PeerKind::CodexAi,
+            peer: PeerKind::MahayanaAi,
             pinned: true,
             unread_count: 0,
             updated_at_ms: 0,
         }
+    }
+
+    /// Source-compatible helper for callers not yet migrated. It intentionally
+    /// returns the sovereign Mahayana conversation, never a new Codex identity.
+    pub fn codex_assistant() -> Self {
+        Self::mahayana_assistant()
     }
 }
 
@@ -422,8 +438,8 @@ pub struct RuntimeStatus {
     pub providers: Vec<String>,
 }
 
-/// Provider-reported model token counts. These values are projected from the
-/// Codex Responses usage event and are never estimated by the Mahayana host.
+/// Provider-reported model token counts. These values come from the selected
+/// Mahayana model backend and are never estimated by the product host.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelTokenUsage {

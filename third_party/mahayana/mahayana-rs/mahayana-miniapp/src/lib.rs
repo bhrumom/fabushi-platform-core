@@ -408,7 +408,7 @@ impl ConversationProvider for MiniAppConversationProvider {
                     conversation_id: request.conversation_id,
                     role: MessageRole::Assistant,
                     text: format!(
-                        "准备把当前小程序问题交给 Codex 修复。\n\n来源：{source}\n\n确认后，宿主将展示脱敏日志、目标仓库和本地 checkout；缺少 checkout 时会单独请求克隆权限。"
+                        "准备把当前小程序问题交给 Mahayana 修复。\n\n来源：{source}\n\n确认后，宿主将展示脱敏日志、目标仓库和本地 checkout；缺少 checkout 时会单独请求克隆权限。"
                     ),
                     created_at_ms: now_ms(),
                     metadata: json!({
@@ -752,7 +752,7 @@ impl ConversationProvider for MiniAppConversationProvider {
 fn mcp_app_agent_prompt(plugin_id: &str, title: &str, server: &str, message: &str) -> String {
     if plugin_id == "bot-father" {
         return format!(
-            "你正在“{title}”Codex 插件工作台中。结合 Server `{server}` 的 MCP Tools 与当前 Codex 工作区工具，实际生成、诊断、修复、测试、打包和发布插件。不要只返回示例或状态。用户消息：\n{message}"
+            "你正在“{title}”Mahayana 插件工作台中。结合 Server `{server}` 的 MCP Tools 与当前 Mahayana 工作区工具，实际生成、诊断、修复、测试、打包和发布插件。不要只返回示例或状态。用户消息：\n{message}"
         );
     }
     format!(
@@ -1159,7 +1159,7 @@ mod tests {
     fn bot_father_prompt_uses_codex_workspace_orchestration() {
         let prompt =
             mcp_app_agent_prompt("bot-father", "Bot Father", "bot-father-local", "修复插件");
-        assert!(prompt.contains("Codex 插件工作台"));
+        assert!(prompt.contains("Mahayana 插件工作台"));
         assert!(prompt.contains("实际生成、诊断、修复、测试、打包和发布"));
         assert!(!prompt.contains("只能调用"));
     }

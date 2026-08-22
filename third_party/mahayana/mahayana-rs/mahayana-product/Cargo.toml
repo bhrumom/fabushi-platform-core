@@ -7,6 +7,9 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+# Mahayana only needs JWT expiry parsing here. Keep the full Codex login stack
+# out of the default product graph; compatibility adapters still use its
+# default `full` feature.
 codex-login.workspace = true
 codex-secrets.workspace = true
 mahayana-platform-core.workspace = true

@@ -3,35 +3,22 @@ name = "mahayana-host"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Direct Rust host API for the embedded Mahayana Runtime."
+description = "Direct Rust host API for native Mahayana application shells."
 publish = false
 
 [lib]
 doctest = false
 
 [features]
-# The default developer/test build intentionally avoids compiling the embedded
-# Codex desktop graph. Production shells opt into desktop-full or
-# mobile-embedded explicitly.
 default = ["local-only"]
-desktop-full = [
-    "mahayana-runtime-core/desktop-full",
-    "dep:codex-protocol",
-    "dep:mahayana-agent-codex",
-]
-mobile-embedded = [
-    "mahayana-runtime-core/mobile-embedded",
-    "dep:codex-protocol",
-    "dep:mahayana-agent-codex",
-]
-linux-shared = [
-    "mahayana-runtime-core/mobile-embedded",
-    "dep:codex-protocol",
-]
+desktop-full = ["mahayana-runtime-core/desktop-full"]
+mobile-embedded = ["mahayana-runtime-core/mobile-embedded"]
+linux-shared = ["desktop-full"]
 web-wasm = ["mahayana-runtime-core/web-wasm"]
 local-only = ["mahayana-runtime-core/local-only"]
 remote-model-provider = ["mahayana-runtime-core/remote-model-provider"]
 telemetry = ["mahayana-runtime-core/telemetry"]
+codex-compat = ["dep:mahayana-agent-codex", "dep:codex-protocol"]
 
 [dependencies]
 async-trait.workspace = true
@@ -41,10 +28,15 @@ mahayana-agent.workspace = true
 mahayana-agent-codex = { path = "../mahayana-agent-codex", optional = true }
 mahayana-conversation.workspace = true
 mahayana-core.workspace = true
+mahayana-kernel.workspace = true
+mahayana-mcp-runtime.workspace = true
 mahayana-harness.workspace = true
 mahayana-miniapp.workspace = true
+mahayana-model.workspace = true
+mahayana-native-agent.workspace = true
+mahayana-native-engine.workspace = true
 mahayana-platform-core.workspace = true
-mahayana-product = { package = "mahayana-platform-client", path = "../mahayana-product" }
+mahayana-product.workspace = true
 mahayana-runtime-core = { package = "mahayana-runtime", path = "../mahayana-runtime", default-features = false }
 mahayana-social.workspace = true
 mahayana-telegram.workspace = true

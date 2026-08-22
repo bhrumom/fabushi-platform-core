@@ -13,6 +13,9 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+pub const MAHAYANA_AI_PROVIDER_KEY: &str = "mahayana-ai";
+pub const MAHAYANA_AI_CONVERSATION_PREFIX: &str = "mahayana-ai:";
+
 #[derive(Debug, Clone)]
 pub struct SendMessageRequest {
     pub conversation_id: ConversationId,
@@ -118,8 +121,11 @@ pub fn provider_key_for_conversation_id(
     conversation_id: &ConversationId,
 ) -> Result<&'static str, ConversationError> {
     let value = conversation_id.as_str();
-    if value.starts_with("codex:") {
-        Ok("codex")
+    if value.starts_with(MAHAYANA_AI_CONVERSATION_PREFIX) || value.starts_with("codex:") {
+        // `codex:` remains a read-compatible migration prefix only. New
+        // Mahayana surfaces emit `mahayana-ai:` identifiers and both route to
+        // the sovereign AI provider boundary.
+        Ok(MAHAYANA_AI_PROVIDER_KEY)
     } else if value.starts_with("telegram:") {
         Ok("telegram")
     } else if value.starts_with("mahayana:") {
@@ -164,7 +170,8 @@ mod tests {
     #[test]
     fn routes_all_supported_peer_prefixes() {
         let cases = [
-            ("codex:agent:assistant", "codex"),
+            ("mahayana-ai:agent:assistant", MAHAYANA_AI_PROVIDER_KEY),
+            ("codex:agent:assistant", MAHAYANA_AI_PROVIDER_KEY),
             ("telegram:user:42", "telegram"),
             ("mahayana:contact:abc", "mahayana-social"),
             ("miniapp:official.flashcards", "miniapp"),

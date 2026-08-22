@@ -1,0 +1,14 @@
+[package]
+name = "mahayana-agent-kernel-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Compatibility bridge from the legacy Mahayana AgentBackend contract to the sovereign kernel."
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+mahayana-agent.workspace = true
+mahayana-core.workspace = true
+mahayana-kernel.workspace = true
+serde_json.workspace = true

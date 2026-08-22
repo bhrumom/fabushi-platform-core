@@ -98,7 +98,7 @@ pub fn capability_from_conversation(
     build_profile: BuildProfile,
 ) -> CapabilityDescriptor {
     let (id, kind, plugin_id, description) = match &conversation.peer {
-        PeerKind::CodexAi => (
+        PeerKind::MahayanaAi | PeerKind::CodexAi => (
             MAHAYANA_AGENT_CAPABILITY_ID.to_string(),
             CapabilityKind::Agent,
             None,
