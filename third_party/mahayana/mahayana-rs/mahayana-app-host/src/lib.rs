@@ -150,7 +150,6 @@ impl AppHost {
             "runtime.start" => self.start_runtime(params),
             "runtime.stop" => self.stop_runtime(params),
             "runtime.tools" => self.runtime_tools(),
-            "runtime.callTool" => self.call_runtime_tool(params),
             other => Err(AppHostError::InvalidRequest(format!(
                 "unknown method {other}"
             ))),
@@ -555,19 +554,6 @@ impl AppHost {
             .registered_tools()
             .map_err(|error| AppHostError::Operation(error.to_string()))?;
         serde_json::to_value(tools).map_err(|error| AppHostError::Operation(error.to_string()))
-    }
-
-    fn call_runtime_tool(&self, params: Value) -> Result<Value, AppHostError> {
-        let name = string_param(&params, "name")?;
-        let arguments = params
-            .get("arguments")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
-        self.js
-            .lock()
-            .map_err(|_| AppHostError::Operation("JavaScript host lock poisoned".into()))?
-            .call_tool_json(name, &arguments)
-            .map_err(|error| AppHostError::Operation(error.to_string()))
     }
 }
 
