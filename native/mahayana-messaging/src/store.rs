@@ -154,6 +154,20 @@ impl SqliteStateStore {
         migrate_sqlite(&connection)
     }
 
+    pub fn import_json_if_empty(
+        &mut self,
+        legacy: &JsonFileStateStore,
+    ) -> Result<bool, StoreError> {
+        if self.load()?.is_some() {
+            return Ok(false);
+        }
+        let Some(snapshot) = legacy.load()? else {
+            return Ok(false);
+        };
+        self.save(&snapshot)?;
+        Ok(true)
+    }
+
     fn open(&self) -> Result<Connection, StoreError> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
@@ -288,6 +302,39 @@ mod tests {
         let reopened = SqliteStateStore::new(&path);
         assert_eq!(reopened.load().expect("reload snapshot"), Some(snapshot));
         remove_db(&path);
+    }
+
+    #[test]
+    fn sqlite_store_imports_legacy_json_once() {
+        let path = temporary_db("legacy-import");
+        let legacy_path = path.with_extension("json");
+        let mut legacy = JsonFileStateStore::new(&legacy_path);
+        let original = MessagingSnapshot::new(MessagingState::default(), 41, 100);
+        legacy.save(&original).expect("save legacy snapshot");
+
+        let mut store = SqliteStateStore::new(&path);
+        assert!(store
+            .import_json_if_empty(&legacy)
+            .expect("import legacy snapshot"));
+        assert_eq!(
+            store.load().expect("load imported snapshot"),
+            Some(original)
+        );
+
+        let replacement = MessagingSnapshot::new(MessagingState::default(), 99, 200);
+        legacy
+            .save(&replacement)
+            .expect("replace legacy snapshot after import");
+        assert!(!store
+            .import_json_if_empty(&legacy)
+            .expect("skip second legacy import"));
+        assert_eq!(
+            store.load().expect("keep sqlite snapshot").unwrap().cursor,
+            41
+        );
+
+        remove_db(&path);
+        let _ = fs::remove_file(legacy_path);
     }
 
     #[test]

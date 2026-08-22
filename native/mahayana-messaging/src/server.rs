@@ -2,7 +2,7 @@ use crate::access::{AccessScope, FileAccessTokenStore};
 use crate::blob_store::FileBlobStore;
 use crate::protocol::{ClientCommand, ClientEnvelope, ServerEnvelope};
 use crate::service::{MessagingService, MessagingServiceError};
-use crate::store::JsonFileStateStore;
+use crate::store::{JsonFileStateStore, SqliteStateStore, StoreError};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::net::{TcpListener, TcpStream};
@@ -35,7 +35,8 @@ pub enum ServerFrame {
 #[derive(Debug, Clone)]
 pub struct MessagingServerConfig {
     pub bind_address: String,
-    pub snapshot_path: PathBuf,
+    pub database_path: PathBuf,
+    pub legacy_snapshot_path: Option<PathBuf>,
     pub access_registry_path: PathBuf,
     pub max_frame_bytes: usize,
 }
@@ -43,21 +44,32 @@ pub struct MessagingServerConfig {
 impl MessagingServerConfig {
     pub fn new(
         bind_address: impl Into<String>,
-        snapshot_path: impl Into<PathBuf>,
+        database_path: impl Into<PathBuf>,
         access_registry_path: impl Into<PathBuf>,
     ) -> Self {
         Self {
             bind_address: bind_address.into(),
-            snapshot_path: snapshot_path.into(),
+            database_path: database_path.into(),
+            legacy_snapshot_path: None,
             access_registry_path: access_registry_path.into(),
             max_frame_bytes: MAX_SERVER_FRAME_BYTES,
         }
+    }
+
+    pub fn with_legacy_snapshot(mut self, path: impl Into<PathBuf>) -> Self {
+        self.legacy_snapshot_path = Some(path.into());
+        self
     }
 
     pub fn validate(&self) -> Result<(), MessagingServerError> {
         if self.bind_address.trim().is_empty() {
             return Err(MessagingServerError::InvalidConfig(
                 "bind address is empty".into(),
+            ));
+        }
+        if self.database_path.as_os_str().is_empty() {
+            return Err(MessagingServerError::InvalidConfig(
+                "database path is empty".into(),
             ));
         }
         if self.access_registry_path.as_os_str().is_empty() {
@@ -82,23 +94,33 @@ pub enum MessagingServerError {
     Io(#[from] std::io::Error),
     #[error("messaging server JSON failed: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("messaging store failed: {0}")]
+    Store(#[from] StoreError),
     #[error("messaging service failed: {0}")]
     Service(#[from] MessagingServiceError),
     #[error("messaging service lock is poisoned")]
     Poisoned,
 }
 
+/// Production self-hosted messaging server.
+///
+/// Durable product state is authoritative in SQLite. A configured legacy JSON
+/// snapshot is only an import source while that SQLite database is still empty.
 pub struct MessagingTcpServer {
     config: MessagingServerConfig,
-    service: Arc<Mutex<MessagingService<JsonFileStateStore>>>,
+    service: Arc<Mutex<MessagingService<SqliteStateStore>>>,
 }
 
 impl MessagingTcpServer {
     pub fn load(config: MessagingServerConfig) -> Result<Self, MessagingServerError> {
         config.validate()?;
-        let store = JsonFileStateStore::new(config.snapshot_path.clone());
+        let mut store = SqliteStateStore::new(config.database_path.clone());
+        if let Some(legacy_path) = config.legacy_snapshot_path.as_ref() {
+            let legacy = JsonFileStateStore::new(legacy_path);
+            store.import_json_if_empty(&legacy)?;
+        }
         let blob_root = config
-            .snapshot_path
+            .database_path
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("blobs");
@@ -109,8 +131,12 @@ impl MessagingTcpServer {
         })
     }
 
+    pub fn database_path(&self) -> &Path {
+        &self.config.database_path
+    }
+
     pub fn snapshot_path(&self) -> &Path {
-        &self.config.snapshot_path
+        self.database_path()
     }
 
     pub fn serve(self) -> Result<(), MessagingServerError> {
@@ -143,7 +169,7 @@ impl MessagingTcpServer {
 
 fn handle_connection(
     stream: TcpStream,
-    service: Arc<Mutex<MessagingService<JsonFileStateStore>>>,
+    service: Arc<Mutex<MessagingService<SqliteStateStore>>>,
     access_store: Arc<FileAccessTokenStore>,
     max_frame_bytes: usize,
 ) -> Result<(), MessagingServerError> {
@@ -282,8 +308,12 @@ mod tests {
     }
 
     #[test]
-    fn production_config_requires_access_registry_path() {
-        let config = MessagingServerConfig::new("127.0.0.1:9400", "/tmp/messages.json", "");
-        assert!(config.validate().is_err());
+    fn production_config_requires_database_and_access_registry_paths() {
+        let missing_database = MessagingServerConfig::new("127.0.0.1:9400", "", "/tmp/access.json");
+        assert!(missing_database.validate().is_err());
+
+        let missing_access =
+            MessagingServerConfig::new("127.0.0.1:9400", "/tmp/messages.sqlite3", "");
+        assert!(missing_access.validate().is_err());
     }
 }
