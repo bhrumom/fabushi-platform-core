@@ -223,10 +223,102 @@ impl UnifiedAppHost {
     }
 
     fn execute_harness(&self, operation: &str, payload: Value) -> Result<Value, AppHostError> {
+        match operation {
+            "schedule.create" => self.harness_schedule_create(payload),
+            "schedule.setEnabled" => self.harness_schedule_set_enabled(payload),
+            "schedule.delete" => self.harness_schedule_delete(payload),
+            "schedule.run" => self.harness_schedule_run(payload),
+            _ => self.execute_harness_state(operation, payload),
+        }
+    }
+
+    fn execute_harness_state(
+        &self,
+        operation: &str,
+        payload: Value,
+    ) -> Result<Value, AppHostError> {
         self.journal
             .lock()
             .map_err(|_| AppHostError::Operation("harness journal lock poisoned".into()))?
             .execute(&self.harness, operation, payload)
+    }
+
+    fn harness_schedule_create(&self, payload: Value) -> Result<Value, AppHostError> {
+        let created = self.execute_harness_state("schedule.create", payload)?;
+        let id = required_string(&created, "id")?;
+        let session_id = required_string(&created, "sessionId")?;
+        let instruction = required_string(&created, "instruction")?;
+        let schedule = required_string(&created, "schedule")?;
+        let command = json!({"command": {
+            "type": "automation.upsert",
+            "requestId": format!("harness-schedule-upsert:{}:{}", id, now_ms()),
+            "id": id.clone(),
+            "name": format!("Harness schedule · {session_id}"),
+            "prompt": instruction,
+            "schedule": schedule.clone(),
+            "trigger": {"kind": "schedule", "schedule": schedule},
+            "enabled": true
+        }});
+        if let Err(error) = self.delegate("feature.execute", command) {
+            let _ = self.execute_harness_state("schedule.delete", json!({"scheduleId": id}));
+            return Err(error);
+        }
+        Ok(created)
+    }
+
+    fn harness_schedule_set_enabled(&self, payload: Value) -> Result<Value, AppHostError> {
+        let id = required_string(&payload, "scheduleId")?;
+        let enabled = payload
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| AppHostError::InvalidRequest("enabled is required".into()))?;
+        self.delegate(
+            "feature.execute",
+            json!({"command": {
+                "type": "automation.setEnabled",
+                "requestId": format!("harness-schedule-enabled:{}:{}", id, now_ms()),
+                "id": id.clone(),
+                "enabled": enabled
+            }}),
+        )?;
+        self.execute_harness_state("schedule.setEnabled", payload)
+    }
+
+    fn harness_schedule_delete(&self, payload: Value) -> Result<Value, AppHostError> {
+        let id = required_string(&payload, "scheduleId")?;
+        self.delegate(
+            "feature.execute",
+            json!({"command": {
+                "type": "automation.delete",
+                "requestId": format!("harness-schedule-delete:{}:{}", id, now_ms()),
+                "id": id.clone()
+            }}),
+        )?;
+        self.execute_harness_state("schedule.delete", payload)
+    }
+
+    fn harness_schedule_run(&self, payload: Value) -> Result<Value, AppHostError> {
+        let id = required_string(&payload, "scheduleId")?;
+        let schedule =
+            self.execute_harness_state("schedule.get", json!({"scheduleId": id.clone()}))?;
+        let session_id = required_string(&schedule, "sessionId")?;
+        let accepted = self.delegate(
+            "feature.execute",
+            json!({"command": {
+                "type": "automation.run",
+                "requestId": format!("harness-schedule-run:{}:{}", id, now_ms()),
+                "id": id.clone()
+            }}),
+        )?;
+        self.execute_harness_state(
+            "session.appendEvent",
+            json!({
+                "sessionId": session_id,
+                "kind": "schedule/run",
+                "eventPayload": {"scheduleId": id, "accepted": accepted.clone()}
+            }),
+        )?;
+        Ok(json!({"schedule": schedule, "accepted": accepted}))
     }
 
     fn harness_chat_send(&self, params: Value) -> Result<Value, AppHostError> {
@@ -430,6 +522,7 @@ fn is_journaled_operation(operation: &str) -> bool {
             | "plan.exit"
             | "schedule.create"
             | "schedule.setEnabled"
+            | "schedule.delete"
             | "feedback.record"
             | "identity.bindAccount"
             | "team.create"
@@ -437,6 +530,17 @@ fn is_journaled_operation(operation: &str) -> bool {
             | "team.sendMessage"
             | "skill.register"
             | "command.register"
+            | "interaction.permissionPreset.register"
+            | "interaction.permissionPreset.activate"
+            | "interaction.question.create"
+            | "interaction.question.answer"
+            | "agentPlan.enter"
+            | "agentPlan.exit"
+            | "bundle.register"
+            | "preset.register"
+            | "extension.register"
+            | "extension.setEnabled"
+            | "hook.register"
     )
 }
 

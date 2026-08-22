@@ -220,12 +220,7 @@ impl AdvancedHarnessServices {
     }
 
     pub fn permission_presets(&self) -> HarnessResult<Vec<PermissionPreset>> {
-        Ok(self
-            .state()?
-            .permission_presets
-            .values()
-            .cloned()
-            .collect())
+        Ok(self.state()?.permission_presets.values().cloned().collect())
     }
 
     pub fn activate_permission_preset(&self, preset_id: &str) -> HarnessResult<PermissionPreset> {
@@ -234,7 +229,9 @@ impl AdvancedHarnessServices {
             .permission_presets
             .get(preset_id)
             .cloned()
-            .ok_or_else(|| HarnessError::ServiceNotFound(format!("permission-preset:{preset_id}")))?;
+            .ok_or_else(|| {
+                HarnessError::ServiceNotFound(format!("permission-preset:{preset_id}"))
+            })?;
         state.active_permission_preset = Some(preset_id.to_string());
         Ok(preset)
     }
@@ -342,7 +339,9 @@ impl AdvancedHarnessServices {
             .get_mut(agent_id)
             .ok_or_else(|| HarnessError::ServiceNotFound(format!("agent-plan:{agent_id}")))?;
         if plan.review_required && !approved {
-            return Err(HarnessError::ApprovalRequired(format!("agent-plan:{agent_id}")));
+            return Err(HarnessError::ApprovalRequired(format!(
+                "agent-plan:{agent_id}"
+            )));
         }
         plan.mode = "execution".into();
         plan.reviewed_by = reviewer;
@@ -442,7 +441,11 @@ impl AdvancedHarnessServices {
         Ok(self.state()?.hooks.values().cloned().collect())
     }
 
-    pub fn emit_hook(&self, event: impl Into<String>, payload: Value) -> HarnessResult<HookEmission> {
+    pub fn emit_hook(
+        &self,
+        event: impl Into<String>,
+        payload: Value,
+    ) -> HarnessResult<HookEmission> {
         let event = required(&event.into(), "hook event")?;
         let mut state = self.state()?;
         let mut hooks = state
@@ -562,7 +565,9 @@ impl AdvancedHarnessServices {
             .events
             .into_iter()
             .filter(|event| kind.is_none_or(|kind| event.kind == kind))
-            .filter(|event| agent_id.is_none_or(|agent_id| event.agent_id.as_deref() == Some(agent_id)))
+            .filter(|event| {
+                agent_id.is_none_or(|agent_id| event.agent_id.as_deref() == Some(agent_id))
+            })
             .collect::<Vec<_>>();
         events.sort_by_key(|event| std::cmp::Reverse(event.sequence));
         events.truncate(limit.clamp(1, 500));
@@ -667,7 +672,9 @@ fn validate_question_answer(question: &UserQuestion, answer: &Value) -> HarnessR
     let selected = answer
         .as_str()
         .or_else(|| answer.get("optionId").and_then(Value::as_str))
-        .ok_or_else(|| HarnessError::InvalidConfig("question answer must select an option".into()))?;
+        .ok_or_else(|| {
+            HarnessError::InvalidConfig("question answer must select an option".into())
+        })?;
     if question.options.iter().any(|option| option.id == selected) {
         Ok(())
     } else {

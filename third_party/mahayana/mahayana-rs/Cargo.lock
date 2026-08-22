@@ -8594,7 +8594,7 @@ dependencies = [
 name = "mahayana-app-host-desktop"
 version = "0.1.0"
 dependencies = [
- "mahayana-app-host",
+ "mahayana-unified-app-host",
 ]
 
 [[package]]
@@ -8603,6 +8603,7 @@ version = "0.1.0"
 dependencies = [
  "jni 0.21.1",
  "mahayana-app-host",
+ "mahayana-unified-app-host",
  "serde_json",
 ]
 
@@ -8681,6 +8682,8 @@ dependencies = [
  "fabushi-messaging-core",
  "mahayana-computer",
  "mahayana-core",
+ "mahayana-harness",
+ "mahayana-harness-services",
  "mahayana-host",
  "mahayana-host-protocol",
  "serde",
@@ -8705,6 +8708,86 @@ dependencies = [
 ]
 
 [[package]]
+name = "mahayana-harness"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "mahayana-core",
+ "mahayana-tool-host",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "mahayana-harness-adapters"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mahayana-core",
+ "mahayana-harness",
+ "mahayana-harness-services",
+ "mahayana-tool-host",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+]
+
+[[package]]
+name = "mahayana-harness-advanced"
+version = "0.1.0"
+dependencies = [
+ "mahayana-core",
+ "mahayana-harness",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "mahayana-harness-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mahayana-agent",
+ "mahayana-core",
+ "mahayana-harness",
+ "serde_json",
+]
+
+[[package]]
+name = "mahayana-harness-protocol"
+version = "0.1.0"
+dependencies = [
+ "mahayana-core",
+ "mahayana-harness",
+ "mahayana-harness-advanced",
+ "mahayana-harness-services",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "mahayana-harness-services"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mahayana-core",
+ "mahayana-harness",
+ "mahayana-tool-host",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "mahayana-host"
 version = "0.1.0"
 dependencies = [
@@ -8715,6 +8798,7 @@ dependencies = [
  "mahayana-agent-codex",
  "mahayana-conversation",
  "mahayana-core",
+ "mahayana-harness",
  "mahayana-miniapp",
  "mahayana-platform-client",
  "mahayana-platform-core",
@@ -8934,6 +9018,17 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "mahayana-unified-app-host"
+version = "0.1.0"
+dependencies = [
+ "mahayana-app-host",
+ "mahayana-core",
+ "mahayana-harness-protocol",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
