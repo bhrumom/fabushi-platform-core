@@ -1,12 +1,20 @@
 //! Public, surface-neutral contracts for conversational MCP mini apps.
 
 mod compiler;
+mod payment;
 mod types;
 
 pub use compiler::CompiledContent;
 pub use compiler::ContentCompiler;
 pub use compiler::ContentSource;
 pub use compiler::SourceKind;
+pub use payment::CheckoutStatus;
+pub use payment::CreatePaymentRequest;
+pub use payment::OpenCheckoutRequest;
+pub use payment::PAYMENT_SCHEMA;
+pub use payment::PaymentContractError;
+pub use payment::PaymentStatusRequest;
+pub use payment::PaymentView;
 pub use types::AppSummary;
 pub use types::ChatDisposition;
 pub use types::ContentReceipt;

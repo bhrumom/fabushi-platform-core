@@ -36,12 +36,37 @@ fn routes_allowed_mcp_calls() {
 #[test]
 fn rejects_payment_calls_without_permission() {
     let router = BridgeRouter::new(TestHost, []);
-    let response = router.handle(BridgeRequest::new(
-        "request-1",
+    for payment_method in [
         method::COMMERCE_PURCHASE,
-        json!({"sku": "weather.pro"}),
+        method::PAY_CREATE_INTENT,
+        method::PAY_OPEN_CHECKOUT,
+        method::PAY_GET_STATUS,
+    ] {
+        let response = router.handle(BridgeRequest::new(
+            "request-1",
+            payment_method,
+            json!({"sku": "weather.pro"}),
+        ));
+        assert_eq!(response.result, None);
+        assert_eq!(response.error.expect("permission error").code, -32001);
+    }
+}
+
+#[test]
+fn payment_methods_route_only_after_commerce_permission() {
+    let router = BridgeRouter::new(TestHost, [HostPermission::CommercePurchase]);
+    let response = router.handle(BridgeRequest::new(
+        "checkout-1",
+        method::PAY_CREATE_INTENT,
+        json!({"sku": "weather.pro", "idempotencyKey": "checkout-1"}),
     ));
 
-    assert_eq!(response.result, None);
-    assert_eq!(response.error.expect("permission error").code, -32001);
+    assert_eq!(response.error, None);
+    assert_eq!(
+        response.result,
+        Some(json!({
+            "method": "pay.createIntent",
+            "params": {"sku": "weather.pro", "idempotencyKey": "checkout-1"}
+        }))
+    );
 }

@@ -20,6 +20,9 @@ pub mod method {
     pub const COMMERCE_QUOTE: &str = "commerce.quote";
     pub const COMMERCE_PURCHASE: &str = "commerce.purchase";
     pub const COMMERCE_ENTITLEMENT: &str = "commerce.entitlement";
+    pub const PAY_CREATE_INTENT: &str = "pay.createIntent";
+    pub const PAY_OPEN_CHECKOUT: &str = "pay.openCheckout";
+    pub const PAY_GET_STATUS: &str = "pay.getStatus";
     pub const STORAGE_GET: &str = "storage.get";
     pub const STORAGE_SET: &str = "storage.set";
     pub const STORAGE_REMOVE: &str = "storage.remove";
@@ -90,7 +93,7 @@ pub struct BridgeErrorObject {
 }
 
 /// Executes approved host operations. Implementations keep login sessions,
-/// payment credentials, and storage namespaces outside plugin memory.
+/// payment credentials, provider secrets and storage namespaces outside plugin memory.
 pub trait HostBridge: Send + Sync {
     fn invoke(&self, method: &str, params: Value) -> Result<Value, BridgeError>;
 }
@@ -142,9 +145,12 @@ fn required_permission(method: &str) -> Result<Option<HostPermission>, BridgeErr
         method::PROFILE_GET_BASIC => Some(HostPermission::ProfileBasic),
         method::AUTH_REQUEST_TOKEN => Some(HostPermission::AuthDelegatedToken),
         method::MCP_LIST_TOOLS | method::MCP_CALL_TOOL => Some(HostPermission::McpCall),
-        method::COMMERCE_QUOTE | method::COMMERCE_PURCHASE | method::COMMERCE_ENTITLEMENT => {
-            Some(HostPermission::CommercePurchase)
-        }
+        method::COMMERCE_QUOTE
+        | method::COMMERCE_PURCHASE
+        | method::COMMERCE_ENTITLEMENT
+        | method::PAY_CREATE_INTENT
+        | method::PAY_OPEN_CHECKOUT
+        | method::PAY_GET_STATUS => Some(HostPermission::CommercePurchase),
         method::STORAGE_GET | method::STORAGE_SET | method::STORAGE_REMOVE => {
             Some(HostPermission::StorageLocal)
         }

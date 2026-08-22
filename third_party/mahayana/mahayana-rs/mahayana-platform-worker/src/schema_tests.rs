@@ -7,6 +7,21 @@ fn migration_contains_the_authoritative_commerce_tables() {
 }
 
 #[test]
+fn fabushi_pay_migration_contains_payment_and_settlement_invariants() {
+    assert_eq!(validate_fabushi_pay_schema(FABUSHI_PAY_SCHEMA_V7), Ok(()));
+    assert!(FABUSHI_PAY_SCHEMA_V7.contains("UNIQUE (user_id, idempotency_key)"));
+    assert!(FABUSHI_PAY_SCHEMA_V7.contains("PRIMARY KEY (provider, event_id)"));
+    assert!(FABUSHI_PAY_SCHEMA_V7.contains("idempotency_key TEXT NOT NULL UNIQUE"));
+    assert!(FABUSHI_PAY_SCHEMA_V7.contains("provider_product_refs_json"));
+    assert!(FABUSHI_PAY_SCHEMA_V7.contains("developer_settlement_releases_payment_idx"));
+    assert!(
+        !FABUSHI_PAY_SCHEMA_V7
+            .contains("payment_id TEXT NOT NULL UNIQUE REFERENCES payment_intents")
+    );
+    assert!(!FABUSHI_PAY_SCHEMA_V7.contains("amount REAL"));
+}
+
+#[test]
 fn listener_relay_migration_contains_durable_registration_and_event_tables() {
     assert_eq!(
         validate_listener_relay_schema(LISTENER_RELAY_SCHEMA_V5),
@@ -68,6 +83,12 @@ fn validation_rejects_floating_point_money() {
     let schema = PLATFORM_SCHEMA_V1.replace("amount INTEGER", "amount REAL");
     assert_eq!(
         validate_platform_schema(&schema),
+        Err(SchemaError::FloatingPointAmount)
+    );
+
+    let schema = FABUSHI_PAY_SCHEMA_V7.replace("amount INTEGER", "amount REAL");
+    assert_eq!(
+        validate_fabushi_pay_schema(&schema),
         Err(SchemaError::FloatingPointAmount)
     );
 }

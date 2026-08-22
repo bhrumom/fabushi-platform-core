@@ -6,6 +6,7 @@ mod auth;
 pub const PLATFORM_SCHEMA_V1: &str = include_str!("../migrations/0001_platform.sql");
 pub const LISTENER_RELAY_SCHEMA_V5: &str = include_str!("../migrations/0005_listener_relay.sql");
 pub const REMOTE_COMPUTER_SCHEMA_V6: &str = include_str!("../migrations/0006_remote_computer.sql");
+pub const FABUSHI_PAY_SCHEMA_V7: &str = include_str!("../migrations/0007_fabushi_pay.sql");
 pub const ACCOUNT_AUTH_SCHEMA_V2: &str =
     include_str!("../account-migrations/0001_account_auth.sql");
 pub const ACCOUNT_OAUTH_SCHEMA_V3: &str =
@@ -21,6 +22,8 @@ pub enum SchemaError {
     MissingTable(&'static str),
     #[error("platform schema must declare Rust-enforced posted journal balance")]
     MissingJournalBalanceInvariant,
+    #[error("Fabushi Pay schema must declare Rust-enforced payment journal balance")]
+    MissingFabushiPayBalanceInvariant,
     #[error("platform schema must declare Rust-enforced AI usage capacity")]
     MissingUsageCapacityInvariant,
     #[error("platform schema must use integer amounts")]
@@ -55,6 +58,32 @@ pub fn validate_platform_schema(schema: &str) -> Result<(), SchemaError> {
     if !schema.contains("ai_usage_capacity_enforced_by_worker_batch") {
         return Err(SchemaError::MissingUsageCapacityInvariant);
     }
+    validate_integer_amounts(schema)
+}
+
+pub fn validate_fabushi_pay_schema(schema: &str) -> Result<(), SchemaError> {
+    for table in [
+        "payment_product_config",
+        "payment_intents",
+        "payment_webhook_events",
+        "fabushi_payment_refunds",
+        "payment_disputes",
+        "developer_payout_accounts",
+        "developer_settlement_releases",
+        "developer_payouts",
+    ] {
+        let declaration = format!("CREATE TABLE IF NOT EXISTS {table}");
+        if !schema.contains(&declaration) {
+            return Err(SchemaError::MissingTable(table));
+        }
+    }
+    if !schema.contains("fabushi_pay_balance_enforced_by_worker_batch") {
+        return Err(SchemaError::MissingFabushiPayBalanceInvariant);
+    }
+    validate_integer_amounts(schema)
+}
+
+fn validate_integer_amounts(schema: &str) -> Result<(), SchemaError> {
     if schema.lines().any(|line| {
         let line = line.trim().to_ascii_lowercase();
         line.contains("amount") && (line.contains(" real") || line.contains(" float"))
