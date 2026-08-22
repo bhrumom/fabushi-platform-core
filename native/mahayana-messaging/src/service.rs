@@ -17,6 +17,8 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use thiserror::Error;
 
+const TYPING_TTL_MS: i64 = 5_000;
+
 #[derive(Debug, Error)]
 pub enum MessagingServiceError {
     #[error("unsupported messaging protocol version {actual}; expected {expected}")]
@@ -173,6 +175,19 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 self.mark_direct_messages_delivered(&actor_id, server_time_ms)?;
                 self.sync_response(&actor_id, cursor.as_deref(), limit, server_time_ms)
             }
+            ClientCommand::StartTyping {
+                conversation_id,
+                action,
+            } => self.typing_event(
+                &actor_id,
+                conversation_id,
+                Some(action),
+                Some(server_time_ms.saturating_add(TYPING_TTL_MS)),
+                server_time_ms,
+            ),
+            ClientCommand::StopTyping { conversation_id } => {
+                self.typing_event(&actor_id, conversation_id, None, None, server_time_ms)
+            }
             command => {
                 if let Some(replay) =
                     self.idempotent_send_replay(&actor_id, &command, server_time_ms)?
@@ -217,6 +232,50 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 Ok(responses)
             }
         }
+    }
+
+    fn typing_event(
+        &mut self,
+        actor_id: &ActorId,
+        conversation_id: ConversationId,
+        action: Option<String>,
+        expires_at_ms: Option<i64>,
+        server_time_ms: i64,
+    ) -> Result<Vec<ServerEnvelope>, MessagingServiceError> {
+        let conversation = self
+            .engine
+            .state()
+            .conversations
+            .get(&conversation_id)
+            .ok_or_else(|| {
+                MessagingServiceError::UnauthorizedCommand(
+                    "typing conversation does not exist".into(),
+                )
+            })?;
+        if !conversation
+            .participants
+            .iter()
+            .any(|participant| &participant.actor_id == actor_id)
+        {
+            return Err(MessagingServiceError::UnauthorizedCommand(
+                "typing requires conversation membership".into(),
+            ));
+        }
+        self.cursor = self.cursor.saturating_add(1);
+        let response = ServerEnvelope {
+            protocol_version: FABUSHI_MESSAGING_PROTOCOL_VERSION,
+            cursor: Some(self.cursor.to_string()),
+            server_time_ms,
+            event: ServerEvent::TypingChanged {
+                conversation_id,
+                actor_id: actor_id.clone(),
+                action,
+                expires_at_ms,
+            },
+        };
+        let journal = self.journal_entries(actor_id, std::slice::from_ref(&response));
+        self.persist_with_events(server_time_ms, &journal)?;
+        Ok(vec![response])
     }
 
     fn idempotent_send_replay(
@@ -541,6 +600,13 @@ impl<S: MessagingStateStore> MessagingService<S> {
             .entries
             .into_iter()
             .filter(|entry| entry.audience.iter().any(|candidate| candidate == actor_id))
+            .filter(|entry| match &entry.envelope.event {
+                ServerEvent::TypingChanged {
+                    expires_at_ms: Some(expires_at_ms),
+                    ..
+                } => *expires_at_ms > server_time_ms,
+                _ => true,
+            })
             .map(|entry| entry.envelope)
             .collect::<Vec<_>>();
         responses.push(self.sync_checkpoint_envelope(slice.checkpoint_cursor, server_time_ms));
