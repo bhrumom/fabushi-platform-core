@@ -5,7 +5,6 @@
 //! policy, and audit decisions; this crate only executes already-authorized
 //! actions on the machine where Fabushi is installed.
 
-#[cfg(target_os = "macos")]
 use base64::Engine as _;
 use mahayana_host_protocol::COMPUTER_MAX_ACTIONS_PER_CALL;
 use mahayana_host_protocol::COMPUTER_MAX_WAIT_MS;
@@ -21,14 +20,10 @@ use std::sync::Mutex;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-#[cfg(target_os = "macos")]
 use std::time::Duration;
-#[cfg(target_os = "macos")]
 use std::time::SystemTime;
-#[cfg(target_os = "macos")]
 use std::time::UNIX_EPOCH;
 
-#[cfg(target_os = "macos")]
 const FINAL_SCREEN_SETTLE_MS: u64 = 250;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,34 +91,60 @@ pub fn status(
     ai_control_enabled: bool,
 ) -> ComputerStatus {
     #[cfg(target_os = "macos")]
-    {
-        ComputerStatus {
-            platform: "macos".into(),
-            available: true,
-            capture_supported: true,
-            input_supported: true,
-            accessibility_granted: macos::accessibility_granted(),
-            screen_recording_granted: macos::screen_recording_granted(),
-            local_execution_enabled,
-            route_egress_locally,
-            remote_control_enabled,
-            ai_control_enabled,
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        ComputerStatus {
-            platform: std::env::consts::OS.into(),
-            available: false,
-            capture_supported: false,
-            input_supported: false,
-            accessibility_granted: false,
-            screen_recording_granted: false,
-            local_execution_enabled,
-            route_egress_locally,
-            remote_control_enabled,
-            ai_control_enabled,
-        }
+    let (
+        available,
+        capture_supported,
+        input_supported,
+        accessibility_granted,
+        screen_recording_granted,
+    ) = (
+        true,
+        true,
+        true,
+        macos::accessibility_granted(),
+        macos::screen_recording_granted(),
+    );
+    #[cfg(target_os = "windows")]
+    let (
+        available,
+        capture_supported,
+        input_supported,
+        accessibility_granted,
+        screen_recording_granted,
+    ) = (true, true, true, true, true);
+    #[cfg(target_os = "linux")]
+    let (
+        available,
+        capture_supported,
+        input_supported,
+        accessibility_granted,
+        screen_recording_granted,
+    ) = {
+        let display = std::env::var_os("DISPLAY").is_some();
+        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+        let desktop = display || wayland;
+        (desktop, desktop, desktop, desktop, desktop)
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    let (
+        available,
+        capture_supported,
+        input_supported,
+        accessibility_granted,
+        screen_recording_granted,
+    ) = (false, false, false, false, false);
+
+    ComputerStatus {
+        platform: std::env::consts::OS.into(),
+        available,
+        capture_supported,
+        input_supported,
+        accessibility_granted,
+        screen_recording_granted,
+        local_execution_enabled,
+        route_egress_locally,
+        remote_control_enabled,
+        ai_control_enabled,
     }
 }
 
@@ -132,13 +153,11 @@ pub fn capture_screen() -> Result<ComputerSnapshot, ComputerError> {
         .lock()
         .map_err(|_| ComputerError::Input("computer execution lock is poisoned".into()))?;
     #[cfg(target_os = "macos")]
-    {
-        macos::capture_screen()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Err(ComputerError::Unavailable)
-    }
+    return macos::capture_screen();
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    return portable::capture_screen();
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    Err(ComputerError::Unavailable)
 }
 
 pub fn execute(
@@ -164,19 +183,15 @@ pub fn execute(
         }
     }
 
-    #[cfg(target_os = "macos")]
-    let ai_epoch = USER_OVERRIDE_EPOCH.load(Ordering::SeqCst);
-    if origin != ComputerControlOrigin::Ai {
-        // Bump before waiting on the desktop mutex so a human request can stop
-        // an AI batch that currently owns the mutex at its next safe boundary.
-        USER_OVERRIDE_EPOCH.fetch_add(1, Ordering::SeqCst);
-    }
-    let _lease = EXECUTION_LOCK
-        .lock()
-        .map_err(|_| ComputerError::Input("computer execution lock is poisoned".into()))?;
-
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     {
+        let ai_epoch = USER_OVERRIDE_EPOCH.load(Ordering::SeqCst);
+        if origin != ComputerControlOrigin::Ai {
+            USER_OVERRIDE_EPOCH.fetch_add(1, Ordering::SeqCst);
+        }
+        let _lease = EXECUTION_LOCK
+            .lock()
+            .map_err(|_| ComputerError::Input("computer execution lock is poisoned".into()))?;
         for action in actions {
             if origin == ComputerControlOrigin::Ai {
                 ensure_ai_not_preempted(ai_epoch)?;
@@ -185,27 +200,33 @@ pub fn execute(
                     continue;
                 }
             }
+            #[cfg(target_os = "macos")]
             macos::execute_action(action)?;
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            portable::execute_action(action)?;
             if origin == ComputerControlOrigin::Ai {
                 ensure_ai_not_preempted(ai_epoch)?;
             }
         }
         std::thread::sleep(Duration::from_millis(FINAL_SCREEN_SETTLE_MS));
+        #[cfg(target_os = "macos")]
         let snapshot = macos::capture_screen()?;
-        Ok(ComputerActionResult {
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        let snapshot = portable::capture_screen()?;
+        return Ok(ComputerActionResult {
             origin,
             actions_executed: actions.len(),
             snapshot,
-        })
+        });
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = origin;
         Err(ComputerError::Unavailable)
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn ensure_ai_not_preempted(epoch: u64) -> Result<(), ComputerError> {
     if USER_OVERRIDE_EPOCH.load(Ordering::SeqCst) != epoch {
         Err(ComputerError::Preempted)
@@ -214,7 +235,7 @@ fn ensure_ai_not_preempted(epoch: u64) -> Result<(), ComputerError> {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn ai_wait_with_preemption(wait_ms: u64, epoch: u64) -> Result<(), ComputerError> {
     let mut remaining = wait_ms;
     while remaining > 0 {
@@ -294,7 +315,6 @@ pub fn validate_action(action: &ComputerAction) -> Result<(), ComputerError> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
 fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -314,6 +334,231 @@ fn png_dimensions(bytes: &[u8]) -> (Option<u32>, Option<u32>) {
         Some(u32::from_be_bytes(bytes[16..20].try_into().unwrap())),
         Some(u32::from_be_bytes(bytes[20..24].try_into().unwrap())),
     )
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+mod portable {
+    use super::*;
+    use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
+    use image::{DynamicImage, ImageFormat};
+    use mahayana_host_protocol::{ComputerMouseButton, ComputerPoint, ComputerScrollDirection};
+    use std::io::Cursor;
+    use xcap::Monitor;
+
+    fn enigo() -> Result<Enigo, ComputerError> {
+        Enigo::new(&Settings::default()).map_err(|error| ComputerError::Input(error.to_string()))
+    }
+
+    fn position(action: &ComputerAction, enigo: &Enigo) -> Result<(i32, i32), ComputerError> {
+        if let (Some(x), Some(y)) = (action.x, action.y) {
+            Ok((x, y))
+        } else {
+            enigo
+                .location()
+                .map_err(|error| ComputerError::Input(error.to_string()))
+        }
+    }
+
+    fn button(value: Option<ComputerMouseButton>) -> Button {
+        match value.unwrap_or(ComputerMouseButton::Left) {
+            ComputerMouseButton::Left => Button::Left,
+            ComputerMouseButton::Right => Button::Right,
+            ComputerMouseButton::Middle => Button::Middle,
+        }
+    }
+
+    fn move_to(enigo: &mut Enigo, x: i32, y: i32) -> Result<(), ComputerError> {
+        enigo
+            .move_mouse(x, y, Coordinate::Abs)
+            .map_err(|error| ComputerError::Input(error.to_string()))
+    }
+
+    fn drag_points(action: &ComputerAction) -> Result<Vec<ComputerPoint>, ComputerError> {
+        if let Some(path) = action.path.as_ref().filter(|path| path.len() >= 2) {
+            return Ok(path.clone());
+        }
+        match (action.x, action.y, action.x2, action.y2) {
+            (Some(x), Some(y), Some(x2), Some(y2)) => {
+                Ok(vec![ComputerPoint { x, y }, ComputerPoint { x: x2, y: y2 }])
+            }
+            _ => Err(ComputerError::InvalidAction(
+                "drag requires a path or x/y/x2/y2".into(),
+            )),
+        }
+    }
+
+    fn named_key(raw: &str) -> Result<Key, ComputerError> {
+        let normalized = raw.trim().to_ascii_lowercase();
+        let key = match normalized.as_str() {
+            "ctrl" | "control" => Key::Control,
+            "shift" => Key::Shift,
+            "alt" | "option" => Key::Alt,
+            "meta" | "cmd" | "command" | "super" | "win" | "windows" => Key::Meta,
+            "enter" | "return" => Key::Return,
+            "tab" => Key::Tab,
+            "escape" | "esc" => Key::Escape,
+            "backspace" => Key::Backspace,
+            "delete" | "del" => Key::Delete,
+            "space" => Key::Space,
+            "home" => Key::Home,
+            "end" => Key::End,
+            "pageup" | "page-up" => Key::PageUp,
+            "pagedown" | "page-down" => Key::PageDown,
+            "arrowup" | "up" => Key::UpArrow,
+            "arrowdown" | "down" => Key::DownArrow,
+            "arrowleft" | "left" => Key::LeftArrow,
+            "arrowright" | "right" => Key::RightArrow,
+            "f1" => Key::F1,
+            "f2" => Key::F2,
+            "f3" => Key::F3,
+            "f4" => Key::F4,
+            "f5" => Key::F5,
+            "f6" => Key::F6,
+            "f7" => Key::F7,
+            "f8" => Key::F8,
+            "f9" => Key::F9,
+            "f10" => Key::F10,
+            "f11" => Key::F11,
+            "f12" => Key::F12,
+            _ if normalized.chars().count() == 1 => {
+                Key::Unicode(normalized.chars().next().unwrap())
+            }
+            _ => {
+                return Err(ComputerError::InvalidAction(format!(
+                    "unsupported key: {raw}"
+                )));
+            }
+        };
+        Ok(key)
+    }
+
+    fn press_chord(enigo: &mut Enigo, raw: &str) -> Result<(), ComputerError> {
+        let parts: Vec<&str> = raw
+            .split('+')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect();
+        if parts.is_empty() {
+            return Err(ComputerError::InvalidAction("key chord is empty".into()));
+        }
+        let mut keys = Vec::with_capacity(parts.len());
+        for part in parts {
+            keys.push(named_key(part)?);
+        }
+        if keys.len() == 1 {
+            return enigo
+                .key(keys[0].clone(), Direction::Click)
+                .map_err(|error| ComputerError::Input(error.to_string()));
+        }
+        for key in &keys[..keys.len() - 1] {
+            enigo
+                .key(key.clone(), Direction::Press)
+                .map_err(|error| ComputerError::Input(error.to_string()))?;
+        }
+        enigo
+            .key(keys[keys.len() - 1].clone(), Direction::Click)
+            .map_err(|error| ComputerError::Input(error.to_string()))?;
+        for key in keys[..keys.len() - 1].iter().rev() {
+            enigo
+                .key(key.clone(), Direction::Release)
+                .map_err(|error| ComputerError::Input(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn execute_action(action: &ComputerAction) -> Result<(), ComputerError> {
+        let mut enigo = enigo()?;
+        match action.action {
+            ComputerActionKind::Screenshot => Ok(()),
+            ComputerActionKind::Click => {
+                let (x, y) = position(action, &enigo)?;
+                move_to(&mut enigo, x, y)?;
+                for _ in 0..action.click_count.unwrap_or(1) {
+                    enigo
+                        .button(button(action.button), Direction::Click)
+                        .map_err(|error| ComputerError::Input(error.to_string()))?;
+                }
+                Ok(())
+            }
+            ComputerActionKind::Move => {
+                let (x, y) = position(action, &enigo)?;
+                move_to(&mut enigo, x, y)
+            }
+            ComputerActionKind::Drag => {
+                let points = drag_points(action)?;
+                let first = &points[0];
+                move_to(&mut enigo, first.x, first.y)?;
+                enigo
+                    .button(button(action.button), Direction::Press)
+                    .map_err(|error| ComputerError::Input(error.to_string()))?;
+                let duration = action.wait_ms.unwrap_or(300).max(1);
+                let slices = u64::try_from(points.len().saturating_sub(1))
+                    .unwrap_or(1)
+                    .max(1);
+                let delay = Duration::from_millis((duration / slices).max(1));
+                for point in points.iter().skip(1) {
+                    move_to(&mut enigo, point.x, point.y)?;
+                    std::thread::sleep(delay);
+                }
+                enigo
+                    .button(button(action.button), Direction::Release)
+                    .map_err(|error| ComputerError::Input(error.to_string()))
+            }
+            ComputerActionKind::Type => enigo
+                .text(action.text.as_deref().unwrap_or_default())
+                .map_err(|error| ComputerError::Input(error.to_string())),
+            ComputerActionKind::Key => {
+                press_chord(&mut enigo, action.key.as_deref().unwrap_or_default())
+            }
+            ComputerActionKind::Scroll => {
+                if let (Some(x), Some(y)) = (action.x, action.y) {
+                    move_to(&mut enigo, x, y)?;
+                }
+                let magnitude = i32::try_from(action.amount.unwrap_or(1))
+                    .unwrap_or(i32::MAX)
+                    .max(1);
+                let (axis, value) = match action.direction.unwrap_or(ComputerScrollDirection::Down)
+                {
+                    ComputerScrollDirection::Up => (Axis::Vertical, -magnitude),
+                    ComputerScrollDirection::Down => (Axis::Vertical, magnitude),
+                    ComputerScrollDirection::Left => (Axis::Horizontal, -magnitude),
+                    ComputerScrollDirection::Right => (Axis::Horizontal, magnitude),
+                };
+                enigo
+                    .scroll(value, axis)
+                    .map_err(|error| ComputerError::Input(error.to_string()))
+            }
+            ComputerActionKind::Wait => {
+                std::thread::sleep(Duration::from_millis(action.wait_ms.unwrap_or(1_000)));
+                Ok(())
+            }
+        }
+    }
+
+    pub(super) fn capture_screen() -> Result<ComputerSnapshot, ComputerError> {
+        let monitors = Monitor::all().map_err(|error| ComputerError::Capture(error.to_string()))?;
+        let monitor = monitors
+            .iter()
+            .find(|monitor| monitor.is_primary().unwrap_or(false))
+            .or_else(|| monitors.first())
+            .ok_or_else(|| ComputerError::Capture("no monitor is available".into()))?;
+        let image = monitor
+            .capture_image()
+            .map_err(|error| ComputerError::Capture(error.to_string()))?;
+        let width = image.width();
+        let height = image.height();
+        let mut cursor = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(image)
+            .write_to(&mut cursor, ImageFormat::Png)
+            .map_err(|error| ComputerError::Capture(error.to_string()))?;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(cursor.into_inner());
+        Ok(ComputerSnapshot {
+            captured_at_ms: now_millis(),
+            data_url: format!("data:image/png;base64,{encoded}"),
+            width: Some(width),
+            height: Some(height),
+        })
+    }
 }
 
 #[cfg(target_os = "macos")]

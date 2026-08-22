@@ -19,3 +19,8 @@ core-foundation = "0.10"
 core-foundation-sys = "0.8"
 core-graphics = { version = "0.25", features = ["highsierra"] }
 foreign-types = "0.5"
+
+[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
+enigo = { version = "0.6.1", features = ["wayland"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+xcap = "0.9.8"

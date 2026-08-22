@@ -65,11 +65,14 @@ use mahayana_host_protocol::AutoReviewRule;
 use mahayana_host_protocol::AutomationSummary;
 use mahayana_host_protocol::AutomationTrigger;
 use mahayana_host_protocol::BotSummary;
+use mahayana_host_protocol::COMPUTER_CONTROL_PROTOCOL_VERSION;
 use mahayana_host_protocol::CapabilitySummary;
 use mahayana_host_protocol::CommandAccepted;
 use mahayana_host_protocol::ComputerActionResult;
 use mahayana_host_protocol::ComputerControlOrigin;
+use mahayana_host_protocol::ComputerControlTarget;
 use mahayana_host_protocol::ComputerSnapshot;
+use mahayana_host_protocol::ComputerTargetKind;
 use mahayana_host_protocol::ConnectorAccountSummary;
 use mahayana_host_protocol::ConnectorStatus;
 use mahayana_host_protocol::ConnectorSummary;
@@ -199,6 +202,7 @@ struct RemoteComputerLocalSession {
     device_id: String,
     client_id: String,
     expires_at_seconds: i64,
+    generation: u64,
 }
 
 #[derive(Debug)]
@@ -2404,9 +2408,17 @@ impl FeatureHostController {
                     });
             }
             FeatureCommand::ComputerScreenshot {
-                origin, session_id, ..
+                origin,
+                session_id,
+                target,
+                ..
             } => {
-                self.ensure_computer_origin_allowed(origin, session_id.as_deref(), &settings)?;
+                self.ensure_computer_origin_allowed(
+                    origin,
+                    session_id.as_deref(),
+                    &target,
+                    &settings,
+                )?;
                 let snapshot = if self.config.mode == HostMode::Test {
                     test_computer_snapshot()
                 } else {
@@ -2436,11 +2448,17 @@ impl FeatureHostController {
                 origin,
                 agent_id,
                 session_id,
+                target,
                 action,
                 then,
                 ..
             } => {
-                self.ensure_computer_origin_allowed(origin, session_id.as_deref(), &settings)?;
+                self.ensure_computer_origin_allowed(
+                    origin,
+                    session_id.as_deref(),
+                    &target,
+                    &settings,
+                )?;
                 let audit_agent_id = agent_id
                     .as_deref()
                     .filter(|id| is_safe_memory_agent_id(id))
@@ -2657,7 +2675,7 @@ impl FeatureHostController {
             _ => unreachable!("non-remote-computer command routed to remote computer executor"),
         };
 
-        let data = if self.config.mode == HostMode::Test {
+        let mut data = if self.config.mode == HostMode::Test {
             match action {
                 "registered" => json!({
                     "deviceId": payload.get("deviceId"),
@@ -2718,14 +2736,24 @@ impl FeatureHostController {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string();
-                    self.state()?.remote_computer_sessions.insert(
-                        id,
-                        RemoteComputerLocalSession {
-                            device_id,
-                            client_id,
-                            expires_at_seconds,
-                        },
-                    );
+                    let generation = {
+                        let mut state = self.state()?;
+                        state.sequence = state.sequence.saturating_add(1);
+                        let generation = state.sequence;
+                        state.remote_computer_sessions.insert(
+                            id,
+                            RemoteComputerLocalSession {
+                                device_id,
+                                client_id,
+                                expires_at_seconds,
+                                generation,
+                            },
+                        );
+                        generation
+                    };
+                    if let Some(object) = data.as_object_mut() {
+                        object.insert("generation".into(), json!(generation));
+                    }
                 }
                 "close" => {
                     self.state()?.remote_computer_sessions.remove(&id);
@@ -2757,8 +2785,20 @@ impl FeatureHostController {
         &self,
         origin: ComputerControlOrigin,
         session_id: Option<&str>,
+        target: &ComputerControlTarget,
         settings: &ProductHostSettings,
     ) -> Result<(), FeatureHostError> {
+        if target.protocol_version != COMPUTER_CONTROL_PROTOCOL_VERSION {
+            return Err(FeatureHostError::Contract(format!(
+                "unsupported computer-control protocol version: {}",
+                target.protocol_version
+            )));
+        }
+        if target.kind != ComputerTargetKind::Desktop {
+            return Err(FeatureHostError::Contract(
+                "desktop computer action cannot target a window or browser tab; use the target-specific capability".into(),
+            ));
+        }
         match origin {
             ComputerControlOrigin::LocalUi => {
                 if !settings.local_execution {
@@ -2793,6 +2833,17 @@ impl FeatureHostController {
                 if session.device_id.trim().is_empty() || session.client_id.trim().is_empty() {
                     return Err(FeatureHostError::Contract(
                         "remote computer session metadata is invalid".into(),
+                    ));
+                }
+                if target.device_id.as_deref() != Some(session.device_id.as_str()) {
+                    return Err(FeatureHostError::Contract(
+                        "remote computer target device does not match the active paired session"
+                            .into(),
+                    ));
+                }
+                if target.generation != session.generation {
+                    return Err(FeatureHostError::Contract(
+                        "remote computer target generation is stale or mismatched".into(),
                     ));
                 }
             }
@@ -11015,6 +11066,56 @@ mod tests {
             events.push(event);
         }
         events
+    }
+
+    #[test]
+    fn remote_computer_target_rejects_stale_generation_and_wrong_device() {
+        let controller = controller();
+        {
+            let mut state = controller.state().expect("state");
+            state.remote_computer_sessions.insert(
+                "session-1".into(),
+                RemoteComputerLocalSession {
+                    device_id: "desktop-a".into(),
+                    client_id: "phone-a".into(),
+                    expires_at_seconds: now_seconds() + 60,
+                    generation: 7,
+                },
+            );
+        }
+        let settings = ProductHostSettings {
+            remote_control_enabled: true,
+            ..Default::default()
+        };
+        let stale = ComputerControlTarget::remote_desktop("desktop-a", 6);
+        assert!(matches!(
+            controller.ensure_computer_origin_allowed(
+                ComputerControlOrigin::RemoteMobile,
+                Some("session-1"),
+                &stale,
+                &settings,
+            ),
+            Err(FeatureHostError::Contract(message)) if message.contains("generation")
+        ));
+        let wrong = ComputerControlTarget::remote_desktop("desktop-b", 7);
+        assert!(matches!(
+            controller.ensure_computer_origin_allowed(
+                ComputerControlOrigin::RemoteMobile,
+                Some("session-1"),
+                &wrong,
+                &settings,
+            ),
+            Err(FeatureHostError::Contract(message)) if message.contains("device")
+        ));
+        let current = ComputerControlTarget::remote_desktop("desktop-a", 7);
+        controller
+            .ensure_computer_origin_allowed(
+                ComputerControlOrigin::RemoteMobile,
+                Some("session-1"),
+                &current,
+                &settings,
+            )
+            .expect("current target accepted");
     }
 
     #[test]
