@@ -9005,8 +9005,10 @@ dependencies = [
  "mahayana-miniapp-protocol",
  "mahayana-platform-client",
  "mahayana-platform-core",
+ "mahayana-plugin-archive-compat",
  "mahayana-plugin-host",
  "mahayana-plugin-runtime",
+ "mahayana-tui-compat",
  "ratatui",
  "rpassword",
  "serde_json",
@@ -9391,6 +9393,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mahayana-plugin-archive-compat"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "tar",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "mahayana-plugin-host"
 version = "0.1.0"
 dependencies = [
@@ -9489,6 +9500,15 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "mahayana-tui-compat"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "ratatui",
+ "unicode-width 0.2.1",
 ]
 
 [[package]]
