@@ -11015,7 +11015,6 @@ fn test_computer_snapshot() -> ComputerSnapshot {
     }
 }
 
-
 fn stable_identity_component(value: Option<&Value>) -> Option<String> {
     match value? {
         Value::String(value) => {
