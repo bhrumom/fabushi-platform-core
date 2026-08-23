@@ -74,15 +74,15 @@ impl PromptQueue {
             ));
         }
 
-        if let Some(key) = dedupe_key.as_deref() {
-            if let Some(existing) = self.entries.iter_mut().find(|entry| {
+        if let Some(key) = dedupe_key.as_deref()
+            && let Some(existing) = self.entries.iter_mut().find(|entry| {
                 entry.state == PromptState::Pending && entry.dedupe_key.as_deref() == Some(key)
-            }) {
-                existing.text = text;
-                existing.priority = existing.priority.max(priority);
-                existing.metadata = metadata;
-                return Ok(existing.id.clone());
-            }
+            })
+        {
+            existing.text = text;
+            existing.priority = existing.priority.max(priority);
+            existing.metadata = metadata;
+            return Ok(existing.id.clone());
         }
 
         let id = generated_id("prompt");
@@ -98,7 +98,7 @@ impl PromptQueue {
         Ok(id)
     }
 
-    pub fn next(&mut self) -> Option<PromptEntry> {
+    pub fn take_next(&mut self) -> Option<PromptEntry> {
         let index = self
             .entries
             .iter()
@@ -275,7 +275,7 @@ impl MemoryStore {
             })
             .cloned()
             .collect::<Vec<_>>();
-        records.sort_by(|left, right| right.updated_at_ms.cmp(&left.updated_at_ms));
+        records.sort_by_key(|record| std::cmp::Reverse(record.updated_at_ms));
         records.truncate(limit.max(1));
         records
     }
@@ -643,10 +643,10 @@ impl SubagentScheduler {
         required_capabilities: CapabilitySet,
         metadata: Value,
     ) -> Result<String, OrchestratorError> {
-        if let Some(parent_id) = parent_id.as_deref() {
-            if !self.tasks.contains_key(parent_id) {
-                return Err(OrchestratorError::SubagentNotFound(parent_id.to_string()));
-            }
+        if let Some(parent_id) = parent_id.as_deref()
+            && !self.tasks.contains_key(parent_id)
+        {
+            return Err(OrchestratorError::SubagentNotFound(parent_id.to_string()));
         }
         let name = name.into();
         let goal = goal.into();
@@ -807,7 +807,7 @@ mod tests {
         queue
             .enqueue("urgent", PromptPriority::UserBlocking, None, Value::Null)
             .expect("enqueue urgent");
-        assert_eq!(queue.next().expect("next prompt").text, "urgent");
+        assert_eq!(queue.take_next().expect("next prompt").text, "urgent");
     }
 
     #[test]
@@ -830,7 +830,7 @@ mod tests {
             )
             .expect("enqueue second");
         assert_eq!(first, second);
-        let next = queue.next().expect("next prompt");
+        let next = queue.take_next().expect("next prompt");
         assert_eq!(next.text, "second");
         assert_eq!(next.priority, PromptPriority::Critical);
     }

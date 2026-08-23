@@ -7,11 +7,11 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
-# Mahayana only needs JWT expiry parsing here. Keep the full Codex login stack
-# out of the default product graph; compatibility adapters still use its
-# default `full` feature.
-codex-login.workspace = true
-codex-secrets.workspace = true
+# Transitional source aliases keep the large product client diff narrow while
+# the actual packages are Mahayana-owned. The source-boundary gate verifies
+# these aliases never point back at upstream vendor crates.
+codex-login = { package = "mahayana-auth", path = "../mahayana-auth" }
+codex-secrets = { package = "mahayana-secrets", path = "../mahayana-secrets" }
 mahayana-platform-core.workspace = true
 mahayana-host-protocol.workspace = true
 reqwest.workspace = true

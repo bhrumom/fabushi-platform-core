@@ -6,19 +6,27 @@
 //! Grok Build are not protocol dependencies of this crate.
 
 use async_trait::async_trait;
+use mahayana_kernel::supervisor::{
+    ApprovalLedger, ApprovalOutcome, ApprovalRecord, LoopDisposition, LoopPolicy, LoopState,
+    PermissionDecision, PermissionKey, PermissionLedger, PermissionMemory,
+};
+use mahayana_kernel::telemetry::{RuntimeMetricsSnapshot, RuntimeTelemetry};
 use mahayana_kernel::{
-    ApprovalMode, ApprovalResolution, BackendDescriptor, Capability, CapabilitySet, EngineBackend,
-    ExecutionPolicy, KernelError, KernelEvent, OpenSessionRequest, OperationId, RiskLevel,
-    RunRequest, SessionId, SharedKernelEventSink,
+    ApprovalResolution, BackendDescriptor, Capability, CapabilitySet, EngineBackend,
+    ExecutionPolicy, KernelError, KernelEvent, OpenSessionRequest, OperationId,
+    ResumeOperationRequest, RiskLevel, RunRequest, SessionId,
+    SessionSnapshot as KernelSessionSnapshot, SharedKernelEventSink, SuspendOperationRequest,
 };
 use mahayana_model::{
     ModelError, ModelEvent, ModelEventSink, ModelRequest, ModelRuntime, ModelUsage,
     SharedModelEventSink,
 };
 use mahayana_orchestrator::{
-    MemoryStore, PromptPriority, PromptQueue, SubagentScheduler, Workflow,
+    HookEffect, HookPoint, HookRegistry, MemoryStore, PromptEntry, PromptPriority, PromptQueue,
+    SubagentScheduler, Workflow,
 };
 use mahayana_workspace_engine::WorkspaceEngine;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::future::Future;
@@ -27,11 +35,13 @@ use std::pin::Pin;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use uuid::Uuid;
 
 const MAX_TOOL_OUTPUT_BYTES: usize = 64 * 1024;
 const DEFAULT_MAX_MODEL_TURNS: usize = 16;
+const DEFAULT_APPROVAL_TIMEOUT_MS: u64 = 120_000;
 
 #[derive(Debug, Clone)]
 pub struct NativeEngineConfig {
@@ -39,6 +49,7 @@ pub struct NativeEngineConfig {
     pub system_instructions: String,
     pub max_model_turns: usize,
     pub enable_process_tools: bool,
+    pub approval_timeout_ms: u64,
 }
 
 impl NativeEngineConfig {
@@ -48,6 +59,7 @@ impl NativeEngineConfig {
             system_instructions: default_system_instructions(),
             max_model_turns: DEFAULT_MAX_MODEL_TURNS,
             enable_process_tools: true,
+            approval_timeout_ms: DEFAULT_APPROVAL_TIMEOUT_MS,
         }
     }
 
@@ -57,6 +69,7 @@ impl NativeEngineConfig {
             system_instructions: default_system_instructions(),
             max_model_turns: DEFAULT_MAX_MODEL_TURNS,
             enable_process_tools: false,
+            approval_timeout_ms: DEFAULT_APPROVAL_TIMEOUT_MS,
         }
     }
 
@@ -71,29 +84,83 @@ impl NativeEngineConfig {
                 "Mahayana native engine max_model_turns must be at least one".into(),
             ));
         }
+        if self.approval_timeout_ms == 0 {
+            return Err(KernelError::BackendUnavailable(
+                "Mahayana native engine approval timeout must be positive".into(),
+            ));
+        }
         Ok(())
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OperationAttemptState {
+    Running,
+    Suspended,
+    Completed,
+    Failed,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OperationAttempt {
+    id: String,
+    operation_id: String,
+    prompt_id: String,
+    started_at_ms: i64,
+    finished_at_ms: Option<i64>,
+    state: OperationAttemptState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct NativeSession {
     workspace_root: Option<PathBuf>,
     history: Vec<Value>,
     prompt_queue: PromptQueue,
+    #[serde(default)]
+    active_prompt: Option<PromptEntry>,
+    #[serde(default)]
+    permissions: PermissionLedger,
+    #[serde(default)]
+    approvals: ApprovalLedger,
+    #[serde(default)]
+    loop_state: LoopState,
+    #[serde(default)]
+    attempts: Vec<OperationAttempt>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NativeSnapshotState {
+    session: NativeSession,
+    memory: MemoryStore,
+    workflows: HashMap<String, Workflow>,
+    subagents: SubagentScheduler,
+    hooks: HookRegistry,
 }
 
 struct ApprovalWaiter {
-    sender: oneshot::Sender<bool>,
+    operation_id: String,
+    sender: oneshot::Sender<ApprovalResolution>,
+}
+
+#[derive(Debug, Default)]
+struct OperationControl {
+    interrupted: AtomicBool,
+    suspended: AtomicBool,
 }
 
 pub struct NativeEngine {
     model: Arc<dyn ModelRuntime>,
     config: NativeEngineConfig,
     sessions: Mutex<HashMap<String, Arc<AsyncMutex<NativeSession>>>>,
-    active_operations: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    active_operations: Mutex<HashMap<String, Arc<OperationControl>>>,
     approvals: Mutex<HashMap<String, ApprovalWaiter>>,
     memory: Mutex<MemoryStore>,
     workflows: Mutex<HashMap<String, Workflow>>,
     subagents: Mutex<SubagentScheduler>,
+    hooks: Mutex<HookRegistry>,
+    telemetry: Arc<RuntimeTelemetry>,
 }
 
 impl NativeEngine {
@@ -114,7 +181,38 @@ impl NativeEngine {
                 SubagentScheduler::new(4)
                     .map_err(|error| KernelError::Backend(error.to_string()))?,
             ),
+            hooks: Mutex::new(HookRegistry::default()),
+            telemetry: Arc::new(RuntimeTelemetry::default()),
         })
+    }
+
+    pub fn metrics_snapshot(&self) -> RuntimeMetricsSnapshot {
+        self.telemetry.snapshot()
+    }
+
+    pub fn register_hook(
+        &self,
+        point: HookPoint,
+        priority: i32,
+        matcher: Option<String>,
+        effect: HookEffect,
+    ) -> Result<String, KernelError> {
+        Ok(self
+            .hooks
+            .lock()
+            .map_err(|_| KernelError::Backend("hook registry poisoned".into()))?
+            .register(point, priority, matcher, effect))
+    }
+
+    pub async fn set_permission_memory(
+        &self,
+        session_id: &SessionId,
+        key: PermissionKey,
+        memory: PermissionMemory,
+    ) -> Result<(), KernelError> {
+        let session = self.session(session_id)?;
+        session.lock().await.permissions.remember(key, memory);
+        Ok(())
     }
 
     fn capabilities(&self) -> CapabilitySet {
@@ -158,13 +256,13 @@ impl NativeEngine {
     fn register_operation(
         &self,
         operation_id: &OperationId,
-    ) -> Result<Arc<AtomicBool>, KernelError> {
-        let interrupted = Arc::new(AtomicBool::new(false));
+    ) -> Result<Arc<OperationControl>, KernelError> {
+        let control = Arc::new(OperationControl::default());
         self.active_operations
             .lock()
             .map_err(|_| KernelError::Backend("native operation registry poisoned".into()))?
-            .insert(operation_id.as_str().to_string(), Arc::clone(&interrupted));
-        Ok(interrupted)
+            .insert(operation_id.as_str().to_string(), Arc::clone(&control));
+        Ok(control)
     }
 
     fn finish_operation(&self, operation_id: &OperationId) -> Result<(), KernelError> {
@@ -175,27 +273,87 @@ impl NativeEngine {
         Ok(())
     }
 
+    fn cancel_operation_approvals(&self, operation_id: &OperationId) -> Result<(), KernelError> {
+        self.approvals
+            .lock()
+            .map_err(|_| KernelError::Backend("approval registry poisoned".into()))?
+            .retain(|_, waiter| waiter.operation_id != operation_id.as_str());
+        Ok(())
+    }
+
+    fn apply_hooks(
+        &self,
+        point: HookPoint,
+        subject: &str,
+        mut session: Option<&mut NativeSession>,
+        operation_id: &OperationId,
+        events: &SharedKernelEventSink,
+    ) -> Result<(), KernelError> {
+        let hooks = self
+            .hooks
+            .lock()
+            .map_err(|_| KernelError::Backend("hook registry poisoned".into()))?
+            .dispatch(point, subject);
+        for hook in hooks {
+            events.emit(KernelEvent::Activity {
+                operation_id: operation_id.clone(),
+                kind: "hook".into(),
+                title: format!("Mahayana hook {}", hook.id),
+                detail: hook.effect.block_reason.clone(),
+                metadata: json!({"point": format!("{point:?}"), "hookId": hook.id}),
+            })?;
+            if let Some(reason) = hook.effect.block_reason {
+                return Err(KernelError::PolicyDenied(format!(
+                    "hook blocked {subject}: {reason}"
+                )));
+            }
+            if hook.effect.require_approval {
+                return Err(KernelError::PolicyDenied(format!(
+                    "hook requires explicit approval before {subject}"
+                )));
+            }
+            if let Some(context) = hook.effect.inject_context
+                && let Some(active_session) = session.as_deref_mut()
+            {
+                active_session
+                    .history
+                    .push(json!({"role":"system", "content": context, "source":"mahayana_hook"}));
+            }
+        }
+        Ok(())
+    }
+
     async fn run_prompt(
         &self,
         session: &mut NativeSession,
         operation_id: &OperationId,
         prompt: String,
+        append_user_prompt: bool,
         policy: &ExecutionPolicy,
-        interrupted: &AtomicBool,
+        control: &OperationControl,
         events: SharedKernelEventSink,
     ) -> Result<String, KernelError> {
-        session
-            .history
-            .push(json!({"role": "user", "content": prompt}));
+        if append_user_prompt {
+            session
+                .history
+                .push(json!({"role": "user", "content": prompt}));
+        }
 
         for turn in 0..self.config.max_model_turns {
-            ensure_not_interrupted(interrupted)?;
+            ensure_operation_active(control)?;
             if !self.model.is_local() && !policy.allow_network {
                 return Err(KernelError::PolicyDenied(
                     "remote model inference is disabled by Mahayana policy".into(),
                 ));
             }
 
+            self.apply_hooks(
+                HookPoint::BeforeModel,
+                &self.config.model,
+                Some(session),
+                operation_id,
+                &events,
+            )?;
             events.emit(KernelEvent::Activity {
                 operation_id: operation_id.clone(),
                 kind: "model".into(),
@@ -206,7 +364,9 @@ impl NativeEngine {
 
             let collector = Arc::new(ModelCollector::default());
             let sink: SharedModelEventSink = collector.clone();
-            self.model
+            let started = Instant::now();
+            let inference = self
+                .model
                 .infer(
                     ModelRequest {
                         model: self.config.model.clone(),
@@ -220,9 +380,18 @@ impl NativeEngine {
                     },
                     sink,
                 )
-                .await
-                .map_err(model_error)?;
-            ensure_not_interrupted(interrupted)?;
+                .await;
+            self.telemetry
+                .model_finished(started.elapsed(), inference.is_ok());
+            inference.map_err(model_error)?;
+            ensure_operation_active(control)?;
+            self.apply_hooks(
+                HookPoint::AfterModel,
+                &self.config.model,
+                Some(session),
+                operation_id,
+                &events,
+            )?;
 
             if let Some(usage) = collector.usage()? {
                 events.emit(KernelEvent::UsageUpdated {
@@ -256,7 +425,38 @@ impl NativeEngine {
             }
 
             for call in calls {
-                ensure_not_interrupted(interrupted)?;
+                ensure_operation_active(control)?;
+                let fingerprint = tool_fingerprint(&call);
+                match session
+                    .loop_state
+                    .observe(&fingerprint, LoopPolicy::default())
+                {
+                    LoopDisposition::Allow => {}
+                    LoopDisposition::Warn => {
+                        events.emit(KernelEvent::Activity {
+                            operation_id: operation_id.clone(),
+                            kind: "loop_warning".into(),
+                            title: format!("Repeated tool action: {}", call.name),
+                            detail: Some("Mahayana detected a repeated action and will interrupt if it continues".into()),
+                            metadata: json!({"fingerprint": fingerprint}),
+                        })?;
+                    }
+                    LoopDisposition::Interrupt => {
+                        return Err(KernelError::PolicyDenied(format!(
+                            "Mahayana loop protection interrupted repeated tool action {}",
+                            call.name
+                        )));
+                    }
+                }
+
+                self.apply_hooks(
+                    HookPoint::BeforeTool,
+                    &call.name,
+                    Some(session),
+                    operation_id,
+                    &events,
+                )?;
+                self.telemetry.tool_started();
                 events.emit(KernelEvent::ToolStarted {
                     operation_id: operation_id.clone(),
                     tool: call.name.clone(),
@@ -268,12 +468,13 @@ impl NativeEngine {
                         operation_id,
                         &call,
                         policy,
-                        interrupted,
+                        control,
                         Arc::clone(&events),
                     )
                     .await;
                 match output {
                     Ok(output) => {
+                        self.telemetry.tool_completed(true);
                         events.emit(KernelEvent::ToolCompleted {
                             operation_id: operation_id.clone(),
                             tool: call.name.clone(),
@@ -288,6 +489,7 @@ impl NativeEngine {
                         }));
                     }
                     Err(error) => {
+                        self.telemetry.tool_completed(false);
                         let message = error.to_string();
                         events.emit(KernelEvent::ToolCompleted {
                             operation_id: operation_id.clone(),
@@ -303,6 +505,13 @@ impl NativeEngine {
                         }));
                     }
                 }
+                self.apply_hooks(
+                    HookPoint::AfterTool,
+                    &call.name,
+                    Some(session),
+                    operation_id,
+                    &events,
+                )?;
             }
         }
 
@@ -318,14 +527,21 @@ impl NativeEngine {
         operation_id: &'a OperationId,
         call: &'a FunctionCall,
         policy: &'a ExecutionPolicy,
-        interrupted: &'a AtomicBool,
+        control: &'a OperationControl,
         events: SharedKernelEventSink,
     ) -> Pin<Box<dyn Future<Output = Result<Value, KernelError>> + Send + 'a>> {
         Box::pin(async move {
             let risk = tool_risk(&call.name);
-            self.authorize_tool(operation_id, &call.name, risk, policy, Arc::clone(&events))
-                .await?;
-            ensure_not_interrupted(interrupted)?;
+            self.authorize_tool(
+                session,
+                operation_id,
+                call,
+                risk,
+                policy,
+                Arc::clone(&events),
+            )
+            .await?;
+            ensure_operation_active(control)?;
 
             match call.name.as_str() {
                 "workspace_read" => {
@@ -342,6 +558,13 @@ impl NativeEngine {
                             "workspace writes are disabled by Mahayana policy".into(),
                         ));
                     }
+                    self.apply_hooks(
+                        HookPoint::BeforeCheckpoint,
+                        "workspace_write",
+                        None,
+                        operation_id,
+                        &events,
+                    )?;
                     let root = workspace_root(session)?;
                     let relative = string_arg(&call.arguments, "path")?;
                     let content = string_arg(&call.arguments, "content")?;
@@ -355,6 +578,13 @@ impl NativeEngine {
                         checkpoint_id: checkpoint.id,
                         label: checkpoint.label,
                     })?;
+                    self.apply_hooks(
+                        HookPoint::AfterCheckpoint,
+                        "workspace_write",
+                        None,
+                        operation_id,
+                        &events,
+                    )?;
                     let path = safe_join(root, Path::new(relative))?;
                     if let Some(parent) = path.parent() {
                         std::fs::create_dir_all(parent)
@@ -377,6 +607,13 @@ impl NativeEngine {
                     Ok(json!({"query": query, "matches": matches}))
                 }
                 "workspace_checkpoint" => {
+                    self.apply_hooks(
+                        HookPoint::BeforeCheckpoint,
+                        "workspace_checkpoint",
+                        None,
+                        operation_id,
+                        &events,
+                    )?;
                     let root = workspace_root(session)?;
                     let label = call
                         .arguments
@@ -391,6 +628,13 @@ impl NativeEngine {
                         checkpoint_id: checkpoint.id.clone(),
                         label: checkpoint.label.clone(),
                     })?;
+                    self.apply_hooks(
+                        HookPoint::AfterCheckpoint,
+                        "workspace_checkpoint",
+                        None,
+                        operation_id,
+                        &events,
+                    )?;
                     serde_json::to_value(checkpoint)
                         .map_err(|error| KernelError::Backend(error.to_string()))
                 }
@@ -400,6 +644,13 @@ impl NativeEngine {
                             "workspace writes are disabled by Mahayana policy".into(),
                         ));
                     }
+                    self.apply_hooks(
+                        HookPoint::BeforeCheckpoint,
+                        "workspace_restore",
+                        None,
+                        operation_id,
+                        &events,
+                    )?;
                     let root = workspace_root(session)?;
                     let checkpoint_id = string_arg(&call.arguments, "checkpoint_id")?;
                     let engine = WorkspaceEngine::open(root)
@@ -412,6 +663,13 @@ impl NativeEngine {
                         checkpoint_id: safety.id,
                         label: safety.label,
                     })?;
+                    self.apply_hooks(
+                        HookPoint::AfterCheckpoint,
+                        "workspace_restore",
+                        None,
+                        operation_id,
+                        &events,
+                    )?;
                     let restored = engine
                         .restore_checkpoint(checkpoint_id)
                         .map_err(|error| KernelError::Backend(error.to_string()))?;
@@ -564,7 +822,7 @@ impl NativeEngine {
                         task_id
                     };
                     let result = self
-                        .run_subagent(goal, interrupted, Arc::clone(&events), operation_id)
+                        .run_subagent(goal, control, Arc::clone(&events), operation_id)
                         .await;
                     match result {
                         Ok(text) => {
@@ -639,14 +897,16 @@ impl NativeEngine {
     async fn run_subagent(
         &self,
         goal: &str,
-        interrupted: &AtomicBool,
+        control: &OperationControl,
         events: SharedKernelEventSink,
         operation_id: &OperationId,
     ) -> Result<String, KernelError> {
-        ensure_not_interrupted(interrupted)?;
+        ensure_operation_active(control)?;
         let collector = Arc::new(ModelCollector::default());
         let sink: SharedModelEventSink = collector.clone();
-        self.model
+        let started = Instant::now();
+        let inference = self
+            .model
             .infer(
                 ModelRequest {
                     model: self.config.model.clone(),
@@ -657,9 +917,11 @@ impl NativeEngine {
                 },
                 sink,
             )
-            .await
-            .map_err(model_error)?;
-        ensure_not_interrupted(interrupted)?;
+            .await;
+        self.telemetry
+            .model_finished(started.elapsed(), inference.is_ok());
+        inference.map_err(model_error)?;
+        ensure_operation_active(control)?;
         if let Some(usage) = collector.usage()? {
             events.emit(KernelEvent::UsageUpdated {
                 operation_id: operation_id.clone(),
@@ -677,60 +939,210 @@ impl NativeEngine {
 
     async fn authorize_tool(
         &self,
+        session: &mut NativeSession,
         operation_id: &OperationId,
-        tool: &str,
+        call: &FunctionCall,
         risk: RiskLevel,
         policy: &ExecutionPolicy,
         events: SharedKernelEventSink,
     ) -> Result<(), KernelError> {
-        if matches!(risk, RiskLevel::WorkspaceWrite) && !policy.allow_workspace_writes {
-            return Err(KernelError::PolicyDenied(format!(
-                "{tool} requires workspace writes"
-            )));
-        }
-        if matches!(risk, RiskLevel::SystemWrite | RiskLevel::ExternalSideEffect)
-            && !policy.allow_process
-            && matches!(tool, "process_exec")
-        {
-            return Err(KernelError::PolicyDenied(format!(
-                "{tool} requires process execution"
-            )));
-        }
-
-        let above_unattended = risk_score(risk) > risk_score(policy.max_unattended_risk);
-        let needs_approval = match policy.approval_mode {
-            ApprovalMode::Never => {
-                if above_unattended {
-                    return Err(KernelError::PolicyDenied(format!(
-                        "{tool} exceeds unattended risk policy"
-                    )));
-                }
-                false
+        let key = PermissionKey::new(tool_capability(&call.name), permission_target(call))
+            .map_err(|error| KernelError::Backend(error.to_string()))?;
+        match session.permissions.evaluate(policy, &key, risk) {
+            PermissionDecision::Allow => return Ok(()),
+            PermissionDecision::Deny => {
+                return Err(KernelError::PolicyDenied(format!(
+                    "{} is denied for {}",
+                    call.name, key.target
+                )));
             }
-            ApprovalMode::OnRisk => above_unattended,
-            ApprovalMode::Always => true,
-        };
-        if !needs_approval {
-            return Ok(());
+            PermissionDecision::Ask => {}
         }
 
         let approval_id = format!("approval:{}", Uuid::new_v4());
+        let requested_at_ms = now_ms();
         let (sender, receiver) = oneshot::channel();
         self.approvals
             .lock()
             .map_err(|_| KernelError::Backend("approval registry poisoned".into()))?
-            .insert(approval_id.clone(), ApprovalWaiter { sender });
+            .insert(
+                approval_id.clone(),
+                ApprovalWaiter {
+                    operation_id: operation_id.as_str().to_owned(),
+                    sender,
+                },
+            );
+        self.telemetry.approval_requested();
         events.emit(KernelEvent::ApprovalRequested {
             operation_id: operation_id.clone(),
             approval_id: approval_id.clone(),
-            title: format!("Allow {tool}"),
+            title: format!("Allow {}", call.name),
             risk,
-            details: json!({"tool": tool, "engine": "mahayana-native"}),
+            details: json!({
+                "tool": call.name,
+                "capability": format!("{:?}", key.capability),
+                "target": key.target,
+                "engine": "mahayana-native"
+            }),
         })?;
-        match receiver.await {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(KernelError::PolicyDenied(format!("user declined {tool}"))),
-            Err(_) => Err(KernelError::ApprovalNotFound(approval_id)),
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(self.config.approval_timeout_ms),
+            receiver,
+        )
+        .await;
+        let resolved_at_ms = now_ms();
+        let (outcome, memory) = match result {
+            Ok(Ok(resolution)) => {
+                let memory = permission_memory_from_metadata(&resolution.metadata)?;
+                if resolution.approved {
+                    self.telemetry.approval_approved();
+                    (ApprovalOutcome::Approved, memory)
+                } else {
+                    self.telemetry.approval_rejected();
+                    (ApprovalOutcome::Rejected, memory)
+                }
+            }
+            Ok(Err(_)) => {
+                self.telemetry.approval_interrupted();
+                (ApprovalOutcome::Interrupted, None)
+            }
+            Err(_) => {
+                self.approvals
+                    .lock()
+                    .map_err(|_| KernelError::Backend("approval registry poisoned".into()))?
+                    .remove(&approval_id);
+                self.telemetry.approval_timed_out();
+                (ApprovalOutcome::TimedOut, None)
+            }
+        };
+
+        let record = ApprovalRecord::new(
+            approval_id,
+            key,
+            risk,
+            requested_at_ms,
+            resolved_at_ms,
+            outcome,
+            memory,
+        )
+        .map_err(|error| KernelError::Backend(error.to_string()))?;
+        let decision = {
+            let NativeSession {
+                approvals,
+                permissions,
+                ..
+            } = session;
+            approvals
+                .record(record, permissions)
+                .map_err(|error| KernelError::Backend(error.to_string()))?
+        };
+        if decision == PermissionDecision::Allow {
+            Ok(())
+        } else {
+            Err(KernelError::PolicyDenied(format!(
+                "approval did not allow {}",
+                call.name
+            )))
+        }
+    }
+
+    fn start_attempt(
+        session: &mut NativeSession,
+        operation_id: &OperationId,
+        prompt_id: &str,
+    ) -> String {
+        let id = format!("native-attempt:{}", Uuid::new_v4());
+        session.attempts.push(OperationAttempt {
+            id: id.clone(),
+            operation_id: operation_id.as_str().to_owned(),
+            prompt_id: prompt_id.to_owned(),
+            started_at_ms: now_ms(),
+            finished_at_ms: None,
+            state: OperationAttemptState::Running,
+        });
+        id
+    }
+
+    fn finish_attempt(session: &mut NativeSession, id: &str, state: OperationAttemptState) {
+        if let Some(attempt) = session.attempts.iter_mut().find(|attempt| attempt.id == id) {
+            attempt.finished_at_ms = Some(now_ms());
+            attempt.state = state;
+        }
+    }
+
+    async fn execute_active_prompt(
+        &self,
+        session: &mut NativeSession,
+        operation_id: &OperationId,
+        prompt: PromptEntry,
+        append_user_prompt: bool,
+        policy: &ExecutionPolicy,
+        control: &OperationControl,
+        events: SharedKernelEventSink,
+    ) -> Result<(), KernelError> {
+        let attempt_id = Self::start_attempt(session, operation_id, &prompt.id);
+        let result = self
+            .run_prompt(
+                session,
+                operation_id,
+                prompt.text.clone(),
+                append_user_prompt,
+                policy,
+                control,
+                Arc::clone(&events),
+            )
+            .await;
+        if control.suspended.load(Ordering::SeqCst) {
+            Self::finish_attempt(session, &attempt_id, OperationAttemptState::Suspended);
+            self.telemetry.operation_suspended();
+            events.emit(KernelEvent::Activity {
+                operation_id: operation_id.clone(),
+                kind: "operation_suspended".into(),
+                title: "Mahayana operation suspended".into(),
+                detail: None,
+                metadata: json!({"promptId": prompt.id}),
+            })?;
+            return Ok(());
+        }
+        match result {
+            Ok(_) => {
+                session
+                    .prompt_queue
+                    .complete(&prompt.id)
+                    .map_err(|error| KernelError::Backend(error.to_string()))?;
+                session.active_prompt = None;
+                Self::finish_attempt(session, &attempt_id, OperationAttemptState::Completed);
+                self.telemetry.operation_completed();
+                events.emit(KernelEvent::OperationCompleted {
+                    operation_id: operation_id.clone(),
+                })?;
+                Ok(())
+            }
+            Err(error) => {
+                session
+                    .prompt_queue
+                    .cancel(&prompt.id)
+                    .map_err(|queue_error| KernelError::Backend(queue_error.to_string()))?;
+                session.active_prompt = None;
+                let interrupted = control.interrupted.load(Ordering::SeqCst);
+                Self::finish_attempt(
+                    session,
+                    &attempt_id,
+                    if interrupted {
+                        OperationAttemptState::Interrupted
+                    } else {
+                        OperationAttemptState::Failed
+                    },
+                );
+                self.telemetry.operation_failed();
+                events.emit(KernelEvent::OperationFailed {
+                    operation_id: operation_id.clone(),
+                    message: error.to_string(),
+                    retryable: interrupted,
+                })?;
+                Err(error)
+            }
         }
     }
 }
@@ -756,13 +1168,13 @@ impl EngineBackend for NativeEngine {
                     .map_err(|error| KernelError::Backend(error.to_string()))
             })
             .transpose()?;
-        if let Some(root) = workspace_root.as_deref() {
-            if !root.is_dir() {
-                return Err(KernelError::BackendUnavailable(format!(
-                    "workspace root is not a directory: {}",
-                    root.display()
-                )));
-            }
+        if let Some(root) = workspace_root.as_deref()
+            && !root.is_dir()
+        {
+            return Err(KernelError::BackendUnavailable(format!(
+                "workspace root is not a directory: {}",
+                root.display()
+            )));
         }
         let session_id = SessionId::new();
         self.sessions
@@ -774,8 +1186,14 @@ impl EngineBackend for NativeEngine {
                     workspace_root,
                     history: Vec::new(),
                     prompt_queue: PromptQueue::default(),
+                    active_prompt: None,
+                    permissions: PermissionLedger::default(),
+                    approvals: ApprovalLedger::default(),
+                    loop_state: LoopState::default(),
+                    attempts: Vec::new(),
                 })),
             );
+        self.telemetry.session_opened();
         Ok(session_id)
     }
 
@@ -793,9 +1211,15 @@ impl EngineBackend for NativeEngine {
             ));
         }
         let session = self.session(&request.session_id)?;
-        let interrupted = self.register_operation(&request.operation_id)?;
+        let control = self.register_operation(&request.operation_id)?;
+        self.telemetry.operation_started();
         let result = async {
             let mut session = session.lock().await;
+            if session.active_prompt.is_some() {
+                return Err(KernelError::Backend(
+                    "session already has a suspended or running prompt; resume it before enqueuing another user prompt".into(),
+                ));
+            }
             let prompt_id = session
                 .prompt_queue
                 .enqueue(
@@ -811,29 +1235,24 @@ impl EngineBackend for NativeEngine {
                 .map_err(|error| KernelError::Backend(error.to_string()))?;
             let prompt = session
                 .prompt_queue
-                .next()
+                .take_next()
                 .ok_or_else(|| KernelError::Backend("prompt queue unexpectedly empty".into()))?;
-            let result = self
-                .run_prompt(
-                    &mut session,
-                    &request.operation_id,
-                    prompt.text,
-                    &request.policy,
-                    interrupted.as_ref(),
-                    events,
-                )
-                .await;
-            match &result {
-                Ok(_) => session
-                    .prompt_queue
-                    .complete(&prompt_id)
-                    .map_err(|error| KernelError::Backend(error.to_string()))?,
-                Err(_) => session
-                    .prompt_queue
-                    .cancel(&prompt_id)
-                    .map_err(|error| KernelError::Backend(error.to_string()))?,
+            if prompt.id != prompt_id {
+                return Err(KernelError::Backend(
+                    "prompt queue selected a different blocking prompt".into(),
+                ));
             }
-            result.map(|_| ())
+            session.active_prompt = Some(prompt.clone());
+            self.execute_active_prompt(
+                &mut session,
+                &request.operation_id,
+                prompt,
+                true,
+                &request.policy,
+                control.as_ref(),
+                events,
+            )
+            .await
         }
         .await;
         self.finish_operation(&request.operation_id)?;
@@ -841,14 +1260,15 @@ impl EngineBackend for NativeEngine {
     }
 
     async fn interrupt(&self, operation_id: &OperationId) -> Result<(), KernelError> {
-        let interrupted = self
+        let control = self
             .active_operations
             .lock()
             .map_err(|_| KernelError::Backend("native operation registry poisoned".into()))?
             .get(operation_id.as_str())
             .cloned()
             .ok_or_else(|| KernelError::OperationNotFound(operation_id.as_str().to_string()))?;
-        interrupted.store(true, Ordering::SeqCst);
+        control.interrupted.store(true, Ordering::SeqCst);
+        self.cancel_operation_approvals(operation_id)?;
         Ok(())
     }
 
@@ -861,8 +1281,163 @@ impl EngineBackend for NativeEngine {
             .ok_or_else(|| KernelError::ApprovalNotFound(resolution.approval_id.clone()))?;
         waiter
             .sender
-            .send(resolution.approved)
-            .map_err(|_| KernelError::ApprovalNotFound(resolution.approval_id))
+            .send(resolution)
+            .map_err(|resolution| KernelError::ApprovalNotFound(resolution.approval_id))
+    }
+
+    async fn snapshot_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<KernelSessionSnapshot, KernelError> {
+        let session = self.session(session_id)?;
+        let session = session.lock().await.clone();
+        let state = NativeSnapshotState {
+            session,
+            memory: self
+                .memory
+                .lock()
+                .map_err(|_| KernelError::Backend("memory store poisoned".into()))?
+                .clone(),
+            workflows: self
+                .workflows
+                .lock()
+                .map_err(|_| KernelError::Backend("workflow store poisoned".into()))?
+                .clone(),
+            subagents: self
+                .subagents
+                .lock()
+                .map_err(|_| KernelError::Backend("subagent scheduler poisoned".into()))?
+                .clone(),
+            hooks: self
+                .hooks
+                .lock()
+                .map_err(|_| KernelError::Backend("hook registry poisoned".into()))?
+                .clone(),
+        };
+        Ok(KernelSessionSnapshot {
+            session_id: session_id.clone(),
+            backend_id: "mahayana-native".into(),
+            state: serde_json::to_value(state)
+                .map_err(|error| KernelError::Backend(error.to_string()))?,
+            metadata: json!({"snapshotVersion": 1}),
+        })
+    }
+
+    async fn restore_session(
+        &self,
+        snapshot: KernelSessionSnapshot,
+    ) -> Result<SessionId, KernelError> {
+        if snapshot.backend_id != "mahayana-native" {
+            return Err(KernelError::BackendUnavailable(format!(
+                "snapshot belongs to backend {}",
+                snapshot.backend_id
+            )));
+        }
+        let state: NativeSnapshotState = serde_json::from_value(snapshot.state)
+            .map_err(|error| KernelError::Backend(format!("invalid native snapshot: {error}")))?;
+        *self
+            .memory
+            .lock()
+            .map_err(|_| KernelError::Backend("memory store poisoned".into()))? = state.memory;
+        *self
+            .workflows
+            .lock()
+            .map_err(|_| KernelError::Backend("workflow store poisoned".into()))? = state.workflows;
+        *self
+            .subagents
+            .lock()
+            .map_err(|_| KernelError::Backend("subagent scheduler poisoned".into()))? =
+            state.subagents;
+        *self
+            .hooks
+            .lock()
+            .map_err(|_| KernelError::Backend("hook registry poisoned".into()))? = state.hooks;
+        self.sessions
+            .lock()
+            .map_err(|_| KernelError::Backend("native session registry poisoned".into()))?
+            .insert(
+                snapshot.session_id.as_str().to_owned(),
+                Arc::new(AsyncMutex::new(state.session)),
+            );
+        Ok(snapshot.session_id)
+    }
+
+    async fn suspend_operation(&self, request: SuspendOperationRequest) -> Result<(), KernelError> {
+        let control = self
+            .active_operations
+            .lock()
+            .map_err(|_| KernelError::Backend("native operation registry poisoned".into()))?
+            .get(request.operation_id.as_str())
+            .cloned()
+            .ok_or_else(|| KernelError::OperationNotFound(request.operation_id.as_str().into()))?;
+        let has_running_descendants = self
+            .subagents
+            .lock()
+            .map_err(|_| KernelError::Backend("subagent scheduler poisoned".into()))?
+            .running_count()
+            > 0;
+        let cascade = request
+            .metadata
+            .get("cascade")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if has_running_descendants && !cascade {
+            return Err(KernelError::PolicyDenied(
+                "cannot suspend operation while live subagents exist without cascade=true".into(),
+            ));
+        }
+        control.suspended.store(true, Ordering::SeqCst);
+        self.cancel_operation_approvals(&request.operation_id)?;
+        Ok(())
+    }
+
+    async fn resume_operation(
+        &self,
+        request: ResumeOperationRequest,
+        events: SharedKernelEventSink,
+    ) -> Result<(), KernelError> {
+        if !self
+            .capabilities()
+            .supports_all(&request.required_capabilities)
+        {
+            return Err(KernelError::CapabilityUnavailable(
+                "native engine does not satisfy the requested capability set".into(),
+            ));
+        }
+        let session = self.session(&request.session_id)?;
+        let control = self.register_operation(&request.operation_id)?;
+        self.telemetry.operation_started();
+        self.telemetry.operation_resumed();
+        let result = async {
+            let mut session = session.lock().await;
+            let prompt = session.active_prompt.clone().ok_or_else(|| {
+                KernelError::OperationNotFound(format!(
+                    "{} has no suspended prompt in session {}",
+                    request.operation_id.as_str(),
+                    request.session_id.as_str()
+                ))
+            })?;
+            events.emit(KernelEvent::Activity {
+                operation_id: request.operation_id.clone(),
+                kind: "operation_resumed".into(),
+                title: "Mahayana operation resumed".into(),
+                detail: None,
+                metadata: json!({"promptId": prompt.id}),
+            })?;
+            self.execute_active_prompt(
+                &mut session,
+                &request.operation_id,
+                prompt,
+                false,
+                &request.policy,
+                control.as_ref(),
+                events,
+            )
+            .await
+        }
+        .await;
+        self.finish_operation(&request.operation_id)?;
+        result
     }
 }
 
@@ -1151,20 +1726,80 @@ fn tool_risk(tool: &str) -> RiskLevel {
     }
 }
 
-fn risk_score(risk: RiskLevel) -> u8 {
-    match risk {
-        RiskLevel::ReadOnly => 0,
-        RiskLevel::WorkspaceWrite => 1,
-        RiskLevel::SystemWrite => 2,
-        RiskLevel::ExternalSideEffect => 3,
+fn tool_capability(tool: &str) -> Capability {
+    match tool {
+        "workspace_read" | "workspace_search" | "codebase_graph" | "code_symbols" => {
+            Capability::FilesystemRead
+        }
+        "workspace_write" | "workspace_restore" => Capability::FilesystemWrite,
+        "workspace_checkpoint" => Capability::Checkpoint,
+        "workspace_worktree" => Capability::Worktree,
+        "memory_put" | "memory_get" | "memory_search" => Capability::Memory,
+        "workflow_create" | "workflow_status" => Capability::Workflow,
+        "subagent_run" => Capability::Subagent,
+        "process_exec" => Capability::Process,
+        "git_status" | "git_diff" => Capability::Git,
+        _ => Capability::ToolProtocol,
     }
 }
 
-fn ensure_not_interrupted(interrupted: &AtomicBool) -> Result<(), KernelError> {
-    if interrupted.load(Ordering::SeqCst) {
+fn permission_target(call: &FunctionCall) -> String {
+    let target = match call.name.as_str() {
+        "workspace_read" | "workspace_write" => call.arguments.get("path"),
+        "workspace_restore" | "workspace_worktree" => call.arguments.get("checkpoint_id"),
+        "memory_get" | "memory_put" => call.arguments.get("key"),
+        "workflow_status" => call.arguments.get("workflow_id"),
+        "process_exec" => call.arguments.get("program"),
+        _ => None,
+    };
+    target
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!("{}:{value}", call.name))
+        .unwrap_or_else(|| call.name.clone())
+}
+
+fn tool_fingerprint(call: &FunctionCall) -> String {
+    format!("{}:{}", call.name, call.arguments)
+}
+
+fn permission_memory_from_metadata(
+    metadata: &Value,
+) -> Result<Option<PermissionMemory>, KernelError> {
+    let Some(value) = metadata
+        .get("permissionMemory")
+        .or_else(|| metadata.get("permission_memory"))
+        .and_then(Value::as_str)
+    else {
+        return Ok(None);
+    };
+    match value {
+        "allow_for_session" => Ok(Some(PermissionMemory::AllowForSession)),
+        "deny_permanently" => Ok(Some(PermissionMemory::DenyPermanently)),
+        "clear" => Ok(Some(PermissionMemory::Clear)),
+        other => Err(KernelError::Backend(format!(
+            "unknown permission memory directive: {other}"
+        ))),
+    }
+}
+
+fn ensure_operation_active(control: &OperationControl) -> Result<(), KernelError> {
+    if control.suspended.load(Ordering::SeqCst) {
+        return Err(KernelError::Backend("operation suspended".into()));
+    }
+    if control.interrupted.load(Ordering::SeqCst) {
         return Err(KernelError::Backend("operation interrupted".into()));
     }
     Ok(())
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX)
 }
 
 fn model_error(error: ModelError) -> KernelError {
@@ -1338,7 +1973,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completes_direct_model_response() {
+    async fn completes_direct_model_response_and_records_telemetry() {
         let model = Arc::new(FakeModel {
             outputs: Mutex::new(VecDeque::from([json!({
                 "output": [{"type":"message", "content":[{"type":"output_text", "text":"done"}]}]
@@ -1381,6 +2016,11 @@ mod tests {
                     KernelEvent::MessageCompleted { text, .. } if text == "done"
                 ))
         );
+        let metrics = engine.metrics_snapshot();
+        assert_eq!(metrics.sessions_opened, 1);
+        assert_eq!(metrics.operations_started, 1);
+        assert_eq!(metrics.operations_completed, 1);
+        assert_eq!(metrics.model_calls, 1);
     }
 
     #[tokio::test]
@@ -1445,5 +2085,106 @@ mod tests {
                 .any(|event| matches!(event, KernelEvent::CheckpointCreated { .. }))
         );
         std::fs::remove_dir_all(workspace).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn approval_timeout_is_fail_closed() {
+        let workspace = temp_workspace();
+        let call = json!({
+            "output": [{
+                "type":"function_call",
+                "call_id":"call-timeout",
+                "name":"workspace_write",
+                "arguments":"{\"path\":\"blocked.txt\",\"content\":\"no\"}"
+            }]
+        });
+        let done = json!({
+            "output": [{"type":"message", "content":[{"type":"output_text", "text":"denied"}]}]
+        });
+        let model = Arc::new(FakeModel {
+            outputs: Mutex::new(VecDeque::from([call, done])),
+        });
+        let mut config = NativeEngineConfig::desktop("model");
+        config.approval_timeout_ms = 1;
+        let engine = NativeEngine::new(model, config).expect("create engine");
+        let session = engine
+            .open_session(OpenSessionRequest {
+                profile: mahayana_kernel::RuntimeProfile::DesktopFull,
+                workspace_root: Some(workspace.to_string_lossy().to_string()),
+                model: None,
+                metadata: Value::Null,
+            })
+            .await
+            .expect("open session");
+        engine
+            .run(
+                RunRequest {
+                    session_id: session,
+                    operation_id: OperationId::new(),
+                    input: "try write".into(),
+                    policy: ExecutionPolicy::interactive_default(),
+                    required_capabilities: CapabilitySet::new([Capability::FilesystemWrite]),
+                    metadata: Value::Null,
+                },
+                Arc::new(Events::default()),
+            )
+            .await
+            .expect("model can recover from denied tool");
+        assert!(!workspace.join("blocked.txt").exists());
+        assert_eq!(engine.metrics_snapshot().approvals_timed_out, 1);
+        std::fs::remove_dir_all(workspace).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn snapshot_round_trip_preserves_native_orchestration_state() {
+        let model = Arc::new(FakeModel {
+            outputs: Mutex::new(VecDeque::from([json!({
+                "output": [{"type":"message", "content":[{"type":"output_text", "text":"remembered"}]}]
+            })])),
+        });
+        let engine =
+            NativeEngine::new(model, NativeEngineConfig::embedded("model")).expect("create engine");
+        let session = engine
+            .open_session(OpenSessionRequest {
+                profile: mahayana_kernel::RuntimeProfile::Headless,
+                workspace_root: None,
+                model: None,
+                metadata: Value::Null,
+            })
+            .await
+            .expect("open session");
+        engine
+            .run(
+                RunRequest {
+                    session_id: session.clone(),
+                    operation_id: OperationId::new(),
+                    input: "persist me".into(),
+                    policy: ExecutionPolicy::default(),
+                    required_capabilities: CapabilitySet::new([Capability::Model]),
+                    metadata: Value::Null,
+                },
+                Arc::new(Events::default()),
+            )
+            .await
+            .expect("run");
+        let snapshot = engine
+            .snapshot_session(&session)
+            .await
+            .expect("snapshot native session");
+        let history = snapshot
+            .state
+            .pointer("/session/history")
+            .and_then(Value::as_array)
+            .expect("history in snapshot");
+        assert!(
+            history
+                .iter()
+                .any(|item| item.to_string().contains("persist me"))
+        );
+        let restored = engine
+            .restore_session(snapshot)
+            .await
+            .expect("restore snapshot");
+        assert_eq!(restored, session);
     }
 }

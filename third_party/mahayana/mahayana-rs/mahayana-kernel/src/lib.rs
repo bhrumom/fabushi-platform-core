@@ -4,9 +4,12 @@
 //! depend on these contracts instead of Codex, Grok Build, or model-provider
 //! protocol types.  External engines are adapters behind [`EngineBackend`].
 
+pub mod extension;
 pub mod resilience;
 pub mod sandbox;
 pub mod supervisor;
+pub mod surface;
+pub mod telemetry;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -78,6 +81,8 @@ pub enum Capability {
     Mcp,
     Skills,
     Plugins,
+    Connectors,
+    MiniApps,
     Memory,
     Workspace,
     Checkpoint,
@@ -211,6 +216,40 @@ pub struct RunRequest {
     pub metadata: Value,
 }
 
+/// Opaque, provider-neutral persisted state for one Mahayana session.
+///
+/// `state` is owned and interpreted by the selected backend.  Product callers
+/// only persist/transport it together with the Mahayana session identity and
+/// never need to deserialize a vendor product type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSnapshot {
+    pub session_id: SessionId,
+    pub backend_id: String,
+    pub state: Value,
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuspendOperationRequest {
+    pub operation_id: OperationId,
+    pub reason: Option<String>,
+    pub metadata: Value,
+}
+
+/// Resume an already-enqueued operation after cooperative suspension.
+///
+/// Unlike [`RunRequest`], this request intentionally carries no user `input`:
+/// the backend must reclaim the existing pending prompt and must not duplicate
+/// user content when an unfinished operation resumes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResumeOperationRequest {
+    pub session_id: SessionId,
+    pub operation_id: OperationId,
+    pub policy: ExecutionPolicy,
+    pub required_capabilities: CapabilitySet,
+    pub metadata: Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalResolution {
     pub approval_id: String,
@@ -303,6 +342,40 @@ pub trait EngineBackend: Send + Sync {
     async fn interrupt(&self, operation_id: &OperationId) -> Result<(), KernelError>;
 
     async fn resolve_approval(&self, resolution: ApprovalResolution) -> Result<(), KernelError>;
+
+    async fn snapshot_session(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<SessionSnapshot, KernelError> {
+        Err(KernelError::Unsupported(
+            "session snapshots are not implemented by this backend".to_owned(),
+        ))
+    }
+
+    async fn restore_session(&self, _snapshot: SessionSnapshot) -> Result<SessionId, KernelError> {
+        Err(KernelError::Unsupported(
+            "session restore is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    async fn suspend_operation(
+        &self,
+        _request: SuspendOperationRequest,
+    ) -> Result<(), KernelError> {
+        Err(KernelError::Unsupported(
+            "operation suspension is not implemented by this backend".to_owned(),
+        ))
+    }
+
+    async fn resume_operation(
+        &self,
+        _request: ResumeOperationRequest,
+        _events: SharedKernelEventSink,
+    ) -> Result<(), KernelError> {
+        Err(KernelError::Unsupported(
+            "operation resume is not implemented by this backend".to_owned(),
+        ))
+    }
 }
 
 /// Product-owned backend registry and capability router.
@@ -390,6 +463,8 @@ pub enum KernelError {
     PolicyDenied(String),
     #[error("backend unavailable: {0}")]
     BackendUnavailable(String),
+    #[error("unsupported backend operation: {0}")]
+    Unsupported(String),
     #[error("backend failed: {0}")]
     Backend(String),
     #[error("event consumer is closed")]
@@ -398,7 +473,7 @@ pub enum KernelError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Capability, CapabilitySet, ExecutionPolicy, SessionId};
+    use super::{Capability, CapabilitySet, ExecutionPolicy, ResumeOperationRequest, SessionId};
 
     #[test]
     fn identifiers_are_product_owned_and_unique() {
@@ -419,5 +494,18 @@ mod tests {
     #[test]
     fn mobile_policy_disables_process_execution() {
         assert!(!ExecutionPolicy::mobile_default().allow_process);
+    }
+
+    #[test]
+    fn resume_contract_does_not_duplicate_user_input() {
+        let request = ResumeOperationRequest {
+            session_id: SessionId::from_string("session-1"),
+            operation_id: super::OperationId::from_string("operation-1"),
+            policy: ExecutionPolicy::default(),
+            required_capabilities: CapabilitySet::empty(),
+            metadata: serde_json::json!({}),
+        };
+        let value = serde_json::to_value(request).expect("serialize resume request");
+        assert!(value.get("input").is_none());
     }
 }

@@ -155,10 +155,8 @@ fn redacted_http_error(error: ureq::Error) -> ModelError {
 }
 
 pub fn extract_output_text(payload: &Value) -> Option<String> {
-    if let Some(text) = payload
-        .get("output_text")
-        .and_then(Value::as_str)
-        .filter(|text| !text.is_empty())
+    if let Some(text) = payload.get("output_text").and_then(Value::as_str)
+        && !text.is_empty()
     {
         return Some(text.to_string());
     }

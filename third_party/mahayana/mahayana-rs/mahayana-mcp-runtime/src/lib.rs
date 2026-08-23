@@ -4,6 +4,8 @@
 //! of exposing Codex app-server types. It supports local stdio plugins and
 //! Streamable HTTP/JSON endpoints used by desktop, mobile, and Web hosts.
 
+pub mod status;
+
 use mahayana_platform_core::HostPlatform;
 use serde::Deserialize;
 use serde_json::{Value, json};

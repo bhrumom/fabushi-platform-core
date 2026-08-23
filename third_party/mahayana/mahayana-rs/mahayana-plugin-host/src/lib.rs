@@ -1,28 +1,82 @@
-//! Mahayana policy layered over Codex plugin discovery and MCP routing.
+//! Mahayana-owned plugin manifest, runtime selection and command routing.
 
-use codex_app_server_protocol::PluginRuntimePlatform;
-use codex_app_server_protocol::PluginRuntimeVariant;
-use codex_core_plugins::manifest::load_plugin_manifest;
 use mahayana_platform_core::CommandDeclaration;
 use mahayana_platform_core::HostPlatform;
 use mahayana_platform_core::MahayanaPluginManifest;
 use mahayana_platform_core::ManifestError;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyPluginManifest {
+    pub name: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default, rename = "mcpServers")]
+    pub mcp_servers: Option<String>,
+    #[serde(default, rename = "runtimeVariants")]
+    pub runtime_variants: Vec<PluginRuntimeVariant>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginRuntimeVariant {
+    pub id: String,
+    pub server: String,
+    #[serde(default)]
+    pub platforms: Vec<HostPlatform>,
+    #[serde(default)]
+    pub priority: i64,
+}
 
 #[derive(Debug, Clone)]
 pub struct LocalPlugin {
-    pub codex: codex_core_plugins::manifest::PluginManifest,
+    /// Mahayana-owned compatibility DTO for the historical plugin manifest.
+    /// The file name may remain `.codex-plugin/plugin.json` for installed
+    /// packages, but no Codex runtime or protocol type crosses this boundary.
+    pub legacy: LegacyPluginManifest,
+    /// Transitional field alias for CLI compatibility call sites. This is the
+    /// same Mahayana-owned DTO as `legacy`, not a Codex runtime/protocol type.
+    pub codex: LegacyPluginManifest,
     pub mahayana: Option<MahayanaPluginManifest>,
 }
 
 impl LocalPlugin {
     pub fn load(plugin_root: &Path) -> Result<Self, PluginHostError> {
-        let codex = load_plugin_manifest(plugin_root)
-            .ok_or_else(|| PluginHostError::InvalidCodexManifest(plugin_root.to_path_buf()))?;
+        let manifest_path = [
+            plugin_root.join(".mahayana-plugin/plugin.json"),
+            plugin_root.join(".codex-plugin/plugin.json"),
+        ]
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| PluginHostError::InvalidPluginManifest(plugin_root.to_path_buf()))?;
+        let source = fs::read_to_string(&manifest_path).map_err(|source| {
+            PluginHostError::ReadPluginManifest {
+                path: manifest_path.clone(),
+                source,
+            }
+        })?;
+        let legacy = serde_json::from_str::<LegacyPluginManifest>(&source).map_err(|source| {
+            PluginHostError::DecodePluginManifest {
+                path: manifest_path,
+                source,
+            }
+        })?;
+        if legacy.name.trim().is_empty() {
+            return Err(PluginHostError::InvalidPluginManifest(
+                plugin_root.to_path_buf(),
+            ));
+        }
         let mahayana = MahayanaPluginManifest::load(plugin_root)?;
-        Ok(Self { codex, mahayana })
+        Ok(Self {
+            codex: legacy.clone(),
+            legacy,
+            mahayana,
+        })
     }
 
     pub fn command(&self, name: &str) -> Option<&CommandDeclaration> {
@@ -57,16 +111,14 @@ pub fn select_runtime(
 }
 
 /// Selects the highest-priority runtime whose declared MCP server can be
-/// started by the current host. This lets packaged plugins prefer a bundled
-/// CLI while retaining their account-backed HTTP runtime as a compatibility
-/// fallback when an older/development install does not contain the binary.
+/// started by the current host. Runtime selection is fully Mahayana-owned;
+/// legacy manifest JSON is treated only as an input compatibility format.
 pub fn select_runtime_with_availability(
     platform: HostPlatform,
     mcp_servers: &[String],
     variants: &[PluginRuntimeVariant],
     mut is_available: impl FnMut(&str) -> bool,
 ) -> Result<SelectedRuntime, PluginHostError> {
-    let platform = app_server_platform(platform);
     let mut candidates = variants
         .iter()
         .filter(|variant| variant.platforms.contains(&platform))
@@ -115,15 +167,6 @@ pub fn select_runtime_with_availability(
             .map(|variant| variant.server.clone())
             .collect(),
     })
-}
-
-fn app_server_platform(platform: HostPlatform) -> PluginRuntimePlatform {
-    match platform {
-        HostPlatform::Cli => PluginRuntimePlatform::Cli,
-        HostPlatform::Desktop => PluginRuntimePlatform::Desktop,
-        HostPlatform::Mobile => PluginRuntimePlatform::Mobile,
-        HostPlatform::Web => PluginRuntimePlatform::Web,
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -186,17 +229,29 @@ pub fn command_index(
 
 #[derive(Debug, thiserror::Error)]
 pub enum PluginHostError {
-    #[error("Codex plugin manifest is missing or invalid at {0}")]
-    InvalidCodexManifest(std::path::PathBuf),
+    #[error("plugin manifest is missing or invalid at {0}")]
+    InvalidPluginManifest(PathBuf),
+    #[error("failed to read plugin manifest {path}: {source}")]
+    ReadPluginManifest {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to decode plugin manifest {path}: {source}")]
+    DecodePluginManifest {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
     #[error(transparent)]
     MahayanaManifest(#[from] ManifestError),
     #[error("selected runtime references undeclared MCP server {0}")]
     MissingRuntimeServer(String),
     #[error("plugin has no MCP runtime for {0:?}")]
-    NoRuntimeForPlatform(PluginRuntimePlatform),
+    NoRuntimeForPlatform(HostPlatform),
     #[error("plugin MCP runtimes for {platform:?} are unavailable: {servers:?}")]
     RuntimeUnavailable {
-        platform: PluginRuntimePlatform,
+        platform: HostPlatform,
         servers: Vec<String>,
     },
     #[error("plugin has multiple MCP servers but no runtimeVariants selection")]

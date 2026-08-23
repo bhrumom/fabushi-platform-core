@@ -4,9 +4,9 @@ format=mahayana-source-lock-v1
 repository=https://github.com/openai/codex.git
 license=Apache-2.0
 role=compatibility-adapter-and-reference
-reviewed_commit=970b7f2d6c78fc9a4438841d4688e5547ca9dd07
+reviewed_commit=343074d4207d572809bd8cea15f4be1d09d98e0b
 reviewed_at=2026-08-22
-concepts=strict-approval-outcomes,app-server-threads,sandbox-policy,mcp-connectors,skills,model-providers
+concepts=strict-approval-outcomes,app-server-threads,unfinished-turn-suspension,sandbox-policy,granular-sandbox-approvals,mcp-connectors,mcp-runtime-status,skills,model-providers
 boundary=../codex-rs,mahayana-agent-codex,mahayana-agent-kernel-bridge
 
 [source.grok-build]
@@ -15,7 +15,7 @@ license=Apache-2.0
 role=design-reference
 reviewed_commit=19d42e35c07a9c9244f03f6df0c4c353f970d4f9
 reviewed_at=2026-08-22
-concepts=objective-oracles,attempt-journal,checkpoint-rewind,managed-worktrees,permission-memory,loop-protection,paused-workflows,subagent-guardrails,headless-acp,hooks-plugins,active-foreign-sessions,session-search,circuit-breaker
+concepts=objective-oracles,attempt-journal,checkpoint-rewind,managed-worktrees,permission-memory,loop-protection,paused-workflows,subagent-guardrails,headless-acp,hooks-plugins,active-foreign-sessions,session-search,circuit-breaker,goal-queue-steering
 boundary=mahayana-owned-clean-contracts
 
 [product.mahayana]

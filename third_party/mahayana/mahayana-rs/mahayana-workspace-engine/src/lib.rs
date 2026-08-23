@@ -11,10 +11,12 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const STATE_DIRECTORY: &str = ".mahayana/workspace-engine";
+const EXTERNAL_WORKTREE_DIRECTORY: &str = ".mahayana-worktrees";
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -84,6 +86,10 @@ pub struct WorktreeDescriptor {
     pub path: String,
     pub created_at_ms: i64,
     pub source_checkpoint_id: Option<String>,
+    #[serde(default)]
+    pub git_managed: bool,
+    #[serde(default)]
+    pub source_revision: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -200,13 +206,65 @@ impl WorkspaceEngine {
         Ok(manifest)
     }
 
+    /// Restore the exact managed workspace file set captured by a checkpoint.
+    ///
+    /// Generated/dependency/state directories and symbolic links are outside
+    /// the managed set. Files created after the checkpoint are removed only
+    /// when they are ordinary files collected under the same safe traversal.
     pub fn restore_checkpoint(&self, id: &str) -> Result<CheckpointManifest, WorkspaceError> {
         let manifest = self.read_checkpoint(id)?;
         let files_dir = self.checkpoint_dir(id).join("files");
+        let expected = manifest
+            .files
+            .iter()
+            .map(|snapshot| snapshot.path.clone())
+            .collect::<BTreeSet<_>>();
+        if expected.len() != manifest.files.len() {
+            return Err(WorkspaceError::CheckpointCorrupt(
+                "checkpoint manifest contains duplicate file paths".into(),
+            ));
+        }
+
+        // Validate every source snapshot and every destination path before
+        // mutating the live workspace. A corrupt checkpoint must fail
+        // closed without leaving a partially restored tree behind.
+        let mut validated = Vec::with_capacity(manifest.files.len());
         for snapshot in &manifest.files {
             let relative = safe_relative(Path::new(&snapshot.path))?;
+            ensure_no_symlink_components(&files_dir, &relative)?;
+            ensure_no_symlink_components(&self.root, &relative)?;
             let source = files_dir.join(&relative);
-            let destination = self.root.join(&relative);
+            if !source.is_file() {
+                return Err(WorkspaceError::CheckpointCorrupt(format!(
+                    "missing checkpoint file: {}",
+                    snapshot.path
+                )));
+            }
+            let source_metadata =
+                fs::metadata(&source).map_err(|error| WorkspaceError::Io(error.to_string()))?;
+            if source_metadata.len() != snapshot.size || sha256_file(&source)? != snapshot.sha256 {
+                return Err(WorkspaceError::CheckpointCorrupt(format!(
+                    "checkpoint file failed size/hash validation: {}",
+                    snapshot.path
+                )));
+            }
+            validated.push((source, self.root.join(&relative)));
+        }
+
+        let mut removals = Vec::new();
+        for current in self.collect_files()? {
+            let relative = self.relative_path(&current)?;
+            let relative_string = path_string(&relative);
+            if !expected.contains(&relative_string) {
+                ensure_no_symlink_components(&self.root, &relative)?;
+                removals.push(current);
+            }
+        }
+
+        for current in removals {
+            fs::remove_file(&current).map_err(|error| WorkspaceError::Io(error.to_string()))?;
+        }
+        for (source, destination) in validated {
             if let Some(parent) = destination.parent() {
                 fs::create_dir_all(parent)
                     .map_err(|error| WorkspaceError::Io(error.to_string()))?;
@@ -214,6 +272,7 @@ impl WorkspaceEngine {
             fs::copy(&source, &destination)
                 .map_err(|error| WorkspaceError::Io(error.to_string()))?;
         }
+        self.remove_empty_managed_directories(&self.root)?;
         Ok(manifest)
     }
 
@@ -253,10 +312,43 @@ impl WorkspaceEngine {
         source_checkpoint_id: Option<&str>,
     ) -> Result<WorktreeDescriptor, WorkspaceError> {
         let id = generated_id("worktree");
+        if source_checkpoint_id.is_none()
+            && let Some(revision) = self.git_head_revision()?
+        {
+            let worktree_root = self.external_git_worktree_path(&id)?;
+            if let Some(parent) = worktree_root.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| WorkspaceError::Io(error.to_string()))?;
+            }
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(&self.root)
+                .args(["worktree", "add", "--detach"])
+                .arg(&worktree_root)
+                .arg(&revision)
+                .output()
+                .map_err(|error| WorkspaceError::Io(error.to_string()))?;
+            if !output.status.success() {
+                return Err(WorkspaceError::Git(format!(
+                    "git worktree add failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )));
+            }
+            let descriptor = WorktreeDescriptor {
+                id: id.clone(),
+                path: path_string(&worktree_root),
+                created_at_ms: now_ms(),
+                source_checkpoint_id: None,
+                git_managed: true,
+                source_revision: Some(revision),
+            };
+            write_json(&self.worktree_dir(&id).join("worktree.json"), &descriptor)?;
+            return Ok(descriptor);
+        }
+
         let worktree_root = self.worktree_dir(&id).join("workspace");
         fs::create_dir_all(&worktree_root)
             .map_err(|error| WorkspaceError::Io(error.to_string()))?;
-
         if let Some(checkpoint_id) = source_checkpoint_id {
             let checkpoint = self.read_checkpoint(checkpoint_id)?;
             let checkpoint_files = self.checkpoint_dir(checkpoint_id).join("files");
@@ -279,6 +371,8 @@ impl WorkspaceEngine {
             path: path_string(&worktree_root),
             created_at_ms: now_ms(),
             source_checkpoint_id: source_checkpoint_id.map(str::to_owned),
+            git_managed: false,
+            source_revision: None,
         };
         write_json(&self.worktree_dir(&id).join("worktree.json"), &descriptor)?;
         Ok(descriptor)
@@ -286,9 +380,45 @@ impl WorkspaceEngine {
 
     pub fn remove_worktree(&self, id: &str) -> Result<(), WorkspaceError> {
         validate_storage_id(id)?;
-        let directory = self.worktree_dir(id);
-        if directory.exists() {
-            fs::remove_dir_all(directory).map_err(|error| WorkspaceError::Io(error.to_string()))?;
+        let metadata_dir = self.worktree_dir(id);
+        let descriptor_path = metadata_dir.join("worktree.json");
+        if descriptor_path.is_file() {
+            let descriptor: WorktreeDescriptor = read_json(&descriptor_path)?;
+            let expected_path = if descriptor.git_managed {
+                self.external_git_worktree_path(id)?
+            } else {
+                metadata_dir.join("workspace")
+            };
+            if Path::new(&descriptor.path) != expected_path.as_path() {
+                return Err(WorkspaceError::WorktreeDescriptorMismatch(id.to_string()));
+            }
+            if descriptor.git_managed {
+                let output = Command::new("git")
+                    .arg("-C")
+                    .arg(&self.root)
+                    .args(["worktree", "remove", "--force"])
+                    .arg(&expected_path)
+                    .output()
+                    .map_err(|error| WorkspaceError::Io(error.to_string()))?;
+                if !output.status.success() && expected_path.exists() {
+                    return Err(WorkspaceError::Git(format!(
+                        "git worktree remove failed: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    )));
+                }
+                let _ = Command::new("git")
+                    .arg("-C")
+                    .arg(&self.root)
+                    .args(["worktree", "prune"])
+                    .status();
+            } else if expected_path.exists() {
+                fs::remove_dir_all(&expected_path)
+                    .map_err(|error| WorkspaceError::Io(error.to_string()))?;
+            }
+        }
+        if metadata_dir.exists() {
+            fs::remove_dir_all(metadata_dir)
+                .map_err(|error| WorkspaceError::Io(error.to_string()))?;
         }
         Ok(())
     }
@@ -429,11 +559,89 @@ impl WorkspaceEngine {
         Ok(())
     }
 
+    fn remove_empty_managed_directories(&self, directory: &Path) -> Result<bool, WorkspaceError> {
+        let mut empty = true;
+        for entry in
+            fs::read_dir(directory).map_err(|error| WorkspaceError::Io(error.to_string()))?
+        {
+            let entry = entry.map_err(|error| WorkspaceError::Io(error.to_string()))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|error| WorkspaceError::Io(error.to_string()))?;
+            if file_type.is_symlink() {
+                empty = false;
+                continue;
+            }
+            if file_type.is_dir() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if self.options.excluded_directories.contains(&name) {
+                    empty = false;
+                    continue;
+                }
+                let child = entry.path();
+                if self.remove_empty_managed_directories(&child)? {
+                    fs::remove_dir(&child)
+                        .map_err(|error| WorkspaceError::Io(error.to_string()))?;
+                } else {
+                    empty = false;
+                }
+            } else {
+                empty = false;
+            }
+        }
+        Ok(empty && directory != self.root)
+    }
+
     fn relative_path(&self, path: &Path) -> Result<PathBuf, WorkspaceError> {
         let relative = path
             .strip_prefix(&self.root)
             .map_err(|_| WorkspaceError::PathEscapesRoot(path.display().to_string()))?;
         safe_relative(relative)
+    }
+
+    fn git_head_revision(&self) -> Result<Option<String>, WorkspaceError> {
+        let root = Command::new("git")
+            .arg("-C")
+            .arg(&self.root)
+            .args(["rev-parse", "--show-toplevel"])
+            .output();
+        let Ok(root) = root else {
+            return Ok(None);
+        };
+        if !root.status.success() {
+            return Ok(None);
+        }
+        let git_root = PathBuf::from(String::from_utf8_lossy(&root.stdout).trim());
+        let git_root = git_root
+            .canonicalize()
+            .map_err(|error| WorkspaceError::Io(error.to_string()))?;
+        if git_root != self.root {
+            return Ok(None);
+        }
+        let revision = Command::new("git")
+            .arg("-C")
+            .arg(&self.root)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .map_err(|error| WorkspaceError::Io(error.to_string()))?;
+        if !revision.status.success() {
+            return Ok(None);
+        }
+        let revision = String::from_utf8_lossy(&revision.stdout).trim().to_owned();
+        (!revision.is_empty()).then_some(revision).pipe(Ok)
+    }
+
+    fn external_git_worktree_path(&self, id: &str) -> Result<PathBuf, WorkspaceError> {
+        let parent = self
+            .root
+            .parent()
+            .ok_or_else(|| WorkspaceError::InvalidRoot(self.root.display().to_string()))?;
+        let digest = Sha256::digest(self.root.to_string_lossy().as_bytes());
+        let namespace = &hex(&digest)[..16];
+        Ok(parent
+            .join(EXTERNAL_WORKTREE_DIRECTORY)
+            .join(namespace)
+            .join(storage_segment(id)))
     }
 }
 
@@ -456,6 +664,26 @@ fn safe_relative(path: &Path) -> Result<PathBuf, WorkspaceError> {
         }
     }
     Ok(safe)
+}
+
+fn ensure_no_symlink_components(root: &Path, relative: &Path) -> Result<(), WorkspaceError> {
+    let mut current = root.to_path_buf();
+    for component in safe_relative(relative)?.components() {
+        let Component::Normal(segment) = component else {
+            continue;
+        };
+        current.push(segment);
+        if current.exists() {
+            let metadata = fs::symlink_metadata(&current)
+                .map_err(|error| WorkspaceError::Io(error.to_string()))?;
+            if metadata.file_type().is_symlink() {
+                return Err(WorkspaceError::UnsafeRelativePath(
+                    relative.display().to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_storage_id(id: &str) -> Result<(), WorkspaceError> {
@@ -665,11 +893,24 @@ pub enum WorkspaceError {
     UnsafeRelativePath(String),
     #[error("invalid checkpoint/worktree id: {0}")]
     InvalidStorageId(String),
+    #[error("checkpoint is corrupt: {0}")]
+    CheckpointCorrupt(String),
+    #[error("worktree descriptor path does not match managed location: {0}")]
+    WorktreeDescriptorMismatch(String),
+    #[error("git workspace operation failed: {0}")]
+    Git(String),
     #[error("workspace I/O failed: {0}")]
     Io(String),
     #[error("workspace serialization failed: {0}")]
     Serialization(String),
 }
+
+trait Pipe: Sized {
+    fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T {
+        f(self)
+    }
+}
+impl<T> Pipe for T {}
 
 #[cfg(test)]
 mod tests {
@@ -692,30 +933,169 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_round_trip_restores_file_content() {
+    fn checkpoint_round_trip_is_exact_for_created_modified_and_deleted_files() {
         let root = fixture_root();
         let engine = WorkspaceEngine::open(&root).expect("open workspace");
         let checkpoint = engine
             .create_checkpoint(Some("before edit".into()))
             .expect("checkpoint");
         fs::write(root.join("src/lib.rs"), "changed").expect("mutate source");
+        fs::remove_file(root.join("src/main.ts")).expect("delete source");
+        fs::write(root.join("src/created-after.txt"), "new").expect("create source");
         engine
             .restore_checkpoint(&checkpoint.id)
             .expect("restore checkpoint");
         let restored = fs::read_to_string(root.join("src/lib.rs")).expect("read restored");
         assert!(restored.contains("pub struct App"));
+        assert!(root.join("src/main.ts").is_file());
+        assert!(!root.join("src/created-after.txt").exists());
         fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
-    fn logical_worktree_is_isolated_from_source_edits() {
+    fn corrupt_checkpoint_does_not_mutate_live_workspace() {
         let root = fixture_root();
         let engine = WorkspaceEngine::open(&root).expect("open workspace");
-        let worktree = engine.create_worktree(None).expect("create worktree");
+        let checkpoint = engine.create_checkpoint(None).expect("checkpoint");
+        fs::write(root.join("src/lib.rs"), "live edit").expect("mutate live source");
+        fs::write(root.join("src/created-after.txt"), "keep me").expect("create live source");
+        fs::write(
+            engine
+                .checkpoint_dir(&checkpoint.id)
+                .join("files/src/main.ts"),
+            "corrupt snapshot",
+        )
+        .expect("corrupt checkpoint");
+
+        let result = engine.restore_checkpoint(&checkpoint.id);
+        assert!(matches!(result, Err(WorkspaceError::CheckpointCorrupt(_))));
+        assert_eq!(
+            fs::read_to_string(root.join("src/lib.rs")).expect("read live edit"),
+            "live edit"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("src/created-after.txt")).expect("read created file"),
+            "keep me"
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn tampered_worktree_descriptor_cannot_delete_arbitrary_directory() {
+        let root = fixture_root();
+        let engine = WorkspaceEngine::open(&root).expect("open workspace");
+        let checkpoint = engine.create_checkpoint(None).expect("checkpoint");
+        let worktree = engine
+            .create_worktree(Some(&checkpoint.id))
+            .expect("create projected worktree");
+        let victim = root
+            .parent()
+            .expect("root parent")
+            .join(format!("mahayana-worktree-victim-{}", Uuid::new_v4()));
+        fs::create_dir_all(&victim).expect("create victim");
+        fs::write(victim.join("keep.txt"), "keep").expect("write victim marker");
+
+        let descriptor_path = engine.worktree_dir(&worktree.id).join("worktree.json");
+        let mut descriptor: WorktreeDescriptor =
+            read_json(&descriptor_path).expect("read descriptor");
+        let original_path = descriptor.path.clone();
+        descriptor.path = path_string(&victim);
+        write_json(&descriptor_path, &descriptor).expect("tamper descriptor");
+
+        let result = engine.remove_worktree(&worktree.id);
+        assert!(matches!(
+            result,
+            Err(WorkspaceError::WorktreeDescriptorMismatch(_))
+        ));
+        assert!(victim.join("keep.txt").is_file());
+
+        descriptor.path = original_path;
+        write_json(&descriptor_path, &descriptor).expect("restore descriptor");
+        engine
+            .remove_worktree(&worktree.id)
+            .expect("remove managed worktree");
+        fs::remove_dir_all(victim).expect("cleanup victim");
+        fs::remove_dir_all(root).expect("cleanup root");
+    }
+
+    #[test]
+    fn projected_worktree_is_isolated_from_source_edits() {
+        let root = fixture_root();
+        let engine = WorkspaceEngine::open(&root).expect("open workspace");
+        let checkpoint = engine.create_checkpoint(None).expect("checkpoint");
+        let worktree = engine
+            .create_worktree(Some(&checkpoint.id))
+            .expect("create projected worktree");
+        assert!(!worktree.git_managed);
         fs::write(root.join("src/lib.rs"), "source changed").expect("mutate source");
         let worktree_content = fs::read_to_string(Path::new(&worktree.path).join("src/lib.rs"))
             .expect("read worktree");
         assert!(worktree_content.contains("pub struct App"));
+        engine
+            .remove_worktree(&worktree.id)
+            .expect("remove worktree");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn git_repository_uses_registered_managed_worktree() {
+        let root = fixture_root();
+        let run = |args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&["init"]);
+        run(&["add", "."]);
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args([
+                "-c",
+                "user.name=Mahayana Test",
+                "-c",
+                "user.email=mahayana@example.invalid",
+                "commit",
+                "-m",
+                "fixture",
+            ])
+            .output()
+            .expect("commit fixture");
+        assert!(
+            output.status.success(),
+            "commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let engine = WorkspaceEngine::open(&root).expect("open workspace");
+        let worktree = engine.create_worktree(None).expect("create git worktree");
+        assert!(worktree.git_managed);
+        assert!(Path::new(&worktree.path).join(".git").exists());
+        let list = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["worktree", "list", "--porcelain"])
+            .output()
+            .expect("list worktrees");
+        assert!(String::from_utf8_lossy(&list.stdout).contains(&worktree.path));
+        engine
+            .remove_worktree(&worktree.id)
+            .expect("remove git worktree");
+        assert!(!Path::new(&worktree.path).exists());
+        let parent = root
+            .parent()
+            .expect("root parent")
+            .join(EXTERNAL_WORKTREE_DIRECTORY);
+        let _ = fs::remove_dir_all(parent);
         fs::remove_dir_all(root).expect("cleanup");
     }
 

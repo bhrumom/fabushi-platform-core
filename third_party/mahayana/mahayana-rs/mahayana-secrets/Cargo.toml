@@ -1,0 +1,28 @@
+[package]
+name = "mahayana-secrets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+age = "0.11.5"
+anyhow.workspace = true
+base64.workspace = true
+keyring = { version = "3.6", default-features = false, features = ["crypto-rust"] }
+rand = "0.9"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6", default-features = false, features = ["crypto-rust", "linux-native-async-persistent"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6", default-features = false, features = ["crypto-rust", "apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3.6", default-features = false, features = ["crypto-rust", "windows-native"] }
+
+[target.'cfg(any(target_os = "freebsd", target_os = "openbsd"))'.dependencies]
+keyring = { version = "3.6", default-features = false, features = ["crypto-rust", "sync-secret-service"] }
