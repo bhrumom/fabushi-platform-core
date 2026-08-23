@@ -15,7 +15,6 @@ use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use url::Url;
-use uuid::Uuid;
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 
@@ -310,12 +309,12 @@ fn parse_transport(
                         .map(|value| (key.clone(), expand_secret(value, session_token)))
                 })
                 .collect::<BTreeMap<_, _>>();
-            if parsed.host_str() == Some("api.ombhrum.com") {
-                if let Some(token) = session_token.filter(|token| !token.trim().is_empty()) {
-                    headers
-                        .entry("Authorization".into())
-                        .or_insert_with(|| format!("Bearer {token}"));
-                }
+            if parsed.host_str() == Some("api.ombhrum.com")
+                && let Some(token) = session_token.filter(|token| !token.trim().is_empty())
+            {
+                headers
+                    .entry("Authorization".into())
+                    .or_insert_with(|| format!("Bearer {token}"));
             }
             validate_headers(&headers)?;
             Ok(McpTransport::Http {
@@ -495,7 +494,7 @@ fn parse_sse_json(body: &str) -> Result<Value, McpError> {
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .last()
+        .next_back()
         .ok_or_else(|| McpError::Protocol("MCP SSE response had no JSON data event".into()))
 }
 
@@ -632,7 +631,7 @@ mod tests {
     #[test]
     fn rejects_plugin_traversal_and_insecure_remote_http() {
         assert!(validate_plugin_id("../evil").is_err());
-        let root = std::env::temp_dir().join(format!("mahayana-mcp-test-{}", Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("mahayana-mcp-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).expect("create root");
         let result = parse_transport(
             &root,
