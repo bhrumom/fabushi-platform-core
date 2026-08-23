@@ -529,19 +529,9 @@ impl FeatureHostController {
                 "messaging access requires an authenticated Fabushi account session".into(),
             ));
         }
-        let user = auth.get("user").and_then(Value::as_object).ok_or_else(|| {
-            FeatureHostError::Contract("authenticated account has no user identity".into())
+        let user_id = stable_authenticated_account_id(&auth).ok_or_else(|| {
+            FeatureHostError::Contract("authenticated account has no stable user id".into())
         })?;
-        let user_id = user
-            .get("id")
-            .or_else(|| user.get("userId"))
-            .or_else(|| user.get("username"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                FeatureHostError::Contract("authenticated account has no stable user id".into())
-            })?;
         let digest = Sha256::digest(user_id.as_bytes());
         let account_fingerprint = digest[..16]
             .iter()
@@ -11025,6 +11015,48 @@ fn test_computer_snapshot() -> ComputerSnapshot {
     }
 }
 
+
+fn stable_identity_component(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(value) => {
+            let value = value.trim();
+            if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        }
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn stable_authenticated_account_id(auth: &Value) -> Option<String> {
+    const ID_KEYS: [&str; 8] = [
+        "principalId",
+        "principal_id",
+        "id",
+        "userId",
+        "user_id",
+        "userNo",
+        "user_no",
+        "username",
+    ];
+
+    auth.get("user")
+        .and_then(Value::as_object)
+        .and_then(|user| {
+            ID_KEYS
+                .iter()
+                .find_map(|key| stable_identity_component(user.get(*key)))
+        })
+        .or_else(|| {
+            ID_KEYS
+                .iter()
+                .find_map(|key| stable_identity_component(auth.get(*key)))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -11945,6 +11977,43 @@ mod tests {
         assert!(kinds.contains(&"operation.interrupted"));
         assert!(kinds.contains(&"session.cleared"));
         assert!(kinds.contains(&"host.closed"));
+    }
+
+    #[test]
+    fn stable_messaging_account_identity_accepts_numeric_and_legacy_session_ids() {
+        assert_eq!(
+            stable_authenticated_account_id(&json!({
+                "loggedIn": true,
+                "user": {"id": 42, "username": "ignored"},
+            }))
+            .as_deref(),
+            Some("42")
+        );
+        assert_eq!(
+            stable_authenticated_account_id(&json!({
+                "loggedIn": true,
+                "user": {},
+                "userId": 77,
+                "username": "legacy-user",
+            }))
+            .as_deref(),
+            Some("77")
+        );
+        assert_eq!(
+            stable_authenticated_account_id(&json!({
+                "loggedIn": true,
+                "user": {"username": "  legacy-name  "},
+            }))
+            .as_deref(),
+            Some("legacy-name")
+        );
+        assert_eq!(
+            stable_authenticated_account_id(&json!({
+                "loggedIn": true,
+                "user": {"nickname": "No stable identifier"},
+            })),
+            None
+        );
     }
 
     #[test]
