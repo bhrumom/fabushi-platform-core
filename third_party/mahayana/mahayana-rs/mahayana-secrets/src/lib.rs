@@ -32,8 +32,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const SECRETS_VERSION: u8 = 1;
 const MANAGED_SECRETS_FILENAME: &str = "local.age";
 const MAHAYANA_AUTH_SECRETS_FILENAME: &str = "mahayana_auth.age";
+const FABUSHI_DESKTOP_AUTH_SECRETS_FILENAME: &str = "fabushi_desktop_auth_v2.age";
+const FABUSHI_DESKTOP_MANAGED_SECRETS_FILENAME: &str = "fabushi_desktop_managed_v2.age";
 const MAHAYANA_AUTH_KEYRING_SERVICE: &str = "mahayana-cli";
 const MAHAYANA_MANAGED_KEYRING_SERVICE: &str = "mahayana-managed-secrets";
+const FABUSHI_DESKTOP_AUTH_KEYRING_SERVICE: &str = "com.ombhrum.fabushi.auth.v2";
+const FABUSHI_DESKTOP_MANAGED_KEYRING_SERVICE: &str = "com.ombhrum.fabushi.managed-secrets.v2";
 const LEGACY_CODEX_KEYRING_SERVICE: &str = "codex";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -41,6 +45,12 @@ pub enum LocalSecretsNamespace {
     #[default]
     ManagedSecrets,
     MahayanaAuth,
+    /// Fabushi desktop auth storage. This intentionally does not read the
+    /// historical `mahayana-cli` keyring ACL.
+    FabushiDesktopAuth,
+    /// Fabushi desktop managed/requested secrets. This intentionally does not
+    /// read or migrate the historical `codex` keyring ACL.
+    FabushiDesktopManagedSecrets,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -266,6 +276,10 @@ impl LocalSecretsBackend {
         self.secrets_dir().join(match self.namespace {
             LocalSecretsNamespace::ManagedSecrets => MANAGED_SECRETS_FILENAME,
             LocalSecretsNamespace::MahayanaAuth => MAHAYANA_AUTH_SECRETS_FILENAME,
+            LocalSecretsNamespace::FabushiDesktopAuth => FABUSHI_DESKTOP_AUTH_SECRETS_FILENAME,
+            LocalSecretsNamespace::FabushiDesktopManagedSecrets => {
+                FABUSHI_DESKTOP_MANAGED_SECRETS_FILENAME
+            }
         })
     }
 
@@ -273,13 +287,19 @@ impl LocalSecretsBackend {
         match self.namespace {
             LocalSecretsNamespace::ManagedSecrets => MAHAYANA_MANAGED_KEYRING_SERVICE,
             LocalSecretsNamespace::MahayanaAuth => MAHAYANA_AUTH_KEYRING_SERVICE,
+            LocalSecretsNamespace::FabushiDesktopAuth => FABUSHI_DESKTOP_AUTH_KEYRING_SERVICE,
+            LocalSecretsNamespace::FabushiDesktopManagedSecrets => {
+                FABUSHI_DESKTOP_MANAGED_KEYRING_SERVICE
+            }
         }
     }
 
     fn legacy_keyring_service(&self) -> Option<&'static str> {
         match self.namespace {
             LocalSecretsNamespace::ManagedSecrets => Some(LEGACY_CODEX_KEYRING_SERVICE),
-            LocalSecretsNamespace::MahayanaAuth => None,
+            LocalSecretsNamespace::MahayanaAuth
+            | LocalSecretsNamespace::FabushiDesktopAuth
+            | LocalSecretsNamespace::FabushiDesktopManagedSecrets => None,
         }
     }
 
@@ -614,10 +634,22 @@ mod tests {
         let store = Arc::new(MockCredentialStore::default());
         let auth = backend(&root, LocalSecretsNamespace::MahayanaAuth, store.clone());
         let managed = backend(&root, LocalSecretsNamespace::ManagedSecrets, store.clone());
+        let desktop_auth = backend(
+            &root,
+            LocalSecretsNamespace::FabushiDesktopAuth,
+            store.clone(),
+        );
+        let desktop_managed = backend(
+            &root,
+            LocalSecretsNamespace::FabushiDesktopManagedSecrets,
+            store.clone(),
+        );
         let auth_name = SecretName::new("MAHAYANA_ACCOUNT_SESSION")?;
         let managed_name = SecretName::new("MANAGED_TOKEN")?;
         auth.set(&SecretScope::Global, &auth_name, "auth-value")?;
         managed.set(&SecretScope::Global, &managed_name, "managed-value")?;
+        desktop_auth.set(&SecretScope::Global, &auth_name, "desktop-auth-value")?;
+        desktop_managed.set(&SecretScope::Global, &managed_name, "desktop-managed-value")?;
         let account = compute_keyring_account(&root);
         assert!(
             store
@@ -633,6 +665,32 @@ mod tests {
             store.value(MAHAYANA_AUTH_KEYRING_SERVICE, &account),
             store.value(MAHAYANA_MANAGED_KEYRING_SERVICE, &account)
         );
+        assert!(
+            store
+                .value(FABUSHI_DESKTOP_AUTH_KEYRING_SERVICE, &account)
+                .is_some()
+        );
+        assert!(
+            store
+                .value(FABUSHI_DESKTOP_MANAGED_KEYRING_SERVICE, &account)
+                .is_some()
+        );
+        assert_eq!(
+            desktop_auth
+                .secrets_path()
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some(FABUSHI_DESKTOP_AUTH_SECRETS_FILENAME)
+        );
+        assert_eq!(
+            desktop_managed
+                .secrets_path()
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some(FABUSHI_DESKTOP_MANAGED_SECRETS_FILENAME)
+        );
+        assert_eq!(desktop_auth.legacy_keyring_service(), None);
+        assert_eq!(desktop_managed.legacy_keyring_service(), None);
         fs::remove_dir_all(root)?;
         Ok(())
     }

@@ -498,6 +498,20 @@ fn safe_skill_directory_name(skill_id: &str) -> Result<String, ProductError> {
     Ok(value.to_string())
 }
 
+fn product_auth_secrets_namespace(configured: Option<&str>) -> LocalSecretsNamespace {
+    match configured.map(str::trim) {
+        Some("fabushi-desktop-v2") => LocalSecretsNamespace::FabushiDesktopAuth,
+        _ => LocalSecretsNamespace::MahayanaAuth,
+    }
+}
+
+fn product_managed_secrets_namespace(configured: Option<&str>) -> LocalSecretsNamespace {
+    match configured.map(str::trim) {
+        Some("fabushi-desktop-v2") => LocalSecretsNamespace::FabushiDesktopManagedSecrets,
+        _ => LocalSecretsNamespace::ManagedSecrets,
+    }
+}
+
 pub fn default_mahayana_home() -> PathBuf {
     if let Some(path) = env::var_os("MAHAYANA_HOME")
         .filter(|value| !value.is_empty())
@@ -573,12 +587,16 @@ impl MahayanaProductClient {
             secrets_manager: SecretsManager::new_with_namespace(
                 mahayana_home.clone(),
                 SecretsBackendKind::Local,
-                LocalSecretsNamespace::MahayanaAuth,
+                product_auth_secrets_namespace(
+                    env::var("MAHAYANA_AUTH_STORAGE_NAMESPACE").ok().as_deref(),
+                ),
             ),
             managed_secrets: SecretsManager::new_with_namespace(
                 mahayana_home,
                 SecretsBackendKind::Local,
-                LocalSecretsNamespace::ManagedSecrets,
+                product_managed_secrets_namespace(
+                    env::var("MAHAYANA_AUTH_STORAGE_NAMESPACE").ok().as_deref(),
+                ),
             ),
         };
         client.import_legacy_session_if_needed();
@@ -3259,6 +3277,26 @@ mod tests {
         assert!(session.get("token").is_none());
         assert!(session.get("accessToken").is_none());
         assert!(session.get("refreshToken").is_none());
+    }
+
+    #[test]
+    fn desktop_auth_storage_uses_prompt_free_namespace() {
+        assert_eq!(
+            product_auth_secrets_namespace(Some("fabushi-desktop-v2")),
+            LocalSecretsNamespace::FabushiDesktopAuth
+        );
+        assert_eq!(
+            product_auth_secrets_namespace(None),
+            LocalSecretsNamespace::MahayanaAuth
+        );
+        assert_eq!(
+            product_managed_secrets_namespace(Some("fabushi-desktop-v2")),
+            LocalSecretsNamespace::FabushiDesktopManagedSecrets
+        );
+        assert_eq!(
+            product_managed_secrets_namespace(None),
+            LocalSecretsNamespace::ManagedSecrets
+        );
     }
 
     #[test]
