@@ -10,15 +10,13 @@ use mahayana_core::{
 };
 use mahayana_kernel::{
     ApprovalResolution, Capability, CapabilitySet, EngineBackend, ExecutionPolicy, KernelError,
-    KernelEvent, KernelEventSink, OpenSessionRequest, OperationId as KernelOperationId, RiskLevel,
-    RunRequest, RuntimeProfile, SessionId, SharedKernelEventSink,
+    KernelEvent, KernelEventSink, OpenSessionRequest, OperationId as KernelOperationId, RunRequest,
+    RuntimeProfile, SessionId, SharedKernelEventSink,
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex as AsyncMutex;
-
-pub const MAHAYANA_AI_CONVERSATION_ID: &str = "mahayana-ai:agent:assistant";
 
 pub struct KernelConversationProvider {
     backend: Arc<dyn EngineBackend>,
