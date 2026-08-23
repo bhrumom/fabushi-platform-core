@@ -11078,7 +11078,7 @@ mod tests {
                 RemoteComputerLocalSession {
                     device_id: "desktop-a".into(),
                     client_id: "phone-a".into(),
-                    expires_at_seconds: now_seconds() + 60,
+                    expires_at_seconds: now_millis() / 1_000 + 60,
                     generation: 7,
                 },
             );
