@@ -171,3 +171,91 @@ fn non_member_cannot_publish_typing_state() {
         MessagingServiceError::UnauthorizedCommand(_)
     ));
 }
+
+#[test]
+fn stop_typing_is_bounded_and_expires_from_delta_replay() {
+    let mut service = MessagingService::load(MemoryStateStore::default()).unwrap();
+    for actor in ["human:a", "human:b"] {
+        service
+            .handle(
+                ClientEnvelope::new(
+                    context(actor, "profile-stop"),
+                    ClientCommand::UpsertProfile {
+                        actor: Actor::human(actor, actor),
+                    },
+                ),
+                1,
+            )
+            .unwrap();
+    }
+    service
+        .handle(
+            ClientEnvelope::new(
+                context("human:a", "conversation-stop"),
+                ClientCommand::CreateConversation {
+                    conversation: direct_conversation(),
+                },
+            ),
+            2,
+        )
+        .unwrap();
+    let before = service.cursor();
+    let stop = service
+        .handle(
+            ClientEnvelope::new(
+                context("human:a", "typing-stop"),
+                ClientCommand::StopTyping {
+                    conversation_id: ConversationId::new("chat:typing"),
+                },
+            ),
+            100,
+        )
+        .unwrap();
+    assert!(matches!(
+        &stop[0].event,
+        ServerEvent::TypingChanged {
+            actor_id,
+            action: None,
+            expires_at_ms: Some(5100),
+            ..
+        } if actor_id == &ActorId::new("human:a")
+    ));
+
+    let recent = service
+        .handle(
+            ClientEnvelope::new(
+                context("human:b", "sync-stop-recent"),
+                ClientCommand::Sync {
+                    cursor: Some(before.to_string()),
+                    limit: 100,
+                },
+            ),
+            200,
+        )
+        .unwrap();
+    assert!(recent.iter().any(|event| matches!(
+        &event.event,
+        ServerEvent::TypingChanged {
+            actor_id,
+            action: None,
+            expires_at_ms: Some(5100),
+            ..
+        } if actor_id == &ActorId::new("human:a")
+    )));
+
+    let expired = service
+        .handle(
+            ClientEnvelope::new(
+                context("human:b", "sync-stop-expired"),
+                ClientCommand::Sync {
+                    cursor: Some(before.to_string()),
+                    limit: 100,
+                },
+            ),
+            6_000,
+        )
+        .unwrap();
+    assert!(!expired
+        .iter()
+        .any(|event| matches!(event.event, ServerEvent::TypingChanged { .. })));
+}

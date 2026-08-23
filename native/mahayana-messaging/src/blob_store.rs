@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -173,6 +174,13 @@ impl FileBlobStore {
                 actual,
             });
         }
+        if let Some(expected_hash) = metadata.content_hash.as_deref() {
+            let expected = normalize_sha256(expected_hash)?;
+            let actual = sha256_file(&part_path)?;
+            if actual != expected {
+                return Err(BlobStoreError::IntegrityMismatch { expected, actual });
+            }
+        }
         let final_path = self.blob_path(id);
         fs::rename(&part_path, &final_path)?;
         let final_metadata_path = self.metadata_path(id);
@@ -277,6 +285,30 @@ impl FileBlobStore {
     }
 }
 
+fn normalize_sha256(value: &str) -> Result<String, BlobStoreError> {
+    let trimmed = value.trim();
+    let raw = trimmed.strip_prefix("sha256:").unwrap_or(trimmed);
+    let normalized = raw.to_ascii_lowercase();
+    if normalized.len() != 64 || !normalized.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(BlobStoreError::InvalidContentHash(value.to_string()));
+    }
+    Ok(normalized)
+}
+
+fn sha256_file(path: &Path) -> Result<String, BlobStoreError> {
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 fn validate_metadata(metadata: &BlobMetadata) -> Result<(), BlobStoreError> {
     BlobId::new(metadata.id.0.clone())?;
     if metadata.file_name.trim().is_empty() {
@@ -330,6 +362,10 @@ pub enum BlobStoreError {
         expected: u64,
         actual: u64,
     },
+    #[error("blob content hash is not a valid SHA-256 value: {0}")]
+    InvalidContentHash(String),
+    #[error("blob integrity mismatch: expected {expected}, found {actual}")]
+    IntegrityMismatch { expected: String, actual: String },
     #[error("blob range length {0} is invalid")]
     InvalidRangeLength(u64),
     #[error("blob {id:?} range starts at {offset}, file size is {size}")]

@@ -8,6 +8,7 @@ use crate::miniapp::{
     MiniAppGrant, MiniAppManifest, MiniAppRequest, MiniAppResponse, MiniAppSession,
 };
 use crate::payment::{CustomerInfo, Invoice, PaymentOrder};
+use crate::search::{SearchQuery, SearchResult};
 use crate::story::{Story, StoryId};
 use crate::wallet::{LedgerEntry, WalletAccount};
 use serde::{Deserialize, Serialize};
@@ -52,6 +53,9 @@ pub enum ClientCommand {
     Sync {
         cursor: Option<String>,
         limit: u32,
+    },
+    Search {
+        query: SearchQuery,
     },
     UpsertProfile {
         actor: Actor,
@@ -255,6 +259,10 @@ pub enum ServerEvent {
         bot_executions: Vec<BotExecution>,
         mini_apps: Vec<MiniAppManifest>,
         next_cursor: Option<String>,
+    },
+    SearchResults {
+        query: SearchQuery,
+        results: Vec<SearchResult>,
     },
     ActorChanged {
         actor: Actor,

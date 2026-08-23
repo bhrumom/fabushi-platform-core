@@ -1,13 +1,14 @@
 use crate::actor::{ActorId, ActorKind};
 use crate::blob_store::{BlobStoreError, FileBlobStore};
 use crate::bot::BotInvocation;
-use crate::conversation::{ConversationId, ConversationKind};
+use crate::conversation::{Conversation, ConversationId, ConversationKind};
 use crate::engine::{Command, EngineError, Event, MessagingEngine};
 use crate::message::{ClientMessageId, DeliveryState, Message, MessageContent, MessageId};
 use crate::payment::Money;
 use crate::protocol::{
     ClientCommand, ClientEnvelope, ServerEnvelope, ServerEvent, FABUSHI_MESSAGING_PROTOCOL_VERSION,
 };
+use crate::search::{SearchIndex, SearchQuery};
 use crate::settlement::{SettlementError, SettlementVerifier, SignedSettlement};
 use crate::store::{JournalEntry, MessagingSnapshot, MessagingStateStore, StoreError};
 use crate::wallet::{LedgerEntry, WalletAccountId};
@@ -175,6 +176,9 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 self.mark_direct_messages_delivered(&actor_id, server_time_ms)?;
                 self.sync_response(&actor_id, cursor.as_deref(), limit, server_time_ms)
             }
+            ClientCommand::Search { query } => {
+                Ok(vec![self.search_envelope(&actor_id, query, server_time_ms)])
+            }
             ClientCommand::StartTyping {
                 conversation_id,
                 action,
@@ -185,9 +189,13 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 Some(server_time_ms.saturating_add(TYPING_TTL_MS)),
                 server_time_ms,
             ),
-            ClientCommand::StopTyping { conversation_id } => {
-                self.typing_event(&actor_id, conversation_id, None, None, server_time_ms)
-            }
+            ClientCommand::StopTyping { conversation_id } => self.typing_event(
+                &actor_id,
+                conversation_id,
+                None,
+                Some(server_time_ms.saturating_add(TYPING_TTL_MS)),
+                server_time_ms,
+            ),
             command => {
                 if let Some(replay) =
                     self.idempotent_send_replay(&actor_id, &command, server_time_ms)?
@@ -231,6 +239,60 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 self.persist_with_events(server_time_ms, &journal)?;
                 Ok(responses)
             }
+        }
+    }
+
+    fn search_envelope(
+        &self,
+        actor_id: &ActorId,
+        query: SearchQuery,
+        server_time_ms: i64,
+    ) -> ServerEnvelope {
+        let state = self.engine.state();
+        let visible_conversations = state
+            .conversations
+            .values()
+            .filter(|conversation| {
+                conversation.owner_id.as_ref() == Some(actor_id)
+                    || conversation
+                        .participants
+                        .iter()
+                        .any(|participant| &participant.actor_id == actor_id)
+                    || state
+                        .communities
+                        .get(&conversation.id)
+                        .and_then(|community| community.public_username.as_ref())
+                        .is_some()
+            })
+            .map(|conversation| conversation.id.clone())
+            .collect::<BTreeSet<_>>();
+        let mut index = SearchIndex::default();
+        for actor in state.actors.values().cloned() {
+            index.index_actor(actor);
+        }
+        for conversation in state
+            .conversations
+            .values()
+            .filter(|conversation| visible_conversations.contains(&conversation.id))
+            .cloned()
+        {
+            index.index_conversation(conversation);
+        }
+        for message in visible_conversations
+            .iter()
+            .filter_map(|conversation_id| state.messages.get(conversation_id))
+            .flat_map(|messages| messages.values())
+            .filter(|message| !message.deleted)
+            .cloned()
+        {
+            index.index_message(message);
+        }
+        let results = index.search(&query);
+        ServerEnvelope {
+            protocol_version: FABUSHI_MESSAGING_PROTOCOL_VERSION,
+            cursor: Some(self.cursor.to_string()),
+            server_time_ms,
+            event: ServerEvent::SearchResults { query, results },
         }
     }
 
@@ -635,6 +697,58 @@ impl<S: MessagingStateStore> MessagingService<S> {
         }
     }
 
+    fn project_conversation_for_actor(
+        &self,
+        actor_id: &ActorId,
+        conversation: &Conversation,
+        server_time_ms: i64,
+    ) -> Conversation {
+        let state = self.engine.state();
+        let mut projected = conversation.clone();
+        let last_read = state
+            .read_cursors
+            .get(&conversation.id)
+            .and_then(|cursors| cursors.get(actor_id));
+        projected.last_read_message_id = last_read.map(|message_id| message_id.0.clone());
+
+        let mut ordered_messages = state
+            .messages
+            .get(&conversation.id)
+            .into_iter()
+            .flat_map(|messages| messages.values())
+            .collect::<Vec<_>>();
+        ordered_messages.sort_by(|left, right| {
+            left.created_at_ms
+                .cmp(&right.created_at_ms)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let read_index = last_read.and_then(|message_id| {
+            ordered_messages
+                .iter()
+                .position(|message| &message.id == message_id)
+        });
+        let unread = ordered_messages
+            .iter()
+            .enumerate()
+            .filter(|(index, message)| {
+                let after_read = match read_index {
+                    Some(read_index) => *index > read_index,
+                    None => true,
+                };
+                let scheduled_is_visible = match message.scheduled_at_ms {
+                    Some(scheduled_at_ms) => scheduled_at_ms <= server_time_ms,
+                    None => true,
+                };
+                after_read
+                    && scheduled_is_visible
+                    && !message.deleted
+                    && &message.sender_id != actor_id
+            })
+            .count();
+        projected.unread_count = u32::try_from(unread).unwrap_or(u32::MAX);
+        projected
+    }
+
     fn sync_envelope(&self, actor_id: &ActorId, limit: u32, server_time_ms: i64) -> ServerEnvelope {
         let state = self.engine.state();
         let max_items = usize::try_from(limit.max(1)).unwrap_or(usize::MAX);
@@ -676,7 +790,9 @@ impl<S: MessagingStateStore> MessagingService<S> {
                     .iter()
                     .filter_map(|id| state.conversations.get(id))
                     .take(max_items)
-                    .cloned()
+                    .map(|conversation| {
+                        self.project_conversation_for_actor(actor_id, conversation, server_time_ms)
+                    })
                     .collect(),
                 messages: visible_conversation_ids
                     .iter()
@@ -965,7 +1081,9 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 message_id,
                 pinned,
             }],
-            ClientCommand::StartTyping { .. } | ClientCommand::StopTyping { .. } => Vec::new(),
+            ClientCommand::Search { .. }
+            | ClientCommand::StartTyping { .. }
+            | ClientCommand::StopTyping { .. } => Vec::new(),
             ClientCommand::CreateInvoice { invoice } => vec![Command::CreateInvoice { invoice }],
             ClientCommand::CheckoutInvoice {
                 invoice_id,
@@ -1311,6 +1429,7 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 }
             }
             ServerEvent::SyncBatch { .. }
+            | ServerEvent::SearchResults { .. }
             | ServerEvent::FolderChanged { .. }
             | ServerEvent::FolderDeleted { .. }
             | ServerEvent::BlobUploadChanged { .. }
