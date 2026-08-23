@@ -5,7 +5,9 @@ use mahayana_host_protocol::{
     ApprovalResolution, FeatureCommand, HostConfig, HostMode, SurfacePlatform,
 };
 use mahayana_js_runtime::{DeepSeekJsHost, scan_package_compatibility};
-use mahayana_plugin_runtime::{ExternalReleaseManifest, PermissionManager, PluginInstaller};
+use mahayana_plugin_runtime::{
+    ExternalReleaseManifest, InstalledPluginPointer, PermissionManager, PluginInstaller,
+};
 use mahayana_product::MahayanaProductClient;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -17,6 +19,23 @@ pub enum AppHostFeatureMode {
     Production,
     Test,
 }
+
+const TEST_MARKETPLACE_PLUGINS: &[(&str, &str, &str)] = &[
+    ("global-dharma", "全球法布施", "任务、日志与部署"),
+    ("faliu-flashcards", "法流记忆卡", "经文牌组与复习"),
+    ("platform-publish", "平台发布", "内容发布与自动化"),
+    (
+        "hermes-installer",
+        "Hermes Installer",
+        "插件安装与运行时管理",
+    ),
+    ("bot-father", "Bot Father", "创建和管理机器人"),
+    (
+        "chatgpt-auto-confirm",
+        "ChatGPT Auto Confirm",
+        "受控自动确认与任务协作",
+    ),
+];
 
 impl From<AppHostFeatureMode> for HostMode {
     fn from(value: AppHostFeatureMode) -> Self {
@@ -57,6 +76,7 @@ pub struct HostResponse {
 
 pub struct AppHost {
     app_data_dir: PathBuf,
+    feature_mode: AppHostFeatureMode,
     product: MahayanaProductClient,
     js: Mutex<DeepSeekJsHost>,
     feature: FeatureHostController,
@@ -83,6 +103,7 @@ impl AppHost {
         );
         Ok(Self {
             app_data_dir,
+            feature_mode,
             product,
             js: Mutex::new(
                 DeepSeekJsHost::new()
@@ -282,6 +303,28 @@ impl AppHost {
 
     fn marketplace_browse(&self, params: Value) -> Result<Value, AppHostError> {
         let query = params.get("query").and_then(Value::as_str);
+        if self.feature_mode == AppHostFeatureMode::Test {
+            let term = query.unwrap_or_default().trim().to_lowercase();
+            let plugins = TEST_MARKETPLACE_PLUGINS
+                .iter()
+                .filter_map(|(plugin_id, display_name, description)| {
+                    let searchable =
+                        format!("{plugin_id} {display_name} {description}").to_lowercase();
+                    if !term.is_empty() && !searchable.contains(&term) {
+                        return None;
+                    }
+                    Some(json!({
+                        "pluginId": plugin_id,
+                        "displayName": display_name,
+                        "description": description,
+                        "latestVersion": "1.0.0",
+                        "platforms": ["desktop"],
+                        "releaseStatus": "approved"
+                    }))
+                })
+                .collect::<Vec<_>>();
+            return Ok(json!({"plugins": plugins}));
+        }
         let requested_platform = params
             .get("platform")
             .and_then(Value::as_str)
@@ -298,6 +341,29 @@ impl AppHost {
     fn marketplace_release(&self, params: Value) -> Result<Value, AppHostError> {
         let plugin_id = string_param(&params, "pluginId")?;
         let version = string_param(&params, "version")?;
+        if self.feature_mode == AppHostFeatureMode::Test {
+            if !TEST_MARKETPLACE_PLUGINS
+                .iter()
+                .any(|(candidate, _, _)| *candidate == plugin_id)
+            {
+                return Err(AppHostError::Operation(format!(
+                    "test marketplace plugin {plugin_id} was not found"
+                )));
+            }
+            return Ok(json!({
+                "pluginId": plugin_id,
+                "version": version,
+                "releaseStatus": "approved",
+                "releaseManifest": {
+                    "schemaVersion": 1,
+                    "protocol": "mahayana.external-release.v1",
+                    "pluginId": plugin_id,
+                    "version": version,
+                    "permissions": [],
+                    "artifacts": []
+                }
+            }));
+        }
         self.product
             .marketplace_release_metadata(plugin_id, version)
             .map_err(|error| AppHostError::Operation(error.to_string()))
@@ -327,6 +393,52 @@ impl AppHost {
             .get("platform")
             .and_then(Value::as_str)
             .unwrap_or(host_platform());
+        if self.feature_mode == AppHostFeatureMode::Test {
+            if !TEST_MARKETPLACE_PLUGINS
+                .iter()
+                .any(|(candidate, _, _)| *candidate == release.plugin_id)
+            {
+                return Err(AppHostError::Operation(format!(
+                    "test marketplace plugin {} was not found",
+                    release.plugin_id
+                )));
+            }
+            let plugin_root = self.plugin_root().join(&release.plugin_id);
+            let installed_dir = plugin_root
+                .join("versions")
+                .join(&release.version)
+                .join("test-ui");
+            std::fs::create_dir_all(&installed_dir)
+                .map_err(|error| AppHostError::Operation(error.to_string()))?;
+            let display_name = TEST_MARKETPLACE_PLUGINS
+                .iter()
+                .find(|(candidate, _, _)| *candidate == release.plugin_id)
+                .map(|(_, display_name, _)| *display_name)
+                .unwrap_or(release.plugin_id.as_str());
+            let html = format!(
+                "<!doctype html><html><head><meta charset=\"utf-8\"><title>{display_name}</title></head><body><main><h1>{display_name}</h1><p>Installed from the deterministic Mahayana Marketplace test backend.</p></main></body></html>"
+            );
+            std::fs::write(installed_dir.join("index.html"), html)
+                .map_err(|error| AppHostError::Operation(error.to_string()))?;
+            let pointer = InstalledPluginPointer {
+                plugin_id: release.plugin_id.clone(),
+                version: release.version.clone(),
+                artifact_id: "test-ui".to_string(),
+                artifact_sha256: "0".repeat(64),
+                runtime: "local-web".to_string(),
+                entry: Some("index.html".to_string()),
+                requested_permissions: release.permissions.clone(),
+                installed_path: installed_dir.to_string_lossy().into_owned(),
+            };
+            std::fs::create_dir_all(&plugin_root)
+                .map_err(|error| AppHostError::Operation(error.to_string()))?;
+            let active = serde_json::to_vec_pretty(&pointer)
+                .map_err(|error| AppHostError::Operation(error.to_string()))?;
+            std::fs::write(plugin_root.join("active.json"), active)
+                .map_err(|error| AppHostError::Operation(error.to_string()))?;
+            return serde_json::to_value(pointer)
+                .map_err(|error| AppHostError::Operation(error.to_string()));
+        }
         let preferred: &[&str] = match platform {
             "ios" | "android" | "mobile" => &[
                 "deepseek-js",
