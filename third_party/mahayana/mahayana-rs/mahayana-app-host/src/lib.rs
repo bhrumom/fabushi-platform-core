@@ -114,39 +114,14 @@ impl AppHost {
         match method {
             "host.platform" => Ok(json!({"platform": host_platform()})),
             method if method.starts_with("feature.") => self.handle_feature(method, params),
-            "marketplace.browse" => {
-                let query = params.get("query").and_then(Value::as_str);
-                let requested_platform = params
-                    .get("platform")
-                    .and_then(Value::as_str)
-                    .unwrap_or(host_platform());
-                let marketplace_platform = match requested_platform {
-                    "ios" | "android" => "mobile",
-                    other => other,
-                };
-                self.product
-                    .marketplace_browse(query, Some(marketplace_platform))
-                    .map_err(|error| AppHostError::Operation(error.to_string()))
-            }
-            "marketplace.release" => {
-                let plugin_id = string_param(&params, "pluginId")?;
-                let version = string_param(&params, "version")?;
-                self.product
-                    .marketplace_release_metadata(plugin_id, version)
-                    .map_err(|error| AppHostError::Operation(error.to_string()))
-            }
             "platform.request" => self
                 .product
                 .execute("mahayana.platform.request", &params)
                 .map_err(|error| AppHostError::Operation(error.to_string())),
-            "plugin.install" => self.install_plugin(params),
-            "plugin.uninstall" => self.uninstall_plugin(params),
-            "plugin.active" => self.active_plugin(params),
             "plugin.permissions" => self.plugin_permissions(params),
             "plugin.permission.grant" => self.set_permission(params, true),
             "plugin.permission.revoke" => self.set_permission(params, false),
             "plugin.compatibility" => self.plugin_compatibility(params),
-            "plugin.uiDocument" => self.plugin_ui_document(params),
             "runtime.start" => self.start_runtime(params),
             "runtime.stop" => self.stop_runtime(params),
             "runtime.tools" => self.runtime_tools(),
@@ -186,6 +161,13 @@ impl AppHost {
                 .feature
                 .logout()
                 .map_err(|error| AppHostError::Operation(error.to_string())),
+            "feature.marketplace.browse" => self.marketplace_browse(params),
+            "feature.marketplace.release" => self.marketplace_release(params),
+            "feature.plugin.install" => self.install_plugin(params),
+            "feature.plugin.uninstall" => self.uninstall_plugin(params),
+            "feature.plugin.active" => self.active_plugin(params),
+            "feature.plugin.listInstalled" => self.list_installed_plugins(),
+            "feature.plugin.uiDocument" => self.plugin_ui_document(params),
             "feature.messaging.access.issue" => self.feature_messaging_access_issue(params),
             other => Err(AppHostError::InvalidRequest(format!(
                 "unknown feature method {other}"
@@ -298,6 +280,29 @@ impl AppHost {
             .map_err(|error| AppHostError::Operation(error.to_string()))
     }
 
+    fn marketplace_browse(&self, params: Value) -> Result<Value, AppHostError> {
+        let query = params.get("query").and_then(Value::as_str);
+        let requested_platform = params
+            .get("platform")
+            .and_then(Value::as_str)
+            .unwrap_or(host_platform());
+        let marketplace_platform = match requested_platform {
+            "ios" | "android" => "mobile",
+            other => other,
+        };
+        self.product
+            .marketplace_browse(query, Some(marketplace_platform))
+            .map_err(|error| AppHostError::Operation(error.to_string()))
+    }
+
+    fn marketplace_release(&self, params: Value) -> Result<Value, AppHostError> {
+        let plugin_id = string_param(&params, "pluginId")?;
+        let version = string_param(&params, "version")?;
+        self.product
+            .marketplace_release_metadata(plugin_id, version)
+            .map_err(|error| AppHostError::Operation(error.to_string()))
+    }
+
     fn plugin_root(&self) -> PathBuf {
         self.app_data_dir.join("plugins")
     }
@@ -386,6 +391,38 @@ impl AppHost {
         serde_json::to_value(pointer).map_err(|error| AppHostError::Operation(error.to_string()))
     }
 
+    fn list_installed_plugins(&self) -> Result<Value, AppHostError> {
+        let root = self.plugin_root();
+        let installer = self.installer()?;
+        let mut plugins = Vec::new();
+        let entries = match std::fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(json!({"plugins": plugins}));
+            }
+            Err(error) => return Err(AppHostError::Operation(error.to_string())),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| AppHostError::Operation(error.to_string()))?;
+            if !entry
+                .file_type()
+                .map_err(|error| AppHostError::Operation(error.to_string()))?
+                .is_dir()
+            {
+                continue;
+            }
+            let plugin_id = entry.file_name().to_string_lossy().into_owned();
+            if let Some(pointer) = installer
+                .active(&plugin_id)
+                .map_err(|error| AppHostError::Operation(error.to_string()))?
+            {
+                plugins.push(pointer);
+            }
+        }
+        plugins.sort_by(|left, right| left.plugin_id.cmp(&right.plugin_id));
+        Ok(json!({"plugins": plugins}))
+    }
+
     fn plugin_permissions(&self, params: Value) -> Result<Value, AppHostError> {
         let plugin_id = string_param(&params, "pluginId")?;
         let pointer = self
@@ -459,20 +496,27 @@ impl AppHost {
             .ok_or_else(|| {
                 AppHostError::Operation(format!("plugin {plugin_id} is not installed"))
             })?;
-        if pointer.runtime != "local-web" {
-            return Err(AppHostError::Operation(format!(
-                "plugin runtime {} does not expose a local Web document",
-                pointer.runtime
-            )));
-        }
         let root = std::fs::canonicalize(&pointer.installed_path)
             .map_err(|error| AppHostError::Operation(error.to_string()))?;
-        let entry = pointer
+        let requested_entry = pointer
             .entry
             .as_deref()
-            .unwrap_or("index.html")
-            .trim_start_matches("./");
-        let relative = PathBuf::from(entry);
+            .map(|value| value.trim_start_matches("./"));
+        let entry = requested_entry
+            .filter(|value| value.to_ascii_lowercase().ends_with(".html"))
+            .map(str::to_string)
+            .or_else(|| {
+                ["ui/index.html", "web/index.html", "index.html"]
+                    .into_iter()
+                    .find(|candidate| root.join(candidate).is_file())
+                    .map(str::to_string)
+            })
+            .ok_or_else(|| {
+                AppHostError::Operation(format!(
+                    "installed plugin {plugin_id} does not expose an HTML Mini App entry"
+                ))
+            })?;
+        let relative = PathBuf::from(&entry);
         if relative.components().any(|component| {
             matches!(
                 component,
