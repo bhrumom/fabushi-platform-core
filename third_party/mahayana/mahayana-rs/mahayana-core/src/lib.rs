@@ -583,11 +583,11 @@ mod tests {
     }
 
     #[test]
-    fn codex_assistant_is_a_pinned_conversation() {
+    fn legacy_codex_helper_returns_the_pinned_sovereign_conversation() {
         let conversation = Conversation::codex_assistant();
         assert_eq!(conversation.id.as_str(), CODEX_ASSISTANT_CONVERSATION_ID);
         assert_eq!(conversation.title, "Mahayana（大乘 AI）");
-        assert_eq!(conversation.peer, PeerKind::CodexAi);
+        assert_eq!(conversation.peer, PeerKind::MahayanaAi);
         assert!(conversation.pinned);
     }
 

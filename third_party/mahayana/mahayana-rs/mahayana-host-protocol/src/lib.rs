@@ -701,6 +701,25 @@ pub enum LocalToolPermission {
     Always,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InferenceProvider {
+    #[default]
+    Fabushi,
+    Codex,
+    ClaudeCode,
+    #[serde(rename = "openrouter")]
+    OpenRouter,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SandboxRuntime {
+    #[default]
+    Host,
+    LocalDocker,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProductHostSettings {
@@ -720,6 +739,14 @@ pub struct ProductHostSettings {
     pub ai_computer_control_enabled: bool,
     #[serde(default)]
     pub auto_review_rules: Vec<AutoReviewRule>,
+    /// Provider preference for newly-created Agent conversations. Existing
+    /// conversations keep their recorded provider identity.
+    #[serde(default)]
+    pub inference_provider: InferenceProvider,
+    /// Execution environment preference. Adapters must still pass the normal
+    /// Mahayana capability and ownership checks before use.
+    #[serde(default)]
+    pub sandbox_runtime: SandboxRuntime,
 }
 
 impl Default for ProductHostSettings {
@@ -735,6 +762,8 @@ impl Default for ProductHostSettings {
             remote_control_enabled: false,
             ai_computer_control_enabled: true,
             auto_review_rules: Vec::new(),
+            inference_provider: InferenceProvider::default(),
+            sandbox_runtime: SandboxRuntime::default(),
         }
     }
 }
@@ -2709,6 +2738,25 @@ mod tests {
             serde_json::to_value(command).expect("encode command")["type"],
             "capability.request"
         );
+    }
+
+    #[test]
+    fn product_settings_default_legacy_payloads_and_round_trip_router_choices() {
+        let legacy: ProductHostSettings = serde_json::from_str(
+            r#"{"notifications":true,"autoUpdateWhenIdle":true,"localExecution":true,"routeEgressLocally":false,"securityKeys":false,"webauthnProxyEnabled":false,"localToolPermission":"ask"}"#,
+        )
+        .expect("decode legacy settings");
+        assert_eq!(legacy.inference_provider, InferenceProvider::Fabushi);
+        assert_eq!(legacy.sandbox_runtime, SandboxRuntime::Host);
+
+        let configured = ProductHostSettings {
+            inference_provider: InferenceProvider::ClaudeCode,
+            sandbox_runtime: SandboxRuntime::LocalDocker,
+            ..Default::default()
+        };
+        let value = serde_json::to_value(configured).expect("encode router settings");
+        assert_eq!(value["inferenceProvider"], "claude-code");
+        assert_eq!(value["sandboxRuntime"], "local-docker");
     }
 
     #[test]

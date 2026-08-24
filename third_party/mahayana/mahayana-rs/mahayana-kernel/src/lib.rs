@@ -300,8 +300,11 @@ pub enum KernelEvent {
     },
     UsageUpdated {
         operation_id: OperationId,
+        total_tokens: u64,
         input_tokens: u64,
+        cached_input_tokens: u64,
         output_tokens: u64,
+        reasoning_output_tokens: u64,
     },
     OperationCompleted {
         operation_id: OperationId,

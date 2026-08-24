@@ -1,10 +1,11 @@
-use mahayana_core::RuntimeConfig;
+use mahayana_core::{ModelProviderMode, RuntimeConfig};
 use mahayana_feature_host::FeatureHostController;
 use mahayana_host::HostCreateConfig;
 use mahayana_host_protocol::{
     ApprovalResolution, FeatureCommand, HostConfig, HostMode, SurfacePlatform,
 };
 use mahayana_js_runtime::{DeepSeekJsHost, scan_package_compatibility};
+use mahayana_native_engine::ProcessExecution;
 use mahayana_plugin_runtime::{
     ExternalReleaseManifest, InstalledPluginPointer, PermissionManager, PluginInstaller,
 };
@@ -744,14 +745,52 @@ fn create_feature_host(
 ) -> Result<FeatureHostController, AppHostError> {
     let root = feature_host_root(app_data_dir);
     std::fs::create_dir_all(&root).map_err(|error| AppHostError::Operation(error.to_string()))?;
+    let provider =
+        std::env::var("MAHAYANA_INFERENCE_PROVIDER").unwrap_or_else(|_| "fabushi".into());
+    let mut runtime = RuntimeConfig {
+        data_dir: Some(root.join("runtime")),
+        ..RuntimeConfig::default()
+    };
+    if provider == "openrouter" {
+        runtime.model.provider = ModelProviderMode::UserConfiguredRemote;
+        runtime.model.base_url = Some("https://openrouter.ai/api/v1".into());
+        runtime.model.model =
+            std::env::var("MAHAYANA_OPENROUTER_MODEL").unwrap_or_else(|_| "openai/gpt-5.2".into());
+        runtime.model.credential_key = Some("inference/openrouter/api-key".into());
+    } else if provider == "claude-code" {
+        runtime.model.provider = ModelProviderMode::UserConfiguredRemote;
+        runtime.model.base_url = Some("https://api.anthropic.com/v1".into());
+        runtime.model.model =
+            std::env::var("MAHAYANA_CLAUDE_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".into());
+        runtime.model.credential_key = Some("inference/claude/api-key".into());
+    }
     let host_config = HostCreateConfig {
-        runtime: RuntimeConfig {
-            data_dir: Some(root.join("runtime")),
-            ..RuntimeConfig::default()
-        },
+        runtime,
         product_session_path: Some(root.join("account-session.json")),
         product_surface_state_path: Some(root.join("product-surface.json")),
         automation_path: Some(root.join("automations.json")),
+        use_codex_account: std::env::var("MAHAYANA_USE_CODEX_ACCOUNT").as_deref() == Ok("1"),
+        codex_home: std::env::var_os("MAHAYANA_CODEX_HOME").map(PathBuf::from),
+        model_bearer_token: std::env::var("MAHAYANA_MODEL_BEARER_TOKEN")
+            .ok()
+            .filter(|value| !value.is_empty()),
+        model_wire_api: match provider.as_str() {
+            "openrouter" => mahayana_model::responses::ResponsesWireApi::ChatCompletions,
+            "claude-code" => mahayana_model::responses::ResponsesWireApi::AnthropicMessages,
+            _ => mahayana_model::responses::ResponsesWireApi::Responses,
+        },
+        process_execution: if std::env::var("MAHAYANA_SANDBOX_RUNTIME").as_deref()
+            == Ok("local-docker")
+        {
+            ProcessExecution::LocalDocker {
+                docker_path: std::env::var_os("MAHAYANA_DOCKER_BIN")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("docker")),
+                image: std::env::var("MAHAYANA_DOCKER_IMAGE").unwrap_or_default(),
+            }
+        } else {
+            ProcessExecution::Host
+        },
         ..HostCreateConfig::default()
     };
     FeatureHostController::create_with_host_config(

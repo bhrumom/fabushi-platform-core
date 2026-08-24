@@ -15,6 +15,7 @@ use mahayana_conversation::ConversationProvider;
 use mahayana_core::ApprovalDecision;
 use mahayana_core::ApprovalId;
 use mahayana_core::BuildProfile;
+use mahayana_core::ModelProviderMode;
 use mahayana_core::OperationId;
 use mahayana_core::RuntimeCommand;
 use mahayana_core::RuntimeConfig;
@@ -32,6 +33,7 @@ use mahayana_native_agent::NativeAgentBackend;
 use mahayana_native_agent::NativeAgentConfig;
 use mahayana_native_engine::NativeEngine;
 use mahayana_native_engine::NativeEngineConfig;
+use mahayana_native_engine::ProcessExecution;
 use mahayana_platform_core::HostPlatform;
 use mahayana_product::MahayanaProductClient;
 use mahayana_product::default_mahayana_home;
@@ -69,6 +71,14 @@ pub struct HostCreateConfig {
     pub host_platform: Option<HostPlatform>,
     pub mini_apps: Vec<MiniAppDefinition>,
     pub use_codex_account: bool,
+    /// Provider credential supplied by the native OS secret bridge. It is
+    /// intentionally excluded from serialized Host configuration.
+    #[serde(skip)]
+    pub model_bearer_token: Option<String>,
+    #[serde(skip)]
+    pub model_wire_api: mahayana_model::responses::ResponsesWireApi,
+    #[serde(skip)]
+    pub process_execution: ProcessExecution,
     /// Tests and constrained hosts may opt out of inherited local plugins.
     pub inherit_installed_plugins: Option<bool>,
 }
@@ -350,12 +360,20 @@ fn build_runtime(
             ResponsesModelRuntime::new(ResponsesModelConfig {
                 base_url,
                 default_model: runtime_config.model.model.clone(),
-                bearer_token: session_token.clone(),
+                bearer_token: if matches!(
+                    runtime_config.model.provider,
+                    ModelProviderMode::UserConfiguredRemote
+                ) {
+                    create.model_bearer_token.clone()
+                } else {
+                    session_token.clone()
+                },
                 provider_mode: runtime_config.model.provider,
+                wire_api: create.model_wire_api,
             })
             .map_err(|error| HostError::new(error.to_string()))?,
         );
-        let engine_config = match runtime_config.build_profile {
+        let mut engine_config = match runtime_config.build_profile {
             BuildProfile::DesktopFull => {
                 NativeEngineConfig::desktop(runtime_config.model.model.clone())
             }
@@ -363,6 +381,11 @@ fn build_runtime(
                 NativeEngineConfig::embedded(runtime_config.model.model.clone())
             }
         };
+        engine_config.process_execution = create.process_execution.clone();
+        engine_config.session_state_path = runtime_config
+            .data_dir
+            .as_ref()
+            .map(|root| root.join("provider-neutral-assistant-session.json"));
         let native_engine = Arc::new(
             NativeEngine::new(model_runtime, engine_config)
                 .map_err(|error| HostError::new(error.to_string()))?,

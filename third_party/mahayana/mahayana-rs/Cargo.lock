@@ -8951,6 +8951,8 @@ dependencies = [
  "mahayana-host",
  "mahayana-host-protocol",
  "mahayana-js-runtime",
+ "mahayana-model",
+ "mahayana-native-engine",
  "mahayana-platform-client",
  "mahayana-plugin-runtime",
  "serde",

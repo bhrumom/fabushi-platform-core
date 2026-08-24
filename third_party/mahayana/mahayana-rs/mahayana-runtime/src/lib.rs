@@ -78,12 +78,18 @@ impl RuntimeBuilder {
             .first()
             .map(|path| path.to_string_lossy().to_string());
         let model = Some(self.config.model.model.clone());
+        let history_path = self
+            .config
+            .data_dir
+            .as_ref()
+            .map(|root| root.join("provider-neutral-assistant-transcript.json"));
         self.providers
             .register(Arc::new(KernelConversationProvider::new(
                 backend,
                 self.config.build_profile,
                 workspace_root,
                 model,
+                history_path,
             )))?;
         Ok(self)
     }
@@ -780,6 +786,7 @@ mod tests {
     use mahayana_core::AgentThreadId;
     use mahayana_core::ApprovalDecision;
     use mahayana_core::CODEX_ASSISTANT_CONVERSATION_ID;
+    use mahayana_core::Message;
     use mahayana_core::MessageId;
     use mahayana_core::MessageRole;
 

@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::future::Future;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::process::Command;
@@ -39,9 +40,20 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use uuid::Uuid;
 
+const MAIN_ASSISTANT_CONVERSATION_ID: &str = "mahayana-ai:agent:assistant";
 const MAX_TOOL_OUTPUT_BYTES: usize = 64 * 1024;
 const DEFAULT_MAX_MODEL_TURNS: usize = 16;
 const DEFAULT_APPROVAL_TIMEOUT_MS: u64 = 120_000;
+
+#[derive(Debug, Clone, Default)]
+pub enum ProcessExecution {
+    #[default]
+    Host,
+    LocalDocker {
+        docker_path: PathBuf,
+        image: String,
+    },
+}
 
 #[derive(Debug, Clone)]
 pub struct NativeEngineConfig {
@@ -50,6 +62,8 @@ pub struct NativeEngineConfig {
     pub max_model_turns: usize,
     pub enable_process_tools: bool,
     pub approval_timeout_ms: u64,
+    pub process_execution: ProcessExecution,
+    pub session_state_path: Option<PathBuf>,
 }
 
 impl NativeEngineConfig {
@@ -60,6 +74,8 @@ impl NativeEngineConfig {
             max_model_turns: DEFAULT_MAX_MODEL_TURNS,
             enable_process_tools: true,
             approval_timeout_ms: DEFAULT_APPROVAL_TIMEOUT_MS,
+            process_execution: ProcessExecution::Host,
+            session_state_path: None,
         }
     }
 
@@ -70,6 +86,8 @@ impl NativeEngineConfig {
             max_model_turns: DEFAULT_MAX_MODEL_TURNS,
             enable_process_tools: false,
             approval_timeout_ms: DEFAULT_APPROVAL_TIMEOUT_MS,
+            process_execution: ProcessExecution::Host,
+            session_state_path: None,
         }
     }
 
@@ -88,6 +106,18 @@ impl NativeEngineConfig {
             return Err(KernelError::BackendUnavailable(
                 "Mahayana native engine approval timeout must be positive".into(),
             ));
+        }
+        if let ProcessExecution::LocalDocker { docker_path, image } = &self.process_execution {
+            if docker_path.as_os_str().is_empty() {
+                return Err(KernelError::BackendUnavailable(
+                    "Local Docker executable path must not be empty".into(),
+                ));
+            }
+            if !is_pinned_container_image(image) {
+                return Err(KernelError::BackendUnavailable(
+                    "Local Docker image must be pinned by sha256 digest".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -128,6 +158,8 @@ struct NativeSession {
     loop_state: LoopState,
     #[serde(default)]
     attempts: Vec<OperationAttempt>,
+    #[serde(default)]
+    updated_at_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,6 +193,7 @@ pub struct NativeEngine {
     subagents: Mutex<SubagentScheduler>,
     hooks: Mutex<HookRegistry>,
     telemetry: Arc<RuntimeTelemetry>,
+    persisted_sessions: Mutex<HashMap<String, PathBuf>>,
 }
 
 impl NativeEngine {
@@ -183,6 +216,7 @@ impl NativeEngine {
             ),
             hooks: Mutex::new(HookRegistry::default()),
             telemetry: Arc::new(RuntimeTelemetry::default()),
+            persisted_sessions: Mutex::new(HashMap::new()),
         })
     }
 
@@ -278,6 +312,32 @@ impl NativeEngine {
             .lock()
             .map_err(|_| KernelError::Backend("approval registry poisoned".into()))?
             .retain(|_, waiter| waiter.operation_id != operation_id.as_str());
+        Ok(())
+    }
+
+    async fn persist_session_if_configured(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), KernelError> {
+        let path = self
+            .persisted_sessions
+            .lock()
+            .map_err(|_| KernelError::Backend("persisted session registry poisoned".into()))?
+            .get(session_id.as_str())
+            .cloned();
+        let Some(path) = path else {
+            return Ok(());
+        };
+        let snapshot = self.snapshot_session(session_id).await?;
+        let bytes = serde_json::to_vec(&snapshot)
+            .map_err(|error| KernelError::Backend(error.to_string()))?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| KernelError::Backend("persisted session path has no parent".into()))?;
+        std::fs::create_dir_all(parent).map_err(|error| KernelError::Backend(error.to_string()))?;
+        let temporary = path.with_extension(format!("json.{}.tmp", Uuid::new_v4()));
+        write_private_file(&temporary, &bytes)?;
+        replace_file(&temporary, &path)?;
         Ok(())
     }
 
@@ -396,8 +456,11 @@ impl NativeEngine {
             if let Some(usage) = collector.usage()? {
                 events.emit(KernelEvent::UsageUpdated {
                     operation_id: operation_id.clone(),
+                    total_tokens: usage.total_tokens,
                     input_tokens: usage.input_tokens,
+                    cached_input_tokens: usage.cached_input_tokens,
                     output_tokens: usage.output_tokens,
+                    reasoning_output_tokens: usage.reasoning_output_tokens,
                 })?;
             }
             let payload = collector.output()?.ok_or_else(|| {
@@ -861,7 +924,7 @@ impl NativeEngine {
                         .filter_map(Value::as_str)
                         .map(str::to_owned)
                         .collect::<Vec<_>>();
-                    run_process(root, program, &args)
+                    run_process(&self.config.process_execution, root, program, &args)
                 }
                 "git_status" => {
                     if !self.config.enable_process_tools || !policy.allow_process {
@@ -870,6 +933,7 @@ impl NativeEngine {
                         ));
                     }
                     run_process(
+                        &self.config.process_execution,
                         workspace_root(session)?,
                         "git",
                         &["status".into(), "--short".into()],
@@ -882,6 +946,7 @@ impl NativeEngine {
                         ));
                     }
                     run_process(
+                        &self.config.process_execution,
                         workspace_root(session)?,
                         "git",
                         &["diff".into(), "--".into()],
@@ -925,8 +990,11 @@ impl NativeEngine {
         if let Some(usage) = collector.usage()? {
             events.emit(KernelEvent::UsageUpdated {
                 operation_id: operation_id.clone(),
+                total_tokens: usage.total_tokens,
                 input_tokens: usage.input_tokens,
+                cached_input_tokens: usage.cached_input_tokens,
                 output_tokens: usage.output_tokens,
+                reasoning_output_tokens: usage.reasoning_output_tokens,
             })?;
         }
         let payload = collector
@@ -1159,6 +1227,38 @@ impl EngineBackend for NativeEngine {
     }
 
     async fn open_session(&self, request: OpenSessionRequest) -> Result<SessionId, KernelError> {
+        let persisted_path = request
+            .metadata
+            .get("conversationId")
+            .and_then(Value::as_str)
+            .filter(|conversation_id| *conversation_id == MAIN_ASSISTANT_CONVERSATION_ID)
+            .and(self.config.session_state_path.clone());
+        if let Some(path) = persisted_path.as_ref()
+            && let Ok(bytes) = std::fs::read(path)
+            && let Ok(snapshot) = serde_json::from_slice::<KernelSessionSnapshot>(&bytes)
+        {
+            let snapshot_updated_at_ms = snapshot
+                .metadata
+                .get("updatedAtMs")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let transcript_updated_at_ms = request
+                .metadata
+                .get("transcriptUpdatedAtMs")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            if snapshot_updated_at_ms >= transcript_updated_at_ms {
+                let session_id = self.restore_session(snapshot).await?;
+                self.persisted_sessions
+                    .lock()
+                    .map_err(|_| {
+                        KernelError::Backend("persisted session registry poisoned".into())
+                    })?
+                    .insert(session_id.as_str().to_owned(), path.clone());
+                self.telemetry.session_opened();
+                return Ok(session_id);
+            }
+        }
         let workspace_root = request
             .workspace_root
             .as_deref()
@@ -1184,16 +1284,27 @@ impl EngineBackend for NativeEngine {
                 session_id.as_str().to_string(),
                 Arc::new(AsyncMutex::new(NativeSession {
                     workspace_root,
-                    history: Vec::new(),
+                    history: native_bootstrap_history(&request.metadata),
                     prompt_queue: PromptQueue::default(),
                     active_prompt: None,
                     permissions: PermissionLedger::default(),
                     approvals: ApprovalLedger::default(),
                     loop_state: LoopState::default(),
                     attempts: Vec::new(),
+                    updated_at_ms: request
+                        .metadata
+                        .get("transcriptUpdatedAtMs")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0),
                 })),
             );
         self.telemetry.session_opened();
+        if let Some(path) = persisted_path {
+            self.persisted_sessions
+                .lock()
+                .map_err(|_| KernelError::Backend("persisted session registry poisoned".into()))?
+                .insert(session_id.as_str().to_owned(), path);
+        }
         Ok(session_id)
     }
 
@@ -1256,6 +1367,12 @@ impl EngineBackend for NativeEngine {
         }
         .await;
         self.finish_operation(&request.operation_id)?;
+        self.session(&request.session_id)?
+            .lock()
+            .await
+            .updated_at_ms = now_ms();
+        self.persist_session_if_configured(&request.session_id)
+            .await?;
         result
     }
 
@@ -1291,6 +1408,7 @@ impl EngineBackend for NativeEngine {
     ) -> Result<KernelSessionSnapshot, KernelError> {
         let session = self.session(session_id)?;
         let session = session.lock().await.clone();
+        let updated_at_ms = session.updated_at_ms;
         let state = NativeSnapshotState {
             session,
             memory: self
@@ -1319,7 +1437,7 @@ impl EngineBackend for NativeEngine {
             backend_id: "mahayana-native".into(),
             state: serde_json::to_value(state)
                 .map_err(|error| KernelError::Backend(error.to_string()))?,
-            metadata: json!({"snapshotVersion": 1}),
+            metadata: json!({"snapshotVersion": 1, "updatedAtMs": updated_at_ms}),
         })
     }
 
@@ -1682,15 +1800,81 @@ fn search_directory(
     Ok(())
 }
 
-fn run_process(root: &Path, program: &str, args: &[String]) -> Result<Value, KernelError> {
+fn native_bootstrap_history(metadata: &Value) -> Vec<Value> {
+    metadata
+        .get("bootstrapHistory")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .rev()
+        .take(200)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .filter_map(|message| {
+            let role = message.get("role").and_then(Value::as_str)?;
+            if !matches!(role, "user" | "assistant") {
+                return None;
+            }
+            let content = message.get("content").and_then(Value::as_str)?;
+            Some(json!({"role": role, "content": content}))
+        })
+        .collect()
+}
+
+fn run_process(
+    execution: &ProcessExecution,
+    root: &Path,
+    program: &str,
+    args: &[String],
+) -> Result<Value, KernelError> {
     if program.trim().is_empty() || program.contains(['\r', '\n']) {
         return Err(KernelError::PolicyDenied("invalid process program".into()));
     }
-    let output = Command::new(program)
-        .args(args)
-        .current_dir(root)
-        .output()
-        .map_err(|error| KernelError::Backend(error.to_string()))?;
+    let output = match execution {
+        ProcessExecution::Host => Command::new(program).args(args).current_dir(root).output(),
+        ProcessExecution::LocalDocker { docker_path, image } => {
+            let canonical_root = root
+                .canonicalize()
+                .map_err(|error| KernelError::Backend(error.to_string()))?;
+            let mount = format!("{}:/workspace:rw", canonical_root.display());
+            let temporary = format!(
+                "type=tmpfs,destination=/tmp,tmpfs-size={}",
+                256 * 1024 * 1024
+            );
+            Command::new(docker_path)
+                .args([
+                    "run",
+                    "--rm",
+                    "--network",
+                    "none",
+                    "--read-only",
+                    "--cap-drop",
+                    "ALL",
+                    "--security-opt",
+                    "no-new-privileges",
+                    "--pids-limit",
+                    "256",
+                    "--memory",
+                    "1g",
+                    "--cpus",
+                    "2",
+                    "--label",
+                    "com.fabushi.owner=mahayana-native-engine",
+                    "--mount",
+                    &temporary,
+                    "--volume",
+                    &mount,
+                    "--workdir",
+                    "/workspace",
+                    image,
+                    program,
+                ])
+                .args(args)
+                .output()
+        }
+    }
+    .map_err(|error| KernelError::Backend(error.to_string()))?;
     let stdout = truncate_bytes(&output.stdout);
     let stderr = truncate_bytes(&output.stderr);
     Ok(json!({
@@ -1699,6 +1883,44 @@ fn run_process(root: &Path, program: &str, args: &[String]) -> Result<Value, Ker
         "stdout": stdout,
         "stderr": stderr,
     }))
+}
+
+fn is_pinned_container_image(image: &str) -> bool {
+    let Some((name, digest)) = image.rsplit_once("@sha256:") else {
+        return false;
+    };
+    !name.trim().is_empty()
+        && digest.len() == 64
+        && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), KernelError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| KernelError::Backend(error.to_string()))?;
+    file.write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| KernelError::Backend(error.to_string()))
+}
+
+fn replace_file(temporary: &Path, destination: &Path) -> Result<(), KernelError> {
+    match std::fs::rename(temporary, destination) {
+        Ok(()) => Ok(()),
+        Err(_error) if destination.exists() => {
+            std::fs::remove_file(destination)
+                .map_err(|remove_error| KernelError::Backend(remove_error.to_string()))?;
+            std::fs::rename(temporary, destination)
+                .map_err(|rename_error| KernelError::Backend(rename_error.to_string()))
+        }
+        Err(error) => Err(KernelError::Backend(error.to_string())),
+    }
 }
 
 fn truncate_bytes(bytes: &[u8]) -> String {
@@ -1920,6 +2142,22 @@ mod tests {
     use super::*;
     use mahayana_model::ModelProviderMode;
     use std::collections::VecDeque;
+
+    #[test]
+    fn local_docker_requires_an_immutable_image_digest() {
+        assert!(!is_pinned_container_image("example.test/fabushi:latest"));
+        assert!(is_pinned_container_image(&format!(
+            "example.test/fabushi@sha256:{}",
+            "a".repeat(64)
+        )));
+
+        let mut config = NativeEngineConfig::desktop("model");
+        config.process_execution = ProcessExecution::LocalDocker {
+            docker_path: PathBuf::from("docker"),
+            image: "example.test/fabushi:latest".into(),
+        };
+        assert!(config.validate().is_err());
+    }
 
     struct FakeModel {
         outputs: Mutex<VecDeque<Value>>,
@@ -2186,5 +2424,72 @@ mod tests {
             .await
             .expect("restore snapshot");
         assert_eq!(restored, session);
+    }
+
+    #[tokio::test]
+    async fn main_assistant_history_survives_provider_engine_recreation() {
+        let root =
+            std::env::temp_dir().join(format!("mahayana-provider-session-{}", Uuid::new_v4()));
+        let state_path = root.join("assistant.json");
+        let first_model = Arc::new(FakeModel {
+            outputs: Mutex::new(VecDeque::from([json!({
+                "output": [{"type":"message", "content":[{"type":"output_text", "text":"first provider reply"}]}]
+            })])),
+        });
+        let mut first_config = NativeEngineConfig::desktop("first-model");
+        first_config.session_state_path = Some(state_path.clone());
+        let first = NativeEngine::new(first_model, first_config).expect("create first engine");
+        let session = first
+            .open_session(OpenSessionRequest {
+                profile: mahayana_kernel::RuntimeProfile::DesktopFull,
+                workspace_root: None,
+                model: None,
+                metadata: json!({"conversationId": MAIN_ASSISTANT_CONVERSATION_ID}),
+            })
+            .await
+            .expect("open first session");
+        first
+            .run(
+                RunRequest {
+                    session_id: session,
+                    operation_id: OperationId::new(),
+                    input: "remember across providers".into(),
+                    policy: ExecutionPolicy::interactive_default(),
+                    required_capabilities: CapabilitySet::new([Capability::Model]),
+                    metadata: Value::Null,
+                },
+                Arc::new(Events::default()),
+            )
+            .await
+            .expect("run first provider");
+        assert!(state_path.is_file());
+
+        let second_model = Arc::new(FakeModel {
+            outputs: Mutex::new(VecDeque::new()),
+        });
+        let mut second_config = NativeEngineConfig::desktop("second-model");
+        second_config.session_state_path = Some(state_path);
+        let second = NativeEngine::new(second_model, second_config).expect("create second engine");
+        let restored = second
+            .open_session(OpenSessionRequest {
+                profile: mahayana_kernel::RuntimeProfile::DesktopFull,
+                workspace_root: None,
+                model: None,
+                metadata: json!({"conversationId": MAIN_ASSISTANT_CONVERSATION_ID}),
+            })
+            .await
+            .expect("restore provider-neutral session");
+        let snapshot = second
+            .snapshot_session(&restored)
+            .await
+            .expect("snapshot restored session");
+        assert!(
+            snapshot
+                .state
+                .to_string()
+                .contains("remember across providers")
+        );
+        assert!(snapshot.state.to_string().contains("first provider reply"));
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 }

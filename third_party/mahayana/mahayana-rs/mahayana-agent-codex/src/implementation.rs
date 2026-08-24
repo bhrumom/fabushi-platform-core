@@ -34,6 +34,7 @@ use codex_app_server_protocol::PluginInstalledParams;
 use codex_app_server_protocol::PluginInstalledResponse;
 use codex_app_server_protocol::PluginReadParams;
 use codex_app_server_protocol::PluginReadResponse;
+use codex_app_server_protocol::PluginRuntimePlatform as CodexPluginRuntimePlatform;
 use codex_app_server_protocol::PluginSource;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
@@ -99,7 +100,9 @@ use mahayana_core::OperationId;
 use mahayana_host_protocol::ComputerAction;
 use mahayana_host_protocol::ComputerControlOrigin;
 use mahayana_host_protocol::LocalToolPermission;
+use mahayana_platform_core::HostPlatform;
 use mahayana_plugin_host::LocalPlugin;
+use mahayana_plugin_host::PluginRuntimeVariant as MahayanaPluginRuntimeVariant;
 use mahayana_plugin_host::select_runtime_with_availability;
 use serde_json::Value;
 use serde_json::json;
@@ -2206,10 +2209,30 @@ impl AgentBackend for CodexAgentBackend {
             mcp_configs.extend(load_plugin_mcp_servers(path.as_path(), None).await);
         }
         debug_plugin_inheritance("workspace thread MCP servers", mcp_configs.keys().cloned());
+        let runtime_variants = detail
+            .plugin
+            .runtime_variants
+            .iter()
+            .map(|variant| MahayanaPluginRuntimeVariant {
+                id: variant.id.clone(),
+                server: variant.server.clone(),
+                platforms: variant
+                    .platforms
+                    .iter()
+                    .map(|platform| match platform {
+                        CodexPluginRuntimePlatform::Cli => HostPlatform::Cli,
+                        CodexPluginRuntimePlatform::Desktop => HostPlatform::Desktop,
+                        CodexPluginRuntimePlatform::Mobile => HostPlatform::Mobile,
+                        CodexPluginRuntimePlatform::Web => HostPlatform::Web,
+                    })
+                    .collect(),
+                priority: i64::from(variant.priority),
+            })
+            .collect::<Vec<_>>();
         let selected = select_runtime_with_availability(
             request.platform,
             &detail.plugin.mcp_servers,
-            &detail.plugin.runtime_variants,
+            &runtime_variants,
             |server| mcp_configs.get(server).is_some_and(mcp_runtime_available),
         )
         .map_err(|error| AgentError::Backend(error.to_string()))?;

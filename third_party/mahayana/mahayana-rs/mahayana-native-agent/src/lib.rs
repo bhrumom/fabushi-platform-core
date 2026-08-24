@@ -160,18 +160,21 @@ impl KernelEventSink for NativeEventBridge {
                 },
             },
             KernelEvent::UsageUpdated {
+                total_tokens,
                 input_tokens,
+                cached_input_tokens,
                 output_tokens,
+                reasoning_output_tokens,
                 ..
             } => AgentEvent::TokenUsageUpdated {
                 usage: ModelTokenUsageSnapshot {
                     total: None,
                     last: ModelTokenUsage {
-                        total_tokens: to_i64(input_tokens.saturating_add(output_tokens)),
+                        total_tokens: to_i64(total_tokens),
                         input_tokens: to_i64(input_tokens),
-                        cached_input_tokens: 0,
+                        cached_input_tokens: to_i64(cached_input_tokens),
                         output_tokens: to_i64(output_tokens),
-                        reasoning_output_tokens: 0,
+                        reasoning_output_tokens: to_i64(reasoning_output_tokens),
                     },
                     model_context_window: None,
                 },
