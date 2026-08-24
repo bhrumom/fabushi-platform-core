@@ -780,16 +780,19 @@ impl<S: MessagingStateStore> MessagingService<S> {
             cursor: Some(self.cursor.to_string()),
             server_time_ms,
             event: ServerEvent::SyncBatch {
+                // Actor/conversation metadata is the lightweight navigation index and must
+                // be complete in a snapshot. Applying the message/event limit here used to
+                // return only the first N contacts/conversations and then advance next_cursor
+                // to the current journal position, so the omitted rows could never arrive via
+                // later delta sync. Keep heavy collections bounded below, not the left-rail index.
                 actors: visible_actor_ids
                     .iter()
                     .filter_map(|id| state.actors.get(id))
-                    .take(max_items)
                     .cloned()
                     .collect(),
                 conversations: visible_conversation_ids
                     .iter()
                     .filter_map(|id| state.conversations.get(id))
-                    .take(max_items)
                     .map(|conversation| {
                         self.project_conversation_for_actor(actor_id, conversation, server_time_ms)
                     })

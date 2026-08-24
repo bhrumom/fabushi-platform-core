@@ -6440,10 +6440,7 @@ impl FeatureHostController {
     }
 
     #[cfg(feature = "production")]
-    fn receive_production(
-        &self,
-        timeout: Duration,
-    ) -> Result<Option<HostEvent>, FeatureHostError> {
+    fn receive_production(&self, timeout: Duration) -> Result<Option<HostEvent>, FeatureHostError> {
         for index in 0..16 {
             // Block only for the first runtime event. Once awakened, drain already-queued
             // events without adding latency between streamed events.

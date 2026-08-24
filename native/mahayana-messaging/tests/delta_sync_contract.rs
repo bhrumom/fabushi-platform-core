@@ -159,6 +159,115 @@ fn remove_db(path: &PathBuf) {
 }
 
 #[test]
+fn initial_snapshot_limit_keeps_complete_navigation_metadata() {
+    let mut service = MessagingService::load(MemoryStateStore::default()).expect("load service");
+    setup_direct_conversation(&mut service);
+
+    service
+        .handle(
+            envelope(
+                "human:carol",
+                "actor:carol",
+                ClientCommand::UpsertProfile {
+                    actor: Actor::human("human:carol", "Carol"),
+                },
+            ),
+            14,
+        )
+        .expect("upsert carol");
+    service
+        .handle(
+            envelope(
+                "human:alice",
+                "conversation:second",
+                ClientCommand::CreateConversation {
+                    conversation: Conversation::direct(
+                        "chat:second",
+                        "Alice and Carol",
+                        vec![
+                            participant("human:alice", ParticipantRole::Owner),
+                            participant("human:carol", ParticipantRole::Member),
+                        ],
+                        15,
+                    ),
+                },
+            ),
+            15,
+        )
+        .expect("create second conversation");
+
+    for (request_id, client_id, text, now) in [
+        ("send:snapshot:one", "client:snapshot:one", "one", 20),
+        ("send:snapshot:two", "client:snapshot:two", "two", 21),
+    ] {
+        service
+            .handle(
+                envelope("human:alice", request_id, send_text(client_id, text)),
+                now,
+            )
+            .expect("seed snapshot message");
+    }
+
+    let events = service
+        .handle(
+            envelope(
+                "human:alice",
+                "sync:small-snapshot",
+                ClientCommand::Sync {
+                    cursor: None,
+                    limit: 1,
+                },
+            ),
+            30,
+        )
+        .expect("initial snapshot");
+
+    let (actors, conversations, messages) = events
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            ServerEvent::SyncBatch {
+                actors,
+                conversations,
+                messages,
+                ..
+            } => Some((actors, conversations, messages)),
+            _ => None,
+        })
+        .expect("sync batch");
+
+    assert_eq!(
+        conversations.len(),
+        2,
+        "all visible conversation summaries must be present"
+    );
+    assert!(conversations
+        .iter()
+        .any(|item| item.id == ConversationId::new("chat:direct")));
+    assert!(conversations
+        .iter()
+        .any(|item| item.id == ConversationId::new("chat:second")));
+    assert_eq!(
+        actors.len(),
+        3,
+        "all actors visible through those conversations must be present"
+    );
+    assert!(actors
+        .iter()
+        .any(|item| item.id == ActorId::new("human:alice")));
+    assert!(actors
+        .iter()
+        .any(|item| item.id == ActorId::new("human:bob")));
+    assert!(actors
+        .iter()
+        .any(|item| item.id == ActorId::new("human:carol")));
+    assert_eq!(
+        messages.len(),
+        1,
+        "heavy message payload must still honor the requested limit"
+    );
+}
+
+#[test]
 fn send_message_is_idempotent_and_server_acknowledged() {
     let mut service = MessagingService::load(MemoryStateStore::default()).expect("load service");
     setup_direct_conversation(&mut service);
