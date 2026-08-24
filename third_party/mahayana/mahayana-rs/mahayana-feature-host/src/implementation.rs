@@ -5400,13 +5400,20 @@ impl FeatureHostController {
     }
 
     pub fn receive(&self) -> Result<Option<HostEvent>, FeatureHostError> {
+        self.receive_with_timeout(Duration::ZERO)
+    }
+
+    pub fn receive_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<Option<HostEvent>, FeatureHostError> {
         self.fire_due_automation()?;
         if let Some(event) = self.state()?.events.pop_front() {
             return Ok(Some(event));
         }
         match self.config.mode {
             HostMode::Test => Ok(None),
-            HostMode::Production => self.receive_production(),
+            HostMode::Production => self.receive_production(timeout),
         }
     }
 
@@ -5620,7 +5627,10 @@ impl FeatureHostController {
     }
 
     #[cfg(not(feature = "production"))]
-    fn receive_production(&self) -> Result<Option<HostEvent>, FeatureHostError> {
+    fn receive_production(
+        &self,
+        _timeout: Duration,
+    ) -> Result<Option<HostEvent>, FeatureHostError> {
         Err(FeatureHostError::ProductionUnavailable)
     }
 
@@ -6430,9 +6440,15 @@ impl FeatureHostController {
     }
 
     #[cfg(feature = "production")]
-    fn receive_production(&self) -> Result<Option<HostEvent>, FeatureHostError> {
-        for _ in 0..16 {
-            let Some(event) = self.runtime()?.receive(Duration::from_millis(1))? else {
+    fn receive_production(
+        &self,
+        timeout: Duration,
+    ) -> Result<Option<HostEvent>, FeatureHostError> {
+        for index in 0..16 {
+            // Block only for the first runtime event. Once awakened, drain already-queued
+            // events without adding latency between streamed events.
+            let receive_timeout = if index == 0 { timeout } else { Duration::ZERO };
+            let Some(event) = self.runtime()?.receive(receive_timeout)? else {
                 return Ok(None);
             };
             if let Some(event) = self.translate_runtime_event(event)? {

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppHostFeatureMode {
@@ -157,7 +158,7 @@ impl AppHost {
             "feature.info" => serde_json::to_value(self.feature.info())
                 .map_err(|error| AppHostError::Operation(error.to_string())),
             "feature.execute" => self.feature_execute(params),
-            "feature.receive" => self.feature_receive(),
+            "feature.receive" => self.feature_receive(params),
             "feature.approval.resolve" => self.feature_resolve_approval(params),
             "feature.interrupt" => self.feature_interrupt(params),
             "feature.auth.status" => self
@@ -208,10 +209,15 @@ impl AppHost {
         serde_json::to_value(accepted).map_err(|error| AppHostError::Operation(error.to_string()))
     }
 
-    fn feature_receive(&self) -> Result<Value, AppHostError> {
+    fn feature_receive(&self, params: Value) -> Result<Value, AppHostError> {
+        let timeout_ms = params
+            .get("timeoutMs")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .min(30_000);
         let event = self
             .feature
-            .receive()
+            .receive_with_timeout(Duration::from_millis(timeout_ms))
             .map_err(|error| AppHostError::Operation(error.to_string()))?;
         serde_json::to_value(event).map_err(|error| AppHostError::Operation(error.to_string()))
     }
