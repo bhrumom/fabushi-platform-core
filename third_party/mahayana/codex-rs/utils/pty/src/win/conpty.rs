@@ -79,7 +79,7 @@ impl RawConPty {
     }
 
     pub fn pseudoconsole_handle(&self) -> RawHandle {
-        self.con.raw_handle()
+        self.con.raw_handle().cast::<std::ffi::c_void>()
     }
 
     pub fn into_handles(self) -> (PsuedoCon, FileDescriptor, FileDescriptor) {
