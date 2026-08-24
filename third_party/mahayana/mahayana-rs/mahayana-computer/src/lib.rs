@@ -213,11 +213,11 @@ pub fn execute(
         let snapshot = macos::capture_screen()?;
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         let snapshot = portable::capture_screen()?;
-        return Ok(ComputerActionResult {
+        Ok(ComputerActionResult {
             origin,
             actions_executed: actions.len(),
             snapshot,
-        });
+        })
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
@@ -447,20 +447,20 @@ mod portable {
         }
         if keys.len() == 1 {
             return enigo
-                .key(keys[0].clone(), Direction::Click)
+                .key(keys[0], Direction::Click)
                 .map_err(|error| ComputerError::Input(error.to_string()));
         }
         for key in &keys[..keys.len() - 1] {
             enigo
-                .key(key.clone(), Direction::Press)
+                .key(*key, Direction::Press)
                 .map_err(|error| ComputerError::Input(error.to_string()))?;
         }
         enigo
-            .key(keys[keys.len() - 1].clone(), Direction::Click)
+            .key(keys[keys.len() - 1], Direction::Click)
             .map_err(|error| ComputerError::Input(error.to_string()))?;
         for key in keys[..keys.len() - 1].iter().rev() {
             enigo
-                .key(key.clone(), Direction::Release)
+                .key(*key, Direction::Release)
                 .map_err(|error| ComputerError::Input(error.to_string()))?;
         }
         Ok(())
@@ -514,9 +514,7 @@ mod portable {
                 if let (Some(x), Some(y)) = (action.x, action.y) {
                     move_to(&mut enigo, x, y)?;
                 }
-                let magnitude = i32::try_from(action.amount.unwrap_or(1))
-                    .unwrap_or(i32::MAX)
-                    .max(1);
+                let magnitude = action.amount.unwrap_or(1).max(1);
                 let (axis, value) = match action.direction.unwrap_or(ComputerScrollDirection::Down)
                 {
                     ComputerScrollDirection::Up => (Axis::Vertical, -magnitude),

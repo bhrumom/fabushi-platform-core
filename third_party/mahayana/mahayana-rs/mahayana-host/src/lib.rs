@@ -247,10 +247,10 @@ fn build_runtime(
         .or_else(|| runtime_config.workspace_roots.first().cloned())
         .or_else(|| data_dir.as_ref().map(|path| path.join("workspace")))
         .or_else(|| std::env::current_dir().ok());
-    if runtime_config.workspace_roots.is_empty() {
-        if let Some(cwd) = cwd.as_ref() {
-            runtime_config.workspace_roots.push(cwd.clone());
-        }
+    if runtime_config.workspace_roots.is_empty()
+        && let Some(cwd) = cwd.as_ref()
+    {
+        runtime_config.workspace_roots.push(cwd.clone());
     }
 
     let mut builder = RuntimeBuilder::new(runtime_config.clone());
