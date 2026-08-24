@@ -298,6 +298,7 @@ pub struct FeatureHostController {
     peer_messages_path: Option<PathBuf>,
     settings_path: Option<PathBuf>,
     remote_device_state_path: Option<PathBuf>,
+    test_auth_state_path: Option<PathBuf>,
     memory_root_path: Option<PathBuf>,
     workflow_root_path: Option<PathBuf>,
     teach_recording: Mutex<Option<TeachCaptureProcess>>,
@@ -308,7 +309,7 @@ impl FeatureHostController {
     pub fn create(config: HostConfig, platform: SurfacePlatform) -> Result<Self, FeatureHostError> {
         validate_config(&config)?;
         match config.mode {
-            HostMode::Test => Ok(Self::create_test_backend(config, platform)),
+            HostMode::Test => Ok(Self::create_test_backend(config, platform, None)),
             HostMode::Production => {
                 #[cfg(feature = "production")]
                 {
@@ -322,7 +323,13 @@ impl FeatureHostController {
         }
     }
 
-    fn create_test_backend(config: HostConfig, platform: SurfacePlatform) -> Self {
+    fn create_test_backend(
+        config: HostConfig,
+        platform: SurfacePlatform,
+        test_data_dir: Option<&Path>,
+    ) -> Self {
+        let test_auth_state_path =
+            test_data_dir.map(|data_dir| data_dir.join("test-auth-session.json"));
         let memory_root_path = Some(std::env::temp_dir().join(format!(
             "fabushi-feature-host-memory-{}-{}",
             config.profile_id,
@@ -339,6 +346,9 @@ impl FeatureHostController {
             platform,
         };
         let mut state = FeatureState::default();
+        if let Some(path) = test_auth_state_path.as_deref() {
+            state.auth_user = load_test_auth_user(path);
+        }
         sync_computer_control_policy(&state.settings);
         state.events.push_back(HostEvent::HostReady {
             timestamp: timestamp(),
@@ -355,6 +365,7 @@ impl FeatureHostController {
             peer_messages_path: None,
             settings_path: None,
             remote_device_state_path: None,
+            test_auth_state_path,
             memory_root_path,
             workflow_root_path,
             teach_recording: Mutex::new(None),
@@ -370,7 +381,12 @@ impl FeatureHostController {
     ) -> Result<Self, FeatureHostError> {
         validate_config(&config)?;
         if config.mode == HostMode::Test {
-            return Ok(Self::create_test_backend(config, platform));
+            let test_data_dir = host_config.runtime.data_dir.clone();
+            return Ok(Self::create_test_backend(
+                config,
+                platform,
+                test_data_dir.as_deref(),
+            ));
         }
         let automation_path = host_config.automation_path.clone().or_else(|| {
             host_config
@@ -456,6 +472,7 @@ impl FeatureHostController {
             peer_messages_path,
             settings_path,
             remote_device_state_path,
+            test_auth_state_path: None,
             memory_root_path,
             workflow_root_path,
             teach_recording: Mutex::new(None),
@@ -612,7 +629,10 @@ impl FeatureHostController {
                     "username": username,
                     "nickname": "本地测试用户",
                 });
-                self.state()?.auth_user = Some(user.clone());
+                {
+                    self.state()?.auth_user = Some(user.clone());
+                }
+                self.persist_test_auth_user(Some(&user))?;
                 Ok(json!({
                     "@type": "mahayana.auth.session",
                     "loggedIn": true,
@@ -714,7 +734,10 @@ impl FeatureHostController {
                     "email": "browser@example.test",
                     "nickname": "Browser 测试用户",
                 });
-                self.state()?.auth_user = Some(user.clone());
+                {
+                    self.state()?.auth_user = Some(user.clone());
+                }
+                self.persist_test_auth_user(Some(&user))?;
                 Ok(json!({
                     "status": "completed",
                     "provider": "browser",
@@ -792,7 +815,10 @@ impl FeatureHostController {
                     "email": "oauth@example.test",
                     "nickname": "OAuth 测试用户",
                 });
-                self.state()?.auth_user = Some(user.clone());
+                {
+                    self.state()?.auth_user = Some(user.clone());
+                }
+                self.persist_test_auth_user(Some(&user))?;
                 Ok(json!({
                     "attemptId": attempt_id,
                     "status": "completed",
@@ -821,7 +847,10 @@ impl FeatureHostController {
     pub fn logout(&self) -> Result<Value, FeatureHostError> {
         match self.config.mode {
             HostMode::Test => {
-                self.state()?.auth_user = None;
+                {
+                    self.state()?.auth_user = None;
+                }
+                self.persist_test_auth_user(None)?;
                 Ok(json!({
                     "@type": "mahayana.auth.session",
                     "loggedIn": false,
@@ -5399,6 +5428,13 @@ impl FeatureHostController {
             })?;
         }
         Ok(())
+    }
+
+    fn persist_test_auth_user(&self, user: Option<&Value>) -> Result<(), FeatureHostError> {
+        let Some(path) = self.test_auth_state_path.as_deref() else {
+            return Ok(());
+        };
+        persist_test_auth_user(path, user)
     }
 
     fn persist_automations(
@@ -10781,6 +10817,52 @@ fn persist_groups(
     Ok(())
 }
 
+fn load_test_auth_user(path: &Path) -> Option<Value> {
+    let bytes = std::fs::read(path).ok()?;
+    let stored = serde_json::from_slice::<Value>(&bytes).ok()?;
+    if stored.get("version").and_then(Value::as_u64) != Some(1) {
+        return None;
+    }
+    stored.get("user").filter(|user| user.is_object()).cloned()
+}
+
+fn persist_test_auth_user(path: &Path, user: Option<&Value>) -> Result<(), FeatureHostError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            FeatureHostError::Contract(format!("create test auth directory: {error}"))
+        })?;
+    }
+    let temp = path.with_extension("json.tmp");
+    if let Some(user) = user {
+        let data = serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "user": user,
+        }))
+        .map_err(|error| {
+            FeatureHostError::Contract(format!("serialize test auth state: {error}"))
+        })?;
+        std::fs::write(&temp, data).map_err(|error| {
+            FeatureHostError::Contract(format!("write test auth state: {error}"))
+        })?;
+        std::fs::rename(&temp, path).map_err(|error| {
+            FeatureHostError::Contract(format!("commit test auth state: {error}"))
+        })?;
+        return Ok(());
+    }
+
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(FeatureHostError::Contract(format!(
+                "clear test auth state: {error}"
+            )));
+        }
+    }
+    let _ = std::fs::remove_file(temp);
+    Ok(())
+}
+
 fn load_bots(path: &Path) -> BTreeMap<String, BotSummary> {
     let Ok(bytes) = std::fs::read(path) else {
         return BTreeMap::new();
@@ -12134,6 +12216,74 @@ mod tests {
             cancelled_controller.auth_status().unwrap()["loggedIn"],
             false
         );
+    }
+
+    #[cfg(feature = "production")]
+    #[test]
+    fn test_backend_restores_browser_session_across_controller_restart_and_logout_clears_it() {
+        let root = std::env::temp_dir().join(format!(
+            "fabushi-feature-host-returning-auth-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create returning auth root");
+        let host_config = || HostCreateConfig {
+            runtime: mahayana_core::RuntimeConfig {
+                data_dir: Some(root.join("runtime")),
+                ..Default::default()
+            },
+            product_session_path: Some(root.join("product-session.json")),
+            inherit_installed_plugins: Some(false),
+            ..Default::default()
+        };
+        let config = || HostConfig {
+            profile_id: "returning-auth".into(),
+            mode: HostMode::Test,
+        };
+
+        let first = FeatureHostController::create_with_host_config(
+            config(),
+            SurfacePlatform::Electron,
+            host_config(),
+        )
+        .expect("create first test Host");
+        let attempt = first.browser_login_start().expect("start browser login");
+        first
+            .browser_login_poll(
+                attempt["attemptId"]
+                    .as_str()
+                    .expect("attempt id")
+                    .to_string(),
+            )
+            .expect("complete browser login");
+        assert_eq!(first.auth_status().unwrap()["loggedIn"], true);
+        drop(first);
+
+        let reopened = FeatureHostController::create_with_host_config(
+            config(),
+            SurfacePlatform::Electron,
+            host_config(),
+        )
+        .expect("reopen test Host");
+        let restored = reopened.auth_status().expect("restore browser session");
+        assert_eq!(restored["loggedIn"], true);
+        assert_eq!(restored["user"]["id"], "fast-e2e-browser-user");
+        let persisted = std::fs::read_to_string(root.join("runtime/test-auth-session.json"))
+            .expect("read persisted test auth state");
+        assert!(!persisted.contains("accessToken"));
+        assert!(!persisted.contains("refreshToken"));
+
+        reopened.logout().expect("logout returning account");
+        drop(reopened);
+        let after_logout = FeatureHostController::create_with_host_config(
+            config(),
+            SurfacePlatform::Electron,
+            host_config(),
+        )
+        .expect("reopen after logout");
+        assert_eq!(after_logout.auth_status().unwrap()["loggedIn"], false);
+        assert!(!root.join("runtime/test-auth-session.json").exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
