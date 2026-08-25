@@ -1,4 +1,7 @@
 use super::*;
+use crate::capability_access::{
+    EntitlementAccessInput, active_purchase_rails, evaluate_entitlement_access,
+};
 
 pub(super) async fn wallet_balance(
     request: Request,
@@ -302,37 +305,172 @@ pub(super) async fn commerce_entitlement(
     let plugin_id = route_identifier(&context, "plugin_id")?;
     let capability = route_identifier(&context, "capability")?;
     let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+
     #[derive(Deserialize)]
-    struct EntitlementRow {
+    struct EntitlementAccessRow {
         entitlement_id: String,
         user_id: String,
         plugin_id: String,
         capability: String,
+        status: String,
+        granted_at: i64,
         expires_at: Option<i64>,
+        product_kind: Option<String>,
+        subscription_period_seconds: Option<i64>,
+        subscription_status: Option<String>,
+        subscription_period_end: Option<i64>,
     }
-    let row = worker::query!(
+
+    #[derive(Deserialize)]
+    struct CountRow {
+        count: i64,
+    }
+
+    #[derive(Deserialize)]
+    struct PurchaseOptionRow {
+        product_id: String,
+        sku: String,
+        display_name: String,
+        product_kind: String,
+        subscription_period_seconds: Option<i64>,
+        currency: String,
+        amount: i64,
+        allowed_rails_json: String,
+        active_providers: String,
+    }
+
+    let rows = worker::query!(
         &database,
-        "SELECT entitlement_id, user_id, plugin_id, capability, expires_at
-         FROM entitlements
-         WHERE user_id = ?1 AND plugin_id = ?2 AND capability = ?3 AND status = 'active'
-           AND (expires_at IS NULL OR expires_at > ?4)
-         ORDER BY granted_at DESC LIMIT 1",
+        "SELECT e.entitlement_id, e.user_id, e.plugin_id, e.capability, e.status,
+                e.granted_at, e.expires_at,
+                COALESCE(c.product_kind, pc.product_kind) AS product_kind,
+                c.subscription_period_seconds AS subscription_period_seconds,
+                (SELECT ms.status FROM monetization_subscriptions ms
+                  WHERE ms.user_id = e.user_id AND ms.product_id = e.product_id
+                    AND ms.entitlement_capability = e.capability
+                  ORDER BY ms.updated_at DESC LIMIT 1) AS subscription_status,
+                (SELECT ms.current_period_end FROM monetization_subscriptions ms
+                  WHERE ms.user_id = e.user_id AND ms.product_id = e.product_id
+                    AND ms.entitlement_capability = e.capability
+                  ORDER BY ms.updated_at DESC LIMIT 1) AS subscription_period_end
+           FROM entitlements e
+           LEFT JOIN payment_product_catalog c ON c.product_id = e.product_id
+           LEFT JOIN payment_product_config pc ON pc.product_id = e.product_id
+          WHERE e.user_id = ?1 AND e.plugin_id = ?2 AND e.capability = ?3
+          ORDER BY e.granted_at DESC LIMIT 50",
         &user_id,
         plugin_id,
-        capability,
-        now_seconds()
+        capability
     )?
-    .first::<EntitlementRow>(None)
-    .await?;
-    let entitlement = row.map(|row| Entitlement {
-        entitlement_id: row.entitlement_id,
-        user_id: row.user_id,
-        plugin_id: row.plugin_id,
-        capability: row.capability,
-        status: EntitlementStatus::Active,
-        expires_at: row.expires_at,
-    });
-    Response::from_json(&json!({"entitlement": entitlement}))
+    .all()
+    .await?
+    .results::<EntitlementAccessRow>()?;
+
+    let mut entitlement = None;
+    let mut effective_expires_at = None;
+    let mut access_reason = "not_entitled";
+    for row in rows {
+        let decision = evaluate_entitlement_access(
+            EntitlementAccessInput {
+                status: &row.status,
+                product_kind: row.product_kind.as_deref(),
+                granted_at: row.granted_at,
+                entitlement_expires_at: row.expires_at,
+                subscription_status: row.subscription_status.as_deref(),
+                subscription_period_end: row.subscription_period_end,
+                subscription_period_seconds: row.subscription_period_seconds,
+            },
+            now,
+        );
+        effective_expires_at = decision.effective_expires_at;
+        access_reason = decision.reason;
+        if decision.allowed {
+            entitlement = Some(Entitlement {
+                entitlement_id: row.entitlement_id,
+                user_id: row.user_id,
+                plugin_id: row.plugin_id,
+                capability: row.capability,
+                status: EntitlementStatus::Active,
+                expires_at: decision.effective_expires_at,
+            });
+            break;
+        }
+    }
+
+    let protected_count = worker::query!(
+        &database,
+        "SELECT COUNT(*) AS count FROM products
+          WHERE plugin_id = ?1 AND entitlement_capability = ?2",
+        plugin_id,
+        capability
+    )?
+    .first::<CountRow>(None)
+    .await?
+    .map(|row| row.count)
+    .unwrap_or(0);
+    let protected = protected_count > 0;
+
+    let option_rows = worker::query!(
+        &database,
+        "SELECT c.product_id, c.sku, c.display_name, c.product_kind,
+                c.subscription_period_seconds, pr.currency, pr.amount,
+                pc.allowed_rails_json,
+                COALESCE((SELECT GROUP_CONCAT(pb.provider, ',')
+                  FROM payment_provider_bindings pb
+                 WHERE pb.product_id = c.product_id AND pb.sync_state = 'active'), '') AS active_providers
+           FROM payment_product_catalog c
+           JOIN products p ON p.product_id = c.product_id
+           JOIN prices pr ON pr.product_id = c.product_id
+           JOIN payment_product_config pc ON pc.product_id = c.product_id
+          WHERE c.mini_app_id = ?1 AND c.entitlement_capability = ?2
+            AND c.catalog_status = 'active' AND p.active = 1 AND pc.active = 1
+            AND pr.active = 1 AND pr.starts_at <= ?3
+            AND (pr.ends_at IS NULL OR pr.ends_at > ?3)
+          ORDER BY c.product_kind = 'subscription' DESC, pr.amount ASC",
+        plugin_id,
+        capability,
+        now
+    )?
+    .all()
+    .await?
+    .results::<PurchaseOptionRow>()?;
+
+    let purchase_options = option_rows
+        .into_iter()
+        .map(|row| {
+            let allowed_rails =
+                serde_json::from_str::<Vec<String>>(&row.allowed_rails_json).unwrap_or_default();
+            let rails = active_purchase_rails(&allowed_rails, &row.active_providers);
+            json!({
+                "productId": row.product_id,
+                "sku": row.sku,
+                "displayName": row.display_name,
+                "productKind": row.product_kind,
+                "subscriptionPeriodSeconds": row.subscription_period_seconds,
+                "currency": row.currency,
+                "amount": row.amount,
+                "activeRails": rails,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let allowed = entitlement.is_some() || !protected;
+    if !protected && entitlement.is_none() {
+        access_reason = "unprotected_capability";
+        effective_expires_at = None;
+    }
+
+    Response::from_json(&json!({
+        "entitlement": entitlement,
+        "access": {
+            "protected": protected,
+            "allowed": allowed,
+            "reason": access_reason,
+            "effectiveExpiresAt": effective_expires_at,
+        },
+        "purchaseOptions": purchase_options,
+    }))
 }
 
 pub(super) async fn delegated_plugin_token(

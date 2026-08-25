@@ -3,6 +3,9 @@
 #[cfg(any(target_arch = "wasm32", test))]
 mod auth;
 
+#[cfg(any(target_arch = "wasm32", test))]
+mod capability_access;
+
 pub const PLATFORM_SCHEMA_V1: &str = include_str!("../migrations/0001_platform.sql");
 pub const LISTENER_RELAY_SCHEMA_V5: &str = include_str!("../migrations/0005_listener_relay.sql");
 pub const REMOTE_COMPUTER_SCHEMA_V6: &str = include_str!("../migrations/0006_remote_computer.sql");
