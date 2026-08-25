@@ -402,6 +402,7 @@ struct AuthenticatedAccount {
 mod account;
 mod ai_usage;
 mod commerce;
+mod developer_commerce_proxy;
 mod listener_relay;
 mod marketplace;
 mod remote_computer;
@@ -410,6 +411,7 @@ mod security;
 use account::*;
 use ai_usage::*;
 use commerce::*;
+use developer_commerce_proxy::*;
 use listener_relay::*;
 use marketplace::*;
 use remote_computer::*;
@@ -511,6 +513,69 @@ pub async fn main(request: Request, env: Env, _context: Context) -> Result<Respo
         )
         .get_async("/v1/wallet/balance", wallet_balance)
         .get_async("/v1/wallet/history", wallet_history)
+        .get_async("/v1/developer/commerce/profile", developer_commerce_proxy)
+        .post_async("/v1/developer/commerce/profile", developer_commerce_proxy)
+        .get_async("/v1/developer/commerce/payout", developer_commerce_proxy)
+        .post_async(
+            "/v1/developer/commerce/payout/profile",
+            developer_commerce_proxy,
+        )
+        .post_async(
+            "/v1/developer/commerce/payout/request",
+            developer_commerce_proxy,
+        )
+        .get_async("/v1/developer/commerce/miniapps", developer_commerce_proxy)
+        .post_async(
+            "/v1/developer/commerce/miniapps/:mini_app_id",
+            developer_commerce_proxy,
+        )
+        .get_async(
+            "/v1/developer/commerce/miniapps/:mini_app_id/products",
+            developer_commerce_proxy,
+        )
+        .post_async(
+            "/v1/developer/commerce/miniapps/:mini_app_id/products",
+            developer_commerce_proxy,
+        )
+        .post_async(
+            "/v1/developer/commerce/miniapps/:mini_app_id/products/:product_id",
+            developer_commerce_proxy,
+        )
+        .post_async(
+            "/v1/developer/commerce/miniapps/:mini_app_id/products/:product_id/google/sync",
+            developer_commerce_proxy,
+        )
+        .post_async(
+            "/v1/pay/intents/:payment_id/apple/advanced-commerce",
+            developer_commerce_proxy,
+        )
+        .get_async("/v1/developer/commerce/profile", developer_commerce_proxy)
+        .post_async("/v1/developer/commerce/profile", developer_commerce_proxy)
+        .get_async("/v1/developer/commerce/miniapps", developer_commerce_proxy)
+        .post_async(
+            "/v1/developer/commerce/miniapps/:mini_app_id",
+            developer_commerce_proxy,
+        )
+        .get_async(
+            "/v1/developer/commerce/miniapps/:mini_app_id/products",
+            developer_commerce_proxy,
+        )
+        .post_async(
+            "/v1/developer/commerce/miniapps/:mini_app_id/products",
+            developer_commerce_proxy,
+        )
+        .post_async(
+            "/v1/developer/commerce/miniapps/:mini_app_id/products/:product_id",
+            developer_commerce_proxy,
+        )
+        .post_async(
+            "/v1/developer/commerce/miniapps/:mini_app_id/products/:product_id/google/sync",
+            developer_commerce_proxy,
+        )
+        .post_async(
+            "/v1/pay/intents/:payment_id/apple/advanced-commerce",
+            developer_commerce_proxy,
+        )
         .post_async("/v1/plugins/:plugin_id/commerce/quote", commerce_quote)
         .post_async(
             "/v1/plugins/:plugin_id/commerce/purchase",

@@ -1,0 +1,35 @@
+[package]
+name = "mahayana-commerce-control-worker"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Owner-scoped Fabushi Developer Commerce control plane for dynamic fiat Mini App catalogs."
+publish = false
+
+[lib]
+path = "src/v2.rs"
+crate-type = ["cdylib", "rlib"]
+doctest = false
+
+[dependencies]
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+js-sys = "=0.3.103"
+jsonwebtoken = { version = "10.4.0", default-features = false, features = ["rust_crypto", "use_pem"] }
+uuid = { version = "1", features = ["js", "v4"] }
+wasm-bindgen = "=0.2.126"
+worker = { path = "../mahayana-pay-worker/worker-compat" }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = "z"
+strip = "symbols"
+
+[workspace]

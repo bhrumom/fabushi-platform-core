@@ -163,10 +163,44 @@ struct AppleTransactionResponse {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct AppleAdvancedCommerceTransactionItem {
+    #[serde(rename = "SKU")]
+    sku: String,
+    price: i64,
+    #[serde(default)]
+    revocation_date: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AppleAdvancedCommerceTransactionInfo {
+    request_reference_id: String,
+    tax_code: String,
+    items: Vec<AppleAdvancedCommerceTransactionItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AppleAdvancedCommerceExpectedRow {
+    request_reference_id: String,
+    generic_product_id: String,
+    dynamic_sku: String,
+    currency: String,
+    price_milliunits: i64,
+    tax_code: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AppleTransactionPayload {
     transaction_id: String,
     product_id: String,
     bundle_id: String,
+    #[serde(default)]
+    app_account_token: Option<String>,
+    #[serde(default)]
+    currency: Option<String>,
+    #[serde(default)]
+    advanced_commerce_info: Option<AppleAdvancedCommerceTransactionInfo>,
     #[serde(default)]
     revocation_date: Option<i64>,
 }
@@ -331,6 +365,7 @@ pub async fn checkout_action(request: Request, context: RouteContext<()>) -> Res
             "kind": "appleInAppPurchase",
             "productId": payment.provider_product_ref,
             "verifyPath": format!("/v1/pay/intents/{}/apple/verify", payment.payment_id),
+            "advancedCommercePath": format!("/v1/pay/intents/{}/apple/advanced-commerce", payment.payment_id),
         }),
         "google_play_billing" => json!({
             "kind": "googlePlayBilling",
@@ -444,10 +479,36 @@ pub async fn verify_apple(mut request: Request, context: RouteContext<()>) -> Re
     let bundle_id = env_string(&context.env, "APPLE_BUNDLE_ID")?;
     let jwt = apple_server_jwt(&context.env, &bundle_id)?;
     let (body, payload) = fetch_apple_transaction(&input.transaction_id, &jwt).await?;
+    let advanced_expected=worker::query!(&database,"SELECT request_reference_id,generic_product_id,dynamic_sku,currency,price_milliunits,tax_code FROM apple_advanced_commerce_requests WHERE payment_id=?1 LIMIT 1",&payment.payment_id)?.first::<AppleAdvancedCommerceExpectedRow>(None).await?;
+    let advanced_binding=worker::query!(&database,"SELECT product_id FROM payment_provider_bindings WHERE product_id=?1 AND provider='apple_advanced_commerce' AND sync_state='active' LIMIT 1",&payment.product_id)?.first::<Value>(None).await?;
+    if advanced_binding.is_some() && advanced_expected.is_none() {
+        return error_response(
+            409,
+            "apple_advanced_request_missing",
+            "Advanced Commerce checkout must be signed before transaction verification",
+        );
+    }
+    let advanced_matches = match advanced_expected.as_ref() {
+        Some(expected) => {
+            let info = payload.advanced_commerce_info.as_ref();
+            info.is_some_and(|info| {
+                info.request_reference_id == expected.request_reference_id
+                    && info.tax_code == expected.tax_code
+                    && info.items.len() == 1
+                    && info.items[0].sku == expected.dynamic_sku
+                    && info.items[0].price == expected.price_milliunits
+                    && info.items[0].revocation_date.is_none()
+            }) && payload.product_id == expected.generic_product_id
+                && payload.app_account_token.as_deref() == Some(payment.payment_id.as_str())
+                && payload.currency.as_deref() == Some(expected.currency.as_str())
+        }
+        None => true,
+    };
     if payload.bundle_id != bundle_id
         || Some(payload.product_id.as_str()) != payment.provider_product_ref.as_deref()
         || payload.transaction_id != input.transaction_id
         || payload.revocation_date.is_some()
+        || !advanced_matches
     {
         return error_response(
             403,
@@ -557,7 +618,19 @@ pub async fn verify_google(mut request: Request, context: RouteContext<()>) -> R
 pub async fn provider_webhook(mut request: Request, context: RouteContext<()>) -> Result<Response> {
     require_bearer_secret(&request, &context.env, "FABUSHI_PAY_WEBHOOK_SECRET")?;
     let provider = route_identifier(&context, "provider")?.to_ascii_lowercase();
-    if !matches!(provider.as_str(), "web" | "merchant") {
+    if !matches!(
+        provider.as_str(),
+        "web"
+            | "merchant"
+            | "stripe_connect"
+            | "adyen_platform"
+            | "paypal_multiparty"
+            | "paypal_payouts"
+            | "wechat_platform"
+            | "alipay_platform"
+            | "lianlian_account_plus"
+            | "huifu_dougong"
+    ) {
         return error_response(
             404,
             "provider_not_found",
@@ -618,6 +691,18 @@ pub async fn admin_release_settlement(
     require_bearer_secret(&request, &context.env, "FABUSHI_PAY_ADMIN_TOKEN")?;
     let input: AdminSettlementRequest = request.json().await?;
     validate_identifier(&input.payment_id)?;
+    if input.payment_id.len() > 0 {
+        let database = context.env.d1(DATABASE_BINDING)?;
+        if let Some(payment) = payment_by_id(&database, &input.payment_id).await? {
+            if payment.currency != CREDITS_CURRENCY {
+                return error_response(
+                    409,
+                    "reconciliation_required",
+                    "fiat developer settlement must use the reconciliation waterfall",
+                );
+            }
+        }
+    }
     validate_identifier(&input.idempotency_key)?;
     let reserve_bps = input.reserve_bps.unwrap_or(0);
     if reserve_bps > 10_000 {
@@ -970,15 +1055,21 @@ async fn process_normalized_event(
         }
         "payoutPaid" => {
             let payout_id = required_event_value(event.payout_id.as_deref(), "payoutId")?;
-            worker::query!(database,
-                "UPDATE developer_payouts SET status = 'paid', provider_reference = COALESCE(?1, provider_reference), updated_at = ?2
-                 WHERE payout_id = ?3 AND status IN ('pending', 'processing')",
-                event.provider_reference.as_deref(), occurred_at, payout_id)?.run().await?;
+            finalize_paid_payout(
+                database,
+                payout_id,
+                event.provider_reference.as_deref(),
+                occurred_at,
+            )
+            .await?;
             Ok(None)
         }
         "payoutFailed" => {
             let payout_id = required_event_value(event.payout_id.as_deref(), "payoutId")?;
             reverse_failed_payout(database, payout_id, occurred_at).await?;
+            worker::query!(database,
+                "UPDATE developer_payout_attempts SET state='failed',last_error=COALESCE(last_error,'provider reported payout failure'),updated_at=?1 WHERE payout_id=?2 AND state NOT IN ('paid','cancelled')",
+                occurred_at,payout_id)?.run().await?;
             Ok(None)
         }
         _ => Err(worker::Error::RustError(
@@ -1189,6 +1280,19 @@ async fn apply_refund(
     }
     if !matches!(payment.status.as_str(), "succeeded" | "partially_refunded") {
         return Err(worker::Error::RustError("payment is not refundable".into()));
+    }
+    if let Some(reconciliation) = reconciled_refund_row(database, &payment.payment_id).await? {
+        return apply_refund_after_reconciliation(
+            database,
+            payment,
+            &reconciliation,
+            provider,
+            refund_reference,
+            amount,
+            event_id,
+            occurred_at,
+        )
+        .await;
     }
     let new_refunded = payment.refunded_amount.saturating_add(amount);
     let fee_refund = platform_fee(payment, new_refunded)
@@ -1606,6 +1710,11 @@ fn developer_pending_account(developer_id: &str, currency: &str) -> String {
 fn developer_available_account(developer_id: &str, currency: &str) -> String {
     format!("developer-available:{developer_id}:{currency}")
 }
+
+include!("payout_orchestration.rs");
+include!("reconciled_refund.rs");
+include!("reserve_release.rs");
+include!("payout_finalize.rs");
 
 fn normalize_rail(value: &str) -> Result<&'static str> {
     match value.trim() {

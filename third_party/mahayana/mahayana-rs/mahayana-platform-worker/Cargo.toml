@@ -28,4 +28,4 @@ pretty_assertions = "1.4"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["rust_crypto", "use_pem"] }
 worker = { version = "0.8.5", features = ["d1", "queue"] }
-wasm-bindgen = "0.2"
+wasm-bindgen = "=0.2.126"
