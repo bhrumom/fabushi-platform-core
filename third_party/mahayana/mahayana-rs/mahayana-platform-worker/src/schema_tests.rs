@@ -143,3 +143,27 @@ fn validation_rejects_floating_point_money() {
         Err(SchemaError::FloatingPointAmount)
     );
 }
+
+#[test]
+fn worker_router_rejects_duplicate_developer_commerce_regressions() {
+    let source = include_str!("worker_api.rs");
+    let compact = source.split_whitespace().collect::<String>();
+    for (method, route) in [
+        ("get", "/v1/developer/commerce/profile"),
+        ("post", "/v1/developer/commerce/profile"),
+        ("get", "/v1/developer/commerce/miniapps"),
+        ("post", "/v1/developer/commerce/miniapps/:mini_app_id"),
+        ("get", "/v1/developer/commerce/miniapps/:mini_app_id/products"),
+        ("post", "/v1/developer/commerce/miniapps/:mini_app_id/products"),
+        ("post", "/v1/developer/commerce/miniapps/:mini_app_id/products/:product_id"),
+        ("post", "/v1/developer/commerce/miniapps/:mini_app_id/products/:product_id/google/sync"),
+        ("post", "/v1/pay/intents/:payment_id/apple/advanced-commerce"),
+    ] {
+        let needle = format!(".{method}_async(\"{route}\"");
+        assert_eq!(
+            compact.matches(&needle).count(),
+            1,
+            "duplicate Mahayana Worker router registration: {method} {route}"
+        );
+    }
+}

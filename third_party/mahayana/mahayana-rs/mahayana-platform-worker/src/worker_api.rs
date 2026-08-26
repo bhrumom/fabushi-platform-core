@@ -549,33 +549,6 @@ pub async fn main(request: Request, env: Env, _context: Context) -> Result<Respo
             "/v1/pay/intents/:payment_id/apple/advanced-commerce",
             developer_commerce_proxy,
         )
-        .get_async("/v1/developer/commerce/profile", developer_commerce_proxy)
-        .post_async("/v1/developer/commerce/profile", developer_commerce_proxy)
-        .get_async("/v1/developer/commerce/miniapps", developer_commerce_proxy)
-        .post_async(
-            "/v1/developer/commerce/miniapps/:mini_app_id",
-            developer_commerce_proxy,
-        )
-        .get_async(
-            "/v1/developer/commerce/miniapps/:mini_app_id/products",
-            developer_commerce_proxy,
-        )
-        .post_async(
-            "/v1/developer/commerce/miniapps/:mini_app_id/products",
-            developer_commerce_proxy,
-        )
-        .post_async(
-            "/v1/developer/commerce/miniapps/:mini_app_id/products/:product_id",
-            developer_commerce_proxy,
-        )
-        .post_async(
-            "/v1/developer/commerce/miniapps/:mini_app_id/products/:product_id/google/sync",
-            developer_commerce_proxy,
-        )
-        .post_async(
-            "/v1/pay/intents/:payment_id/apple/advanced-commerce",
-            developer_commerce_proxy,
-        )
         .post_async("/v1/plugins/:plugin_id/commerce/quote", commerce_quote)
         .post_async(
             "/v1/plugins/:plugin_id/commerce/purchase",
