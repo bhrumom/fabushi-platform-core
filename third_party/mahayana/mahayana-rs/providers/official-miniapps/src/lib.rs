@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const OFFICIAL_PLUGIN_IDS: [&str; 8] = [
+pub const OFFICIAL_PLUGIN_IDS: [&str; 9] = [
     "global-dharma",
     "faliu-flashcards",
     "platform-publish",
@@ -31,6 +31,7 @@ pub const OFFICIAL_PLUGIN_IDS: [&str; 8] = [
     "mahayana-assistant",
     "chatgpt-auto-confirm",
     "wechat-article-downloader",
+    "douyin-batch-downloader",
 ];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -168,6 +169,7 @@ impl OfficialMiniAppEngine {
             "wechat-article-downloader" => {
                 self.call_wechat_article_downloader(tool_name, &arguments)
             }
+            "douyin-batch-downloader" => self.call_douyin_batch_downloader(tool_name, &arguments),
             _ => unreachable!("validated plugin id"),
         }
     }
@@ -684,6 +686,23 @@ impl OfficialMiniAppEngine {
         ))
     }
 
+    fn call_douyin_batch_downloader(
+        &mut self,
+        tool: &str,
+        arguments: &Value,
+    ) -> Result<ToolCallOutcome, String> {
+        let capability = match tool {
+            "resolve" => "network.douyin.resolve",
+            "download" => "filesystem.douyin.download",
+            _ => return Err(format!("unsupported douyin batch downloader tool: {tool}")),
+        };
+        Ok(outcome(
+            "抖音批量下载请求已交给本地宿主。",
+            json!({"handled":true,"hostRequest":host_request(capability,arguments.clone())}),
+            progress_pair("验证抖音链接", "本地下载请求已提交"),
+        ))
+    }
+
     fn call_chatgpt_auto_confirm(
         &mut self,
         tool: &str,
@@ -889,6 +908,12 @@ pub fn app_definition(plugin_id: &str) -> Option<AppDefinition> {
                 ("discover", "discover"),
                 ("download", "download"),
             ]),
+        ),
+        "douyin-batch-downloader" => (
+            "抖音批量无水印下载",
+            "批量解析用户有权访问的抖音分享，并把平台暴露的最高质量无水印 MP4 保存到本地",
+            douyin_batch_downloader_tools(),
+            command_map(&[("resolve", "resolve"), ("download", "download")]),
         ),
         _ => return None,
     };
@@ -1561,6 +1586,40 @@ fn wechat_article_downloader_tools() -> Vec<Value> {
             "递归发现并下载同一公众号公开可访问的完整文章正文、纯文本、元数据和本地图片，生成可离线打开的文件",
             common,
             &["url"],
+            annotations(false, false, true),
+            false,
+        ),
+    ]
+}
+
+fn douyin_batch_downloader_tools() -> Vec<Value> {
+    let common = json!({
+        "urls":{"type":"array","items":{"type":"string","format":"uri"},"maxItems":200},
+        "input":{"type":"string","description":"包含一个或多个抖音分享链接的文本"},
+        "outputDir":{"type":"string","default":"douyin-videos"},
+        "delayMs":{"type":"integer","minimum":250,"maximum":10000,"default":750},
+        "retries":{"type":"integer","minimum":1,"maximum":8,"default":3},
+        "maxItems":{"type":"integer","minimum":1,"maximum":2000,"default":200},
+        "maxBytes":{"type":"integer","minimum":1048576,"maximum":4294967296,"default":4294967296},
+        "overwrite":{"type":"boolean","default":false},
+        "cookie":{"type":"string","description":"可选的用户自有抖音会话 Cookie；只在本机请求中使用，不上传或写入日志"},
+        "cookieFile":{"type":"string","description":"可选的本机会话 Cookie 文件路径"}
+    });
+    vec![
+        home_tool(),
+        tool(
+            "resolve",
+            "校验并解析一批用户有权访问的抖音链接，返回无水印播放地址和元数据但不写视频文件",
+            common.clone(),
+            &[],
+            annotations(true, false, true),
+            false,
+        ),
+        tool(
+            "download",
+            "批量下载平台向当前会话暴露的最高质量无水印 MP4 到本地并生成 manifest.json",
+            common,
+            &[],
             annotations(false, false, true),
             false,
         ),

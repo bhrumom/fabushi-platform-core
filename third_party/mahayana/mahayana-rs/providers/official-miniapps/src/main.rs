@@ -1,3 +1,4 @@
+mod douyin_downloader;
 mod wechat_downloader;
 
 use fabushi_official_miniapps::{
@@ -75,7 +76,7 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
                         json!({"input":args.join(" ")})
                     }
                 });
-            if let Some(native_result) = run_wechat_native_tool(&plugin_id, tool, &arguments)? {
+            if let Some(native_result) = run_local_native_tool(&plugin_id, tool, &arguments)? {
                 return print_json(&native_result);
             }
             if let Some(native_result) = run_chatgpt_native_tool(&plugin_id, tool, &arguments)? {
@@ -345,9 +346,9 @@ fn call_mcp_tool(
         .cloned()
         .unwrap_or_else(|| json!({}));
     if let Some(native_result) =
-        run_wechat_native_tool(plugin_id, name, &arguments).map_err(|error| (-32000, error))?
+        run_local_native_tool(plugin_id, name, &arguments).map_err(|error| (-32000, error))?
     {
-        return Ok(wechat_native_mcp_result(name, native_result));
+        return Ok(local_native_mcp_result(plugin_id, name, native_result));
     }
     if let Some(native_result) =
         run_chatgpt_native_tool(plugin_id, name, &arguments).map_err(|error| (-32000, error))?
@@ -367,24 +368,25 @@ fn call_mcp_tool(
     Ok(output.result)
 }
 
-fn run_wechat_native_tool(
+fn run_local_native_tool(
     plugin_id: &str,
     tool: &str,
     arguments: &Value,
 ) -> Result<Option<Value>, String> {
-    if plugin_id != "wechat-article-downloader" {
-        return Ok(None);
+    match plugin_id {
+        "wechat-article-downloader" => wechat_downloader::run(tool, arguments).map(Some),
+        "douyin-batch-downloader" => douyin_downloader::run(tool, arguments).map(Some),
+        _ => Ok(None),
     }
-    wechat_downloader::run(tool, arguments).map(Some)
 }
 
-fn wechat_native_mcp_result(tool: &str, payload: Value) -> Value {
+fn local_native_mcp_result(plugin_id: &str, tool: &str, payload: Value) -> Value {
     let ok = payload.get("ok").and_then(Value::as_bool).unwrap_or(true);
     let stats = payload.get("stats").cloned().unwrap_or(Value::Null);
     let text = if ok {
-        format!("微信公众号归档器已完成 {tool}：{stats}")
+        format!("{plugin_id} 已完成 {tool}：{stats}")
     } else {
-        format!("微信公众号归档器执行 {tool} 未完成")
+        format!("{plugin_id} 执行 {tool} 未完成")
     };
     json!({
         "content": [{"type":"text","text":text}],
