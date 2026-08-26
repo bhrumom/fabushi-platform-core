@@ -1,5 +1,8 @@
 use crate::actor::ActorId;
 use crate::conversation::ConversationId;
+use crate::miniapp_service_call::{
+    MiniAppServiceCallId, MiniAppServiceCallInput, MiniAppServiceCallMode, MiniAppServiceCallState,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -20,6 +23,7 @@ pub enum MiniAppPermission {
     OpenExternal,
     SendMessage,
     ReadConversation,
+    ServiceCall,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,8 +74,12 @@ pub enum MiniAppRequest {
     Ready,
     Expand,
     Close,
-    SetHeaderColor { value: String },
-    SetBackgroundColor { value: String },
+    SetHeaderColor {
+        value: String,
+    },
+    SetBackgroundColor {
+        value: String,
+    },
     RequestTheme,
     RequestViewport,
     RequestIdentity,
@@ -79,12 +87,35 @@ pub enum MiniAppRequest {
     RequestContact,
     RequestWriteAccess,
     ReadClipboard,
-    WriteClipboard { text: String },
-    OpenExternal { url: String },
-    OpenInvoice { invoice_id: String },
-    SendData { data: String },
-    SendMessage { text: String },
-    Haptic { kind: String },
+    WriteClipboard {
+        text: String,
+    },
+    OpenExternal {
+        url: String,
+    },
+    OpenInvoice {
+        invoice_id: String,
+    },
+    SendData {
+        data: String,
+    },
+    SendMessage {
+        text: String,
+    },
+    Haptic {
+        kind: String,
+    },
+    StartServiceCall {
+        call_id: MiniAppServiceCallId,
+        mode: MiniAppServiceCallMode,
+    },
+    SubmitServiceCallInput {
+        call_id: MiniAppServiceCallId,
+        input: MiniAppServiceCallInput,
+    },
+    EndServiceCall {
+        call_id: MiniAppServiceCallId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -129,30 +160,90 @@ pub enum MiniAppResponse {
         invoice_id: String,
         status: String,
     },
+    ServiceCallStatus {
+        call_id: MiniAppServiceCallId,
+        state: MiniAppServiceCallState,
+    },
 }
 
 impl MiniAppRequest {
-    pub fn required_permission(&self) -> Option<MiniAppPermission> {
+    pub fn required_permissions(&self) -> Vec<MiniAppPermission> {
         match self {
-            Self::RequestIdentity => Some(MiniAppPermission::Identity),
-            Self::RequestLocation => Some(MiniAppPermission::Location),
-            Self::RequestContact => Some(MiniAppPermission::Contacts),
-            Self::RequestWriteAccess => Some(MiniAppPermission::SendMessage),
-            Self::ReadClipboard => Some(MiniAppPermission::ClipboardRead),
-            Self::WriteClipboard { .. } => Some(MiniAppPermission::ClipboardWrite),
-            Self::OpenExternal { .. } => Some(MiniAppPermission::OpenExternal),
-            Self::OpenInvoice { .. } => Some(MiniAppPermission::Payments),
+            Self::RequestIdentity => vec![MiniAppPermission::Identity],
+            Self::RequestLocation => vec![MiniAppPermission::Location],
+            Self::RequestContact => vec![MiniAppPermission::Contacts],
+            Self::RequestWriteAccess => vec![MiniAppPermission::SendMessage],
+            Self::ReadClipboard => vec![MiniAppPermission::ClipboardRead],
+            Self::WriteClipboard { .. } => vec![MiniAppPermission::ClipboardWrite],
+            Self::OpenExternal { .. } => vec![MiniAppPermission::OpenExternal],
+            Self::OpenInvoice { .. } => vec![MiniAppPermission::Payments],
             Self::SendMessage { .. } | Self::SendData { .. } => {
-                Some(MiniAppPermission::SendMessage)
+                vec![MiniAppPermission::SendMessage]
             }
-            Self::Haptic { .. } => Some(MiniAppPermission::Haptics),
+            Self::Haptic { .. } => vec![MiniAppPermission::Haptics],
+            Self::StartServiceCall { mode, .. } => {
+                let mut permissions = vec![MiniAppPermission::ServiceCall];
+                if matches!(
+                    mode,
+                    MiniAppServiceCallMode::Voice | MiniAppServiceCallMode::Hybrid
+                ) {
+                    permissions.push(MiniAppPermission::Microphone);
+                }
+                permissions
+            }
+            Self::SubmitServiceCallInput { input, .. } => {
+                let mut permissions = vec![MiniAppPermission::ServiceCall];
+                if matches!(input, MiniAppServiceCallInput::SpeechTranscript { .. }) {
+                    permissions.push(MiniAppPermission::Microphone);
+                }
+                permissions
+            }
+            Self::EndServiceCall { .. } => vec![MiniAppPermission::ServiceCall],
             Self::Ready
             | Self::Expand
             | Self::Close
             | Self::SetHeaderColor { .. }
             | Self::SetBackgroundColor { .. }
             | Self::RequestTheme
-            | Self::RequestViewport => None,
+            | Self::RequestViewport => Vec::new(),
         }
+    }
+
+    pub fn required_permission(&self) -> Option<MiniAppPermission> {
+        self.required_permissions().into_iter().next()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn voice_service_call_requires_service_call_and_microphone_permissions() {
+        let request = MiniAppRequest::StartServiceCall {
+            call_id: MiniAppServiceCallId::new("svc-call:1"),
+            mode: MiniAppServiceCallMode::Voice,
+        };
+        assert_eq!(
+            request.required_permissions(),
+            vec![
+                MiniAppPermission::ServiceCall,
+                MiniAppPermission::Microphone
+            ]
+        );
+    }
+
+    #[test]
+    fn text_service_call_does_not_require_microphone() {
+        let request = MiniAppRequest::SubmitServiceCallInput {
+            call_id: MiniAppServiceCallId::new("svc-call:1"),
+            input: MiniAppServiceCallInput::ChatText {
+                text: "查询余额".into(),
+            },
+        };
+        assert_eq!(
+            request.required_permissions(),
+            vec![MiniAppPermission::ServiceCall]
+        );
     }
 }
