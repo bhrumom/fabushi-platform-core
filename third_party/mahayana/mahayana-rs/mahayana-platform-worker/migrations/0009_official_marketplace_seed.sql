@@ -1,6 +1,7 @@
 -- Register Fabushi official Mini Apps in the authoritative marketplace D1.
 -- Existing immutable releases are preserved; metadata is safe to re-apply.
-PRAGMA foreign_keys = ON;
+-- Cloudflare D1 enforces foreign keys for migrations and rejects attempts to
+-- change PRAGMA foreign_keys inside the implicit migration transaction.
 
 CREATE TEMP TABLE _official_marketplace_seed (
   plugin_id TEXT PRIMARY KEY, display_name TEXT NOT NULL, description TEXT NOT NULL,
