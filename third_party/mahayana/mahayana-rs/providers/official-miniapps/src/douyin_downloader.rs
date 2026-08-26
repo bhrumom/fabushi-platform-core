@@ -352,13 +352,24 @@ fn extract_urls(value: &str) -> Vec<String> {
 }
 
 fn decode_page_source(value: &str) -> String {
-    let decoded = decode_html_entities(value).to_string();
+    let mut decoded = decode_html_entities(value).to_string();
+    // Douyin can embed media metadata inside JSON strings that are themselves
+    // serialized into another page-state string. Normalize a small, bounded
+    // number of escaping layers so both `\/` and nested `\\/` URLs become
+    // valid HTTPS candidates without attempting unbounded recursive decoding.
+    for _ in 0..4 {
+        let next = decoded
+            .replace("\\u002F", "/")
+            .replace("\\u002f", "/")
+            .replace("\\/", "/")
+            .replace("\\u0026", "&")
+            .replace("&amp;", "&");
+        if next == decoded {
+            break;
+        }
+        decoded = next;
+    }
     decoded
-        .replace("\\u002F", "/")
-        .replace("\\u002f", "/")
-        .replace("\\/", "/")
-        .replace("\\u0026", "&")
-        .replace("&amp;", "&")
 }
 
 fn collect_media_candidates(source: &str) -> Vec<String> {

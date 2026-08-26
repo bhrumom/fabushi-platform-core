@@ -725,8 +725,9 @@ impl MahayanaProductClient {
         if let Some(platform) = platform {
             parameters.push(("platform", platform));
         }
-        let token = self.optional_authorization_token(&Value::Null)?;
-        self.get_json("/v1/marketplace/plugins", &parameters, token.as_deref())
+        // Public marketplace discovery must never be coupled to account-token
+        // refresh. A revoked login must not hide publicly approved Mini Apps.
+        self.get_json("/v1/marketplace/plugins", &parameters, None)
     }
 
     pub fn marketplace_release_metadata(
@@ -736,11 +737,10 @@ impl MahayanaProductClient {
     ) -> Result<Value, ProductError> {
         let plugin_id = safe_path_identifier(plugin_id, "pluginId")?;
         let version = safe_marketplace_version(version)?;
-        let token = self.optional_authorization_token(&Value::Null)?;
         self.get_json(
             &format!("/v1/marketplace/plugins/{plugin_id}/releases/{version}"),
             &[],
-            token.as_deref(),
+            None,
         )
     }
 
@@ -752,18 +752,13 @@ impl MahayanaProductClient {
     ) -> Result<Vec<u8>, ProductError> {
         let plugin_id = safe_path_identifier(plugin_id, "pluginId")?;
         let version = safe_marketplace_version(version)?;
-        let token = self.optional_authorization_token(&Value::Null)?;
         let client = http_client()?;
-        let mut request = client
+        let response = client
             .get(format!(
                 "{}/v1/marketplace/plugins/{plugin_id}/releases/{version}/download",
                 self.api_base_url
             ))
-            .header("Accept", "application/gzip, application/octet-stream");
-        if let Some(token) = token {
-            request = request.bearer_auth(token);
-        }
-        let response = request
+            .header("Accept", "application/gzip, application/octet-stream")
             .send()
             .map_err(|error| ProductError::Transport(error.to_string()))?;
         if !response.status().is_success() {
@@ -1767,13 +1762,21 @@ impl MahayanaProductClient {
     fn auth_status(&self, request: &Value) -> Result<Value, ProductError> {
         let command_token = access_token(request);
         let session = self.load_session()?;
-        let Some(token) = (match command_token {
+        let token = match command_token {
             Some(token) => Some(token.to_string()),
-            None => session
-                .clone()
-                .map(|session| self.active_session_token(session))
-                .transpose()?,
-        }) else {
+            None => match session.clone() {
+                Some(session) => match self.active_session_token(session) {
+                    Ok(token) => Some(token),
+                    Err(error) if terminal_session_error(&error) => {
+                        self.remove_session()?;
+                        None
+                    }
+                    Err(error) => return Err(error),
+                },
+                None => None,
+            },
+        };
+        let Some(token) = token else {
             return Ok(json!({
                 "@type": "mahayana.auth.status",
                 "loggedIn": false,
@@ -2334,7 +2337,14 @@ impl MahayanaProductClient {
         if let Some(device_id) = optional_string(&session, "deviceId") {
             body["deviceId"] = Value::String(device_id.to_string());
         }
-        let response = self.post_json("/api/auth/refresh", body, None)?;
+        let response = match self.post_json("/api/auth/refresh", body, None) {
+            Ok(response) => response,
+            Err(error) if terminal_session_error(&error) => {
+                self.remove_session()?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
         let refreshed_token = access_token(&response).map(str::to_string).ok_or_else(|| {
             ProductError::Response("refresh response did not include an access token".to_string())
         })?;
@@ -3065,6 +3075,15 @@ impl std::fmt::Display for ProductError {
 
 impl std::error::Error for ProductError {}
 
+fn terminal_session_error(error: &ProductError) -> bool {
+    matches!(
+        error,
+        ProductError::NotLoggedIn
+            | ProductError::SessionExpired
+            | ProductError::HttpStatus { status: 401, .. }
+    )
+}
+
 pub fn redact_secrets(value: &Value) -> Value {
     match value {
         Value::Object(object) => {
@@ -3166,6 +3185,67 @@ mod tests {
             safe_platform_path("/api/../admin"),
             Err(ProductError::InvalidParameter("path"))
         );
+    }
+
+    #[test]
+    fn marketplace_browse_is_public_and_omits_authorization() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind marketplace test server");
+        let address = listener.local_addr().expect("marketplace test address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept marketplace request");
+            let mut request = [0_u8; 4096];
+            let size = stream.read(&mut request).expect("read marketplace request");
+            let request = String::from_utf8_lossy(&request[..size]);
+            assert!(request.starts_with("GET /v1/marketplace/plugins?q=global&platform=desktop "));
+            assert!(!request.to_ascii_lowercase().contains("authorization:"));
+            let body = r#"{"plugins":[{"pluginId":"global-dharma","displayName":"全球法布施"}]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write marketplace response");
+        });
+
+        let unique = format!(
+            "mahayana-public-marketplace-test-{}-{}",
+            std::process::id(),
+            surface_now_millis()
+        );
+        let root = std::env::temp_dir().join(unique);
+        let client = MahayanaProductClient::new_with_surface_state_path(
+            format!("http://{address}"),
+            root.join("session.json"),
+            root.join("product-surface.json"),
+        );
+        let catalog = client
+            .marketplace_browse(Some("global"), Some("desktop"))
+            .expect("public marketplace must not require account authorization");
+        assert_eq!(catalog["plugins"][0]["pluginId"], "global-dharma");
+        server.join().expect("join marketplace test server");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn terminal_session_errors_are_classified_for_local_eviction() {
+        assert!(terminal_session_error(&ProductError::NotLoggedIn));
+        assert!(terminal_session_error(&ProductError::SessionExpired));
+        assert!(terminal_session_error(&ProductError::HttpStatus {
+            status: 401,
+            message: "refresh_token_reused".into(),
+        }));
+        assert!(!terminal_session_error(&ProductError::HttpStatus {
+            status: 503,
+            message: "upstream unavailable".into(),
+        }));
+        assert!(!terminal_session_error(&ProductError::Transport(
+            "timeout".into()
+        )));
     }
 
     #[test]

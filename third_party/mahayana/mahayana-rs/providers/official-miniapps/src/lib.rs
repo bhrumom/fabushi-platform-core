@@ -1600,7 +1600,7 @@ fn douyin_batch_downloader_tools() -> Vec<Value> {
         "delayMs":{"type":"integer","minimum":250,"maximum":10000,"default":750},
         "retries":{"type":"integer","minimum":1,"maximum":8,"default":3},
         "maxItems":{"type":"integer","minimum":1,"maximum":2000,"default":200},
-        "maxBytes":{"type":"integer","minimum":1048576,"maximum":4294967296,"default":4294967296},
+        "maxBytes":{"type":"integer","minimum":1048576,"maximum":4294967296_i64,"default":4294967296_i64},
         "overwrite":{"type":"boolean","default":false},
         "cookie":{"type":"string","description":"可选的用户自有抖音会话 Cookie；只在本机请求中使用，不上传或写入日志"},
         "cookieFile":{"type":"string","description":"可选的本机会话 Cookie 文件路径"}
