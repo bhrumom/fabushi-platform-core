@@ -48,7 +48,20 @@ pub(super) async fn ai_usage_reserve(
 
     let window_start = usage_window_start(now);
     let window_end = window_start + USAGE_WINDOW_SECONDS;
-    let default_limit = default_usage_limit(&context.env)?;
+    let (token_limit, unlimited) = account_usage_limit(&context.env, &user_id)?;
+    if unlimited {
+        worker::query!(
+            &database,
+            "UPDATE ai_usage_budgets SET token_limit = ?1, updated_at = ?2
+             WHERE user_id = ?3 AND window_start = ?4",
+            token_limit,
+            now,
+            &user_id,
+            window_start
+        )?
+        .run()
+        .await?;
+    }
     worker::query!(
         &database,
         "INSERT OR IGNORE INTO ai_usage_budgets
@@ -57,7 +70,7 @@ pub(super) async fn ai_usage_reserve(
         &user_id,
         window_start,
         window_end,
-        default_limit,
+        token_limit,
         now
     )?
     .run()
@@ -341,6 +354,7 @@ async fn current_usage_status(
 ) -> Result<AccountUsageStatus> {
     let window_start = usage_window_start(now);
     let window_end = window_start + USAGE_WINDOW_SECONDS;
+    let (entitled_limit, unlimited) = account_usage_limit(env, user_id)?;
     let row = worker::query!(
         database,
         "SELECT window_start, window_end, token_limit, used_tokens, reserved_tokens
@@ -354,9 +368,17 @@ async fn current_usage_status(
         Some(row) => {
             debug_assert_eq!(row.window_start, window_start);
             debug_assert_eq!(row.window_end, window_end);
-            (row.token_limit, row.used_tokens, row.reserved_tokens)
+            (
+                if unlimited {
+                    entitled_limit
+                } else {
+                    row.token_limit
+                },
+                row.used_tokens,
+                row.reserved_tokens,
+            )
         }
-        None => (default_usage_limit(env)?, 0, 0),
+        None => (entitled_limit, 0, 0),
     };
     Ok(AccountUsageStatus {
         window_start,
@@ -367,6 +389,7 @@ async fn current_usage_status(
         remaining_tokens: token_limit
             .saturating_sub(used_tokens)
             .saturating_sub(reserved_tokens),
+        unlimited,
     })
 }
 
@@ -474,6 +497,27 @@ fn default_usage_limit(env: &Env) -> Result<i64> {
         .ok()
         .filter(|limit| *limit >= 0)
         .ok_or_else(|| worker::Error::RustError("DEFAULT_AI_TOKEN_LIMIT is invalid".into()))
+}
+
+fn account_usage_limit(env: &Env, user_id: &str) -> Result<(i64, bool)> {
+    let configured = ["SUPER_ADMIN_ACCOUNT_IDS", "ADMIN_ACCOUNT_IDS"]
+        .into_iter()
+        .filter_map(|name| env.var(name).ok())
+        .any(|value| {
+            value
+                .to_string()
+                .split(',')
+                .any(|candidate| candidate.trim() == user_id.trim())
+        });
+    let unlimited = is_builtin_super_admin_account_id(user_id) || configured;
+    Ok((
+        if unlimited {
+            UNLIMITED_AI_TOKEN_LIMIT
+        } else {
+            default_usage_limit(env)?
+        },
+        unlimited,
+    ))
 }
 
 fn require_model_gateway(request: &Request, env: &Env) -> Result<()> {

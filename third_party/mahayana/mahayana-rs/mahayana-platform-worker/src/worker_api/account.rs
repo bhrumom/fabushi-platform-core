@@ -2006,6 +2006,7 @@ fn issue_account_access_token(
 }
 
 fn serialize_account_user(user: &AccountUserRow) -> serde_json::Value {
+    let super_admin = is_builtin_super_admin_account_id(&user.id.to_string());
     let avatar = user
         .avatar
         .as_ref()
@@ -2018,6 +2019,19 @@ fn serialize_account_user(user: &AccountUserRow) -> serde_json::Value {
             "selectedAt": user.main_practice_selected_at,
         })
     });
+    let membership = if super_admin {
+        json!({
+            "type": "lifetime",
+            "expiresAt": null,
+            "isActive": true,
+            "active": true,
+        })
+    } else {
+        json!({
+            "type": user.membership_type.as_deref().unwrap_or("expired"),
+            "expiresAt": user.membership_expires_at.as_ref().or(user.free_trial_end_date.as_ref()),
+        })
+    };
     json!({
         "id": user.id,
         "userId": user.id,
@@ -2037,10 +2051,10 @@ fn serialize_account_user(user: &AccountUserRow) -> serde_json::Value {
         "mainPractice": main_practice,
         "createdAt": user.created_at,
         "emailVerified": user.email_verified == Some(1),
-        "membership": {
-            "type": user.membership_type.as_deref().unwrap_or("expired"),
-            "expiresAt": user.membership_expires_at.as_ref().or(user.free_trial_end_date.as_ref()),
-        },
+        "isAdmin": super_admin,
+        "role": if super_admin { "super_admin" } else { "user" },
+        "unlimitedUsage": super_admin,
+        "membership": membership,
     })
 }
 

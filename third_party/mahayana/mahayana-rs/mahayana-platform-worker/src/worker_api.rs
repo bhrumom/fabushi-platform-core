@@ -70,8 +70,14 @@ const OAUTH_ATTEMPT_SECONDS: i64 = 10 * 60;
 const USAGE_WINDOW_SECONDS: i64 = 30 * 24 * 60 * 60;
 const USAGE_RESERVATION_SECONDS: i64 = 10 * 60;
 const MAX_TOKENS_PER_RESERVATION: i64 = 2_000_000;
+const UNLIMITED_AI_TOKEN_LIMIT: i64 = 9_007_199_254_740_991;
+const BUILTIN_SUPER_ADMIN_ACCOUNT_IDS: &[&str] = &["22"];
 const MARKETPLACE_DEPLOYMENT_VERIFY_ATTEMPTS: usize = 6;
 const MARKETPLACE_DEPLOYMENT_VERIFY_DELAY_SECONDS: u64 = 3;
+
+fn is_builtin_super_admin_account_id(user_id: &str) -> bool {
+    BUILTIN_SUPER_ADMIN_ACCOUNT_IDS.contains(&user_id.trim())
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 struct MarketplacePluginRow {

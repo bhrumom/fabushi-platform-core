@@ -38,4 +38,6 @@ pub struct AccountUsageStatus {
     pub used_tokens: i64,
     pub reserved_tokens: i64,
     pub remaining_tokens: i64,
+    #[serde(default)]
+    pub unlimited: bool,
 }
