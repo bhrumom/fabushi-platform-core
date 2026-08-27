@@ -8,6 +8,7 @@ use mahayana_js_runtime::{DeepSeekJsHost, scan_package_compatibility};
 use mahayana_native_engine::ProcessExecution;
 use mahayana_plugin_runtime::{
     ExternalReleaseManifest, InstalledPluginPointer, PermissionManager, PluginInstaller,
+    PluginState,
 };
 use mahayana_product::MahayanaProductClient;
 use serde::{Deserialize, Serialize};
@@ -148,6 +149,7 @@ impl AppHost {
             "runtime.start" => self.start_runtime(params),
             "runtime.stop" => self.stop_runtime(params),
             "runtime.tools" => self.runtime_tools(),
+            "runtime.call" => self.runtime_call(params),
             other => Err(AppHostError::InvalidRequest(format!(
                 "unknown method {other}"
             ))),
@@ -717,6 +719,39 @@ impl AppHost {
             .registered_tools()
             .map_err(|error| AppHostError::Operation(error.to_string()))?;
         serde_json::to_value(tools).map_err(|error| AppHostError::Operation(error.to_string()))
+    }
+
+    fn runtime_call(&self, params: Value) -> Result<Value, AppHostError> {
+        let plugin_id = string_param(&params, "pluginId")?;
+        let name = string_param(&params, "name")?;
+        let arguments = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        if !arguments.is_object() {
+            return Err(AppHostError::InvalidRequest(
+                "runtime.call arguments must be an object".into(),
+            ));
+        }
+        let host = self
+            .js
+            .lock()
+            .map_err(|_| AppHostError::Operation("JavaScript host lock poisoned".into()))?;
+        if host.plugin_state(plugin_id) != Some(PluginState::Active) {
+            return Err(AppHostError::Operation(format!(
+                "plugin {plugin_id} runtime is not active"
+            )));
+        }
+        let tools = host
+            .registered_tools()
+            .map_err(|error| AppHostError::Operation(error.to_string()))?;
+        if !tools.iter().any(|candidate| candidate == name) {
+            return Err(AppHostError::Operation(format!(
+                "tool {name} is not registered in the active runtime"
+            )));
+        }
+        host.call_tool_json(name, &arguments)
+            .map_err(|error| AppHostError::Operation(error.to_string()))
     }
 }
 
