@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[package.metadata.fabushi]
+ios-deployment-target = "17.0"
+
 [lib]
 name = "mahayana_app_host"
 crate-type = ["cdylib", "staticlib"]
