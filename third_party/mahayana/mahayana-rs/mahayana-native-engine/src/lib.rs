@@ -40,6 +40,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use uuid::Uuid;
 
+mod web_research;
+use web_research::{WebResearchClient, WebResearchConfig};
+
 const MAIN_ASSISTANT_CONVERSATION_ID: &str = "mahayana-ai:agent:assistant";
 const MAX_TOOL_OUTPUT_BYTES: usize = 64 * 1024;
 const DEFAULT_MAX_MODEL_TURNS: usize = 16;
@@ -194,6 +197,7 @@ pub struct NativeEngine {
     hooks: Mutex<HookRegistry>,
     telemetry: Arc<RuntimeTelemetry>,
     persisted_sessions: Mutex<HashMap<String, PathBuf>>,
+    web_research: Option<WebResearchClient>,
 }
 
 impl NativeEngine {
@@ -201,7 +205,17 @@ impl NativeEngine {
         model: Arc<dyn ModelRuntime>,
         config: NativeEngineConfig,
     ) -> Result<Self, KernelError> {
+        let web_config = WebResearchConfig::tinyfish_from_env();
+        Self::new_with_web_config(model, config, web_config)
+    }
+
+    fn new_with_web_config(
+        model: Arc<dyn ModelRuntime>,
+        config: NativeEngineConfig,
+        web_config: Option<WebResearchConfig>,
+    ) -> Result<Self, KernelError> {
         config.validate()?;
+        let web_research = web_config.map(WebResearchClient::new).transpose()?;
         Ok(Self {
             model,
             config,
@@ -217,6 +231,7 @@ impl NativeEngine {
             hooks: Mutex::new(HookRegistry::default()),
             telemetry: Arc::new(RuntimeTelemetry::default()),
             persisted_sessions: Mutex::new(HashMap::new()),
+            web_research,
         })
     }
 
@@ -265,8 +280,11 @@ impl NativeEngine {
             Capability::Hooks,
             Capability::ToolProtocol,
         ];
-        if !self.model.is_local() {
+        if !self.model.is_local() || self.web_research.is_some() {
             capabilities.push(Capability::Network);
+        }
+        if self.web_research.is_some() {
+            capabilities.push(Capability::WebSearch);
         }
         if self.config.enable_process_tools {
             capabilities.push(Capability::Process);
@@ -433,7 +451,10 @@ impl NativeEngine {
                         input: Value::Array(session.history.clone()),
                         metadata: json!({
                             "instructions": self.config.system_instructions,
-                            "tools": tool_definitions(self.config.enable_process_tools),
+                            "tools": tool_definitions(
+                                self.config.enable_process_tools,
+                                self.web_research.is_some(),
+                            ),
                             "tool_choice": "auto",
                             "parallel_tool_calls": false,
                         }),
@@ -906,6 +927,64 @@ impl NativeEngine {
                             Err(error)
                         }
                     }
+                }
+                "web_search" => {
+                    if !policy.allow_network {
+                        return Err(KernelError::PolicyDenied(
+                            "web search is disabled by Mahayana network policy".into(),
+                        ));
+                    }
+                    let query = string_arg(&call.arguments, "query")?;
+                    let limit = call
+                        .arguments
+                        .get("limit")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(10)
+                        .clamp(1, 10) as usize;
+                    self.web_research
+                        .as_ref()
+                        .ok_or_else(|| {
+                            KernelError::CapabilityUnavailable(
+                                "web research provider is not configured".into(),
+                            )
+                        })?
+                        .search(query, limit)
+                        .await
+                }
+                "web_fetch" => {
+                    if !policy.allow_network {
+                        return Err(KernelError::PolicyDenied(
+                            "web fetch is disabled by Mahayana network policy".into(),
+                        ));
+                    }
+                    let urls = call
+                        .arguments
+                        .get("urls")
+                        .and_then(Value::as_array)
+                        .ok_or_else(|| KernelError::Backend("web_fetch urls are required".into()))?
+                        .iter()
+                        .map(|value| {
+                            value.as_str().map(str::to_owned).ok_or_else(|| {
+                                KernelError::Backend(
+                                    "web_fetch urls must contain only strings".into(),
+                                )
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let format = call
+                        .arguments
+                        .get("format")
+                        .and_then(Value::as_str)
+                        .unwrap_or("markdown");
+                    self.web_research
+                        .as_ref()
+                        .ok_or_else(|| {
+                            KernelError::CapabilityUnavailable(
+                                "web research provider is not configured".into(),
+                            )
+                        })?
+                        .fetch(&urls, format)
+                        .await
                 }
                 "process_exec" => {
                     if !self.config.enable_process_tools || !policy.allow_process {
@@ -1959,6 +2038,7 @@ fn tool_capability(tool: &str) -> Capability {
         "memory_put" | "memory_get" | "memory_search" => Capability::Memory,
         "workflow_create" | "workflow_status" => Capability::Workflow,
         "subagent_run" => Capability::Subagent,
+        "web_search" | "web_fetch" => Capability::WebSearch,
         "process_exec" => Capability::Process,
         "git_status" | "git_diff" => Capability::Git,
         _ => Capability::ToolProtocol,
@@ -1972,6 +2052,12 @@ fn permission_target(call: &FunctionCall) -> String {
         "memory_get" | "memory_put" => call.arguments.get("key"),
         "workflow_status" => call.arguments.get("workflow_id"),
         "process_exec" => call.arguments.get("program"),
+        "web_search" => call.arguments.get("query"),
+        "web_fetch" => call
+            .arguments
+            .get("urls")
+            .and_then(Value::as_array)
+            .and_then(|urls| urls.first()),
         _ => None,
     };
     target
@@ -2028,7 +2114,7 @@ fn model_error(error: ModelError) -> KernelError {
     KernelError::Backend(error.to_string())
 }
 
-fn tool_definitions(enable_process_tools: bool) -> Vec<Value> {
+fn tool_definitions(enable_process_tools: bool, enable_web_research: bool) -> Vec<Value> {
     let mut tools = vec![
         function_tool(
             "workspace_read",
@@ -2101,6 +2187,20 @@ fn tool_definitions(enable_process_tools: bool) -> Vec<Value> {
             json!({"type":"object","properties":{"name":{"type":"string"},"goal":{"type":"string"}},"required":["goal"],"additionalProperties":false}),
         ),
     ];
+    if enable_web_research {
+        tools.extend([
+            function_tool(
+                "web_search",
+                "Search the live public web for current or external information. Use this when the task depends on information outside the workspace or may have changed since model training.",
+                json!({"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":10}},"required":["query"],"additionalProperties":false}),
+            ),
+            function_tool(
+                "web_fetch",
+                "Fetch and extract readable content from up to 10 public HTTP(S) URLs returned by web search or provided by the user. Prefer markdown for research and verify important claims from source content rather than snippets alone.",
+                json!({"type":"object","properties":{"urls":{"type":"array","minItems":1,"maxItems":10,"items":{"type":"string"}},"format":{"type":"string","enum":["markdown","text"]}},"required":["urls"],"additionalProperties":false}),
+            ),
+        ]);
+    }
     if enable_process_tools {
         tools.extend([
             function_tool(
@@ -2133,7 +2233,7 @@ fn function_tool(name: &str, description: &str, parameters: Value) -> Value {
 }
 
 fn default_system_instructions() -> String {
-    "You are Mahayana, a product-owned coding and automation Agent. Inspect before editing; prefer minimal, reversible changes; use checkpoints before risky workspace mutations; use workflows for dependent tasks; delegate focused analysis to subagents; never claim a tool succeeded unless its result says so; respect Mahayana approval and platform policy."
+    "You are Mahayana, a product-owned coding and automation Agent. Inspect before editing; prefer minimal, reversible changes; use checkpoints before risky workspace mutations; use workflows for dependent tasks; delegate focused analysis to subagents; use web_search when live or external information is needed and web_fetch to inspect strong sources before drawing conclusions; never claim a tool succeeded unless its result says so; respect Mahayana approval and platform policy."
         .to_string()
 }
 
@@ -2142,6 +2242,45 @@ mod tests {
     use super::*;
     use mahayana_model::ModelProviderMode;
     use std::collections::VecDeque;
+
+    #[test]
+    fn web_research_capability_and_tools_follow_provider_configuration() {
+        let model = Arc::new(FakeModel {
+            outputs: Mutex::new(VecDeque::new()),
+        });
+        let without_web = NativeEngine::new_with_web_config(
+            model.clone(),
+            NativeEngineConfig::embedded("model"),
+            None,
+        )
+        .expect("create engine without web");
+        assert!(!without_web.capabilities().contains(Capability::WebSearch));
+        assert!(!tool_definitions(false, false).iter().any(|tool| matches!(
+            tool.get("name").and_then(Value::as_str),
+            Some("web_search" | "web_fetch")
+        )));
+
+        let with_web = NativeEngine::new_with_web_config(
+            model,
+            NativeEngineConfig::embedded("model"),
+            Some(WebResearchConfig::for_test(
+                "http://127.0.0.1:9/search",
+                "http://127.0.0.1:9/fetch",
+                "MAHAYANA_WEB_RESEARCH_TEST_KEY",
+            )),
+        )
+        .expect("create engine with web");
+        assert!(with_web.capabilities().contains(Capability::WebSearch));
+        assert!(with_web.capabilities().contains(Capability::Network));
+        let names = tool_definitions(false, true)
+            .into_iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_owned))
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"web_search".to_string()));
+        assert!(names.contains(&"web_fetch".to_string()));
+        assert_eq!(tool_capability("web_search"), Capability::WebSearch);
+        assert_eq!(tool_capability("web_fetch"), Capability::WebSearch);
+    }
 
     #[test]
     fn local_docker_requires_an_immutable_image_digest() {
@@ -2323,6 +2462,72 @@ mod tests {
                 .any(|event| matches!(event, KernelEvent::CheckpointCreated { .. }))
         );
         std::fs::remove_dir_all(workspace).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn network_policy_blocks_web_search_before_provider_request() {
+        let call = json!({
+            "output": [{
+                "type":"function_call",
+                "call_id":"call-web-denied",
+                "name":"web_search",
+                "arguments":"{\"query\":\"current topic\"}"
+            }]
+        });
+        let done = json!({
+            "output": [{"type":"message", "content":[{"type":"output_text", "text":"network denied"}]}]
+        });
+        let model = Arc::new(FakeModel {
+            outputs: Mutex::new(VecDeque::from([call, done])),
+        });
+        let engine = NativeEngine::new_with_web_config(
+            model,
+            NativeEngineConfig::embedded("model"),
+            Some(WebResearchConfig::for_test(
+                "http://127.0.0.1:9/search",
+                "http://127.0.0.1:9/fetch",
+                "MAHAYANA_WEB_POLICY_TEST_KEY",
+            )),
+        )
+        .expect("create web engine");
+        let session = engine
+            .open_session(OpenSessionRequest {
+                profile: mahayana_kernel::RuntimeProfile::MobileEmbedded,
+                workspace_root: None,
+                model: None,
+                metadata: Value::Null,
+            })
+            .await
+            .expect("open session");
+        let events = Arc::new(Events::default());
+        let mut policy = ExecutionPolicy::mobile_default();
+        policy.allow_network = false;
+        engine
+            .run(
+                RunRequest {
+                    session_id: session,
+                    operation_id: OperationId::new(),
+                    input: "search the web".into(),
+                    policy,
+                    required_capabilities: CapabilitySet::new([Capability::WebSearch]),
+                    metadata: Value::Null,
+                },
+                events.clone(),
+            )
+            .await
+            .expect("model recovers from denied search");
+        assert!(
+            events
+                .0
+                .lock()
+                .expect("events")
+                .iter()
+                .any(|event| matches!(
+                    event,
+                    KernelEvent::ToolCompleted { tool, output, success: false, .. }
+                        if tool == "web_search" && output.to_string().contains("denied")
+                ))
+        );
     }
 
     #[tokio::test]
