@@ -49,6 +49,31 @@ fn remote_computer_migration_keeps_control_plane_separate_from_desktop_data() {
 }
 
 #[test]
+fn ci_runner_auth_is_exact_workflow_and_linked_account_scoped() {
+    for required in [
+        "token.actions.githubusercontent.com",
+        "bhrumom/fabushi",
+        "1037709914",
+        "281146136",
+        "interactive-runner-mcp.yml@refs/heads/main",
+        "refs/heads/main",
+        "ref_protected",
+        "workflow_dispatch",
+        "github-hosted",
+        "account_identities",
+        "provider = 'github'",
+        "CI_OIDC_MAX_AGE_SECONDS",
+    ] {
+        assert!(
+            CI_RUNNER_AUTH_SOURCE_V1.contains(required),
+            "missing {required}"
+        );
+    }
+    assert!(!CI_RUNNER_AUTH_SOURCE_V1.contains("TEST_ACCOUNT_TOKEN"));
+    assert!(!CI_RUNNER_AUTH_SOURCE_V1.contains("refreshToken"));
+}
+
+#[test]
 fn account_auth_migration_contains_rotating_session_state() {
     assert_eq!(validate_account_auth_schema(ACCOUNT_AUTH_SCHEMA_V2), Ok(()));
 }

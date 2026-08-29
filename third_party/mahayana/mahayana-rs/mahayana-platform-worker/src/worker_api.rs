@@ -407,6 +407,7 @@ struct AuthenticatedAccount {
 
 mod account;
 mod ai_usage;
+mod ci_runner;
 mod commerce;
 mod developer_commerce_proxy;
 mod listener_relay;
@@ -416,6 +417,7 @@ mod security;
 
 use account::*;
 use ai_usage::*;
+use ci_runner::*;
 use commerce::*;
 use developer_commerce_proxy::*;
 use listener_relay::*;
@@ -469,6 +471,7 @@ pub async fn main(request: Request, env: Env, _context: Context) -> Result<Respo
         .post_async("/v1/listeners/register", listener_register)
         .post_async("/v1/listeners/drain", listener_drain)
         .post_async("/v1/listeners/ingest", listener_ingest)
+        .post_async("/v1/ci/runner-session", ci_runner_session_create)
         .get_async("/v1/computers", remote_computer_list)
         .post_async("/v1/computers/register", remote_computer_register)
         .post_async("/v1/computers/heartbeat", remote_computer_heartbeat)

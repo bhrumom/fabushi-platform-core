@@ -104,6 +104,13 @@ impl AppHost {
             feature_root.join("account-session.json"),
             feature_root.join("product-surface.json"),
         );
+        product
+            .bootstrap_ci_test_account_session()
+            .map_err(|error| {
+                AppHostError::Operation(format!(
+                    "GitHub Actions test-account bootstrap failed: {error}"
+                ))
+            })?;
         Ok(Self {
             app_data_dir,
             feature_mode,

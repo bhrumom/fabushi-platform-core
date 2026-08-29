@@ -53,6 +53,9 @@ const DEFAULT_API_BASE_URL: &str = "https://api.ombhrum.com";
 const MAHAYANA_ACCOUNT_SESSION_SECRET: &str = "MAHAYANA_ACCOUNT_SESSION";
 const MAHAYANA_TEST_ACCOUNT_TOKEN_ENV: &str = "MAHAYANA_TEST_ACCOUNT_TOKEN";
 const MAHAYANA_TEST_ACCOUNT_MARKER: &str = "test-account-login.sha256";
+const FABUSHI_CI_ACCOUNT_SESSION_FILE_ENV: &str = "FABUSHI_CI_ACCOUNT_SESSION_FILE";
+const GITHUB_ACTIONS_ENV: &str = "GITHUB_ACTIONS";
+const CI_ACCOUNT_SESSION_MAX_BYTES: u64 = 64 * 1024;
 const ACCESS_TOKEN_REFRESH_SKEW_SECONDS: i64 = 60;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -670,6 +673,23 @@ impl MahayanaProductClient {
                 directory.display()
             ))),
         }
+    }
+
+    /// Validates an explicitly provisioned GitHub Actions account session.
+    /// The session is short-lived, contains no refresh token, and is read from
+    /// a private file owned by the workflow. Ordinary application launches do
+    /// not accept this path, even if an inherited environment variable exists.
+    pub fn bootstrap_ci_test_account_session(&self) -> Result<bool, ProductError> {
+        if env::var(GITHUB_ACTIONS_ENV).ok().as_deref() != Some("true") {
+            return Ok(false);
+        }
+        let Some(path) =
+            env::var_os(FABUSHI_CI_ACCOUNT_SESSION_FILE_ENV).filter(|value| !value.is_empty())
+        else {
+            return Ok(false);
+        };
+        load_ci_account_session_file(Path::new(&path), now_seconds())?;
+        Ok(true)
     }
 
     /// Stores the environment-provisioned smoke-test credential in the same
@@ -2354,6 +2374,16 @@ impl MahayanaProductClient {
     }
 
     fn load_session(&self) -> Result<Option<Value>, ProductError> {
+        if let Some(path) =
+            env::var_os(FABUSHI_CI_ACCOUNT_SESSION_FILE_ENV).filter(|value| !value.is_empty())
+        {
+            if env::var(GITHUB_ACTIONS_ENV).ok().as_deref() != Some("true") {
+                return Err(ProductError::Session(
+                    "CI account session files are accepted only inside GitHub Actions".into(),
+                ));
+            }
+            return load_ci_account_session_file(Path::new(&path), now_seconds()).map(Some);
+        }
         let name = account_session_secret_name()?;
         let stored = self
             .secrets_manager
@@ -2723,6 +2753,86 @@ fn managed_secret_name(secret_request_id: &str) -> Result<SecretName, ProductErr
     }
     let digest = sha2::Sha256::digest(id.as_bytes());
     SecretName::new(&format!("MAHAYANA_REQUESTED_SECRET_{digest:X}")).map_err(secrets_error)
+}
+
+fn ci_session_identifier(value: Option<&Value>) -> Option<String> {
+    match value {
+        Some(Value::String(value)) if !value.trim().is_empty() && value.len() <= 200 => {
+            Some(value.trim().to_string())
+        }
+        Some(Value::Number(value)) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn validate_ci_account_session(value: Value, now: i64) -> Result<Value, ProductError> {
+    let token = access_token(&value)
+        .ok_or_else(|| ProductError::Session("CI account session is missing accessToken".into()))?;
+    let token_is_safe = (32..=16 * 1024).contains(&token.len())
+        && !token
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control());
+    let session_id = optional_string(&value, "sessionId").unwrap_or_default();
+    let device_id = optional_string(&value, "deviceId").unwrap_or_default();
+    let username = optional_string(&value, "username").unwrap_or_default();
+    let user_id = ci_session_identifier(value.get("userId"));
+    let nested_user_id = ci_session_identifier(value.get("user").and_then(|user| user.get("id")));
+    let expires_at = explicit_expiration_seconds(&value).unwrap_or_default();
+    let valid = value.get("provider").and_then(Value::as_str) == Some("github-actions")
+        && value.get("ciRunner").and_then(Value::as_bool) == Some(true)
+        && value.get("tokenType").and_then(Value::as_str) == Some("Bearer")
+        && value.get("refreshToken").is_none()
+        && token_is_safe
+        && session_id.starts_with("ci-runner:")
+        && device_id.starts_with("gha-")
+        && device_id.ends_with("-interactive")
+        && !username.is_empty()
+        && username.chars().count() <= 320
+        && user_id.is_some()
+        && user_id == nested_user_id
+        && expires_at > now.saturating_add(30)
+        && expires_at <= now.saturating_add(5 * 60 * 60);
+    if !valid {
+        return Err(ProductError::Session(
+            "CI account session failed its provenance, identity, or lifetime contract".into(),
+        ));
+    }
+    Ok(value)
+}
+
+fn load_ci_account_session_file(path: &Path, now: i64) -> Result<Value, ProductError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        ProductError::Session(format!("read CI account session metadata: {error}"))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ProductError::Session(
+            "CI account session path must be a regular non-symlink file".into(),
+        ));
+    }
+    if metadata.len() == 0 || metadata.len() > CI_ACCOUNT_SESSION_MAX_BYTES {
+        return Err(ProductError::Session(
+            "CI account session file has an invalid size".into(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(ProductError::Session(
+                "CI account session file must not be readable by group or other users".into(),
+            ));
+        }
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|error| ProductError::Session(format!("read CI account session: {error}")))?;
+    if bytes.len() as u64 > CI_ACCOUNT_SESSION_MAX_BYTES {
+        return Err(ProductError::Session(
+            "CI account session file exceeds the size limit".into(),
+        ));
+    }
+    let value = serde_json::from_slice::<Value>(&bytes)
+        .map_err(|error| ProductError::Session(format!("parse CI account session: {error}")))?;
+    validate_ci_account_session(value, now)
 }
 
 fn merge_refreshed_session(session: Value, response: Value, access_token: &str) -> Value {
@@ -3323,6 +3433,39 @@ mod tests {
             safe_marketplace_platforms(&["desktop".into(), "desktop".into(), "cli".into()]),
             Ok(vec!["desktop", "cli"])
         );
+    }
+
+    #[test]
+    fn ci_account_session_requires_short_lived_github_actions_provenance() {
+        let now = now_seconds();
+        let session = json!({
+            "accessToken": "a".repeat(64),
+            "tokenType": "Bearer",
+            "accessTokenExpiresAt": now + 4 * 60 * 60,
+            "sessionId": "ci-runner:12345:1",
+            "deviceId": "gha-12345-1-interactive",
+            "username": "linked-github-user",
+            "userId": "42",
+            "user": {"id": "42", "username": "linked-github-user"},
+            "provider": "github-actions",
+            "ciRunner": true,
+        });
+        assert_eq!(
+            validate_ci_account_session(session.clone(), now),
+            Ok(session.clone())
+        );
+        let mut with_refresh = session.clone();
+        with_refresh["refreshToken"] = Value::String("forbidden".into());
+        assert!(validate_ci_account_session(with_refresh, now).is_err());
+        let mut wrong_device = session.clone();
+        wrong_device["deviceId"] = Value::String("desktop-user-device".into());
+        assert!(validate_ci_account_session(wrong_device, now).is_err());
+        let mut wrong_user = session.clone();
+        wrong_user["user"]["id"] = Value::String("43".into());
+        assert!(validate_ci_account_session(wrong_user, now).is_err());
+        let mut too_long = session;
+        too_long["accessTokenExpiresAt"] = Value::Number((now + 6 * 60 * 60).into());
+        assert!(validate_ci_account_session(too_long, now).is_err());
     }
 
     #[test]

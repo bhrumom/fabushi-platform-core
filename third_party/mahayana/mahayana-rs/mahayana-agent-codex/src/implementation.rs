@@ -196,6 +196,10 @@ fn bundled_computer_mcp_override() -> Result<Option<(String, toml::Value)>, Agen
             "MAHAYANA_COMPUTER_MCP_POLICY_FILE",
             "FABUSHI_COMPUTER_POLICY_FILE",
         ),
+        (
+            "MAHAYANA_COMPUTER_MCP_APP_AGENT_DISCOVERY_FILE",
+            "FABUSHI_APP_AGENT_DISCOVERY_FILE",
+        ),
     ] {
         if let Some(value) = std::env::var_os(source) {
             let value = PathBuf::from(value);

@@ -7,6 +7,7 @@ mod auth;
 mod capability_access;
 
 pub const PLATFORM_SCHEMA_V1: &str = include_str!("../migrations/0001_platform.sql");
+pub const CI_RUNNER_AUTH_SOURCE_V1: &str = include_str!("worker_api/ci_runner.rs");
 pub const LISTENER_RELAY_SCHEMA_V5: &str = include_str!("../migrations/0005_listener_relay.sql");
 pub const REMOTE_COMPUTER_SCHEMA_V6: &str = include_str!("../migrations/0006_remote_computer.sql");
 pub const REMOTE_COMPUTER_CLIENT_TOKEN_SCHEMA_V14: &str =

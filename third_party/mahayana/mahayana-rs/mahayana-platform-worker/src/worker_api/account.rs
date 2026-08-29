@@ -1976,12 +1976,14 @@ fn issue_account_access_token(
     now: i64,
 ) -> Result<(String, i64, String)> {
     let expires_at = now + ACCESS_TOKEN_SECONDS;
-    let jti = Uuid::new_v4().to_string();
-    let claims = AccountAccessTokenClaims {
-        iss: ACCESS_TOKEN_ISSUER.to_string(),
-        sub: user_id.to_string(),
-        aud: ACCESS_TOKEN_AUDIENCE.to_string(),
-        scope: vec![
+    let (token, jti) = issue_scoped_account_access_token(
+        env,
+        user_id,
+        device_id,
+        session_id,
+        now,
+        expires_at,
+        vec![
             "account.read".to_string(),
             "marketplace.read".to_string(),
             "marketplace.publish".to_string(),
@@ -1989,12 +1991,45 @@ fn issue_account_access_token(
             "commerce.purchase".to_string(),
             "model.invoke".to_string(),
         ],
+        "access",
+    )?;
+    Ok((token, expires_at, jti))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn issue_scoped_account_access_token(
+    env: &Env,
+    user_id: &str,
+    device_id: &str,
+    session_id: &str,
+    now: i64,
+    expires_at: i64,
+    scope: Vec<String>,
+    token_use: &str,
+) -> Result<(String, String)> {
+    if user_id.trim().is_empty()
+        || device_id.trim().is_empty()
+        || session_id.trim().is_empty()
+        || expires_at <= now
+        || scope.is_empty()
+        || token_use != "access"
+    {
+        return Err(worker::Error::RustError(
+            "invalid scoped access token request".into(),
+        ));
+    }
+    let jti = Uuid::new_v4().to_string();
+    let claims = AccountAccessTokenClaims {
+        iss: ACCESS_TOKEN_ISSUER.to_string(),
+        sub: user_id.to_string(),
+        aud: ACCESS_TOKEN_AUDIENCE.to_string(),
+        scope,
         device_id: device_id.to_string(),
         sid: session_id.to_string(),
         jti: jti.clone(),
         iat: usize::try_from(now).unwrap_or_default(),
         exp: usize::try_from(expires_at).unwrap_or(usize::MAX),
-        token_use: "access".to_string(),
+        token_use: token_use.to_string(),
     };
     let private_key = env.secret("ACCESS_TOKEN_PRIVATE_KEY_PEM")?.to_string();
     let key = EncodingKey::from_rsa_pem(private_key.as_bytes()).map_err(jwt_error)?;
@@ -2002,10 +2037,10 @@ fn issue_account_access_token(
     header.typ = Some("JWT".to_string());
     header.kid = Some(env.var("ACCESS_TOKEN_KEY_ID")?.to_string());
     let token = encode(&header, &claims, &key).map_err(jwt_error)?;
-    Ok((token, expires_at, jti))
+    Ok((token, jti))
 }
 
-fn serialize_account_user(user: &AccountUserRow) -> serde_json::Value {
+pub(super) fn serialize_account_user(user: &AccountUserRow) -> serde_json::Value {
     let super_admin = is_builtin_super_admin_account_id(&user.id.to_string());
     let avatar = user
         .avatar
