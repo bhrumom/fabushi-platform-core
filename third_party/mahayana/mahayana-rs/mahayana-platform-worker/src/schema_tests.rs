@@ -42,6 +42,10 @@ fn remote_computer_migration_keeps_control_plane_separate_from_desktop_data() {
     assert!(REMOTE_COMPUTER_SCHEMA_V6.contains("device_secret_hash TEXT NOT NULL"));
     assert!(!REMOTE_COMPUTER_SCHEMA_V6.contains("screenshot_data"));
     assert!(!REMOTE_COMPUTER_SCHEMA_V6.contains("input_payload"));
+    assert!(REMOTE_COMPUTER_CLIENT_TOKEN_SCHEMA_V14.contains("client_token_hash TEXT"));
+    assert!(REMOTE_COMPUTER_CLIENT_TOKEN_SCHEMA_V14.contains("SET state = 'closed'"));
+    assert!(REMOTE_COMPUTER_CLIENT_TOKEN_SCHEMA_V14.contains("SET revoked_at = COALESCE"));
+    assert!(!REMOTE_COMPUTER_CLIENT_TOKEN_SCHEMA_V14.contains("client_token TEXT"));
 }
 
 #[test]

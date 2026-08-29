@@ -169,6 +169,8 @@ struct PendingApproval {
 const GROUP_MAX_MEMBER_TURNS: usize = 10;
 const GROUP_MAX_ROUNDS: usize = 3;
 const GROUP_PROMPT_HISTORY_LIMIT: usize = 24;
+const REMOTE_DEVICE_SECRET_MAX_ENTRIES: usize = 256;
+const REMOTE_DEVICE_SECRET_MAX_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Clone)]
 struct GroupRunState {
@@ -452,6 +454,11 @@ impl FeatureHostController {
         }
         if let Some(path) = settings_path.as_deref() {
             state.settings = load_product_host_settings(path);
+            // The bundled Computer Use MCP independently rereads this canonical
+            // policy before every tool call. Persist defaults during startup so
+            // a first-run profile is explicit rather than relying on fail-open
+            // behavior while the settings UI has not yet written the file.
+            persist_product_host_settings(path, &state.settings)?;
         }
         if let Some(path) = remote_device_state_path.as_deref() {
             state.remote_computer_device_secrets = load_remote_computer_device_secrets(path);
@@ -2550,11 +2557,11 @@ impl FeatureHostController {
             FeatureCommand::RemoteComputerRegister {
                 device_id, label, ..
             } => {
-                if !remote_enabled {
-                    return Err(FeatureHostError::Contract(
-                        "enable remote computer control before creating a pairing code".into(),
-                    ));
-                }
+                // Registration is device presence, not authorization to control.
+                // Keeping it available while remote control is disabled lets the
+                // signed-in account discover this installed desktop. Session
+                // polling, activation, signaling, screenshots, and input remain
+                // gated below by `remote_control_enabled`.
                 let device_secret = self.remote_device_secret(&device_id, true)?;
                 (
                     "mahayana.remote.computer.register",
@@ -2564,11 +2571,6 @@ impl FeatureHostController {
                 )
             }
             FeatureCommand::RemoteComputerHeartbeat { device_id, .. } => {
-                if !remote_enabled {
-                    return Err(FeatureHostError::Contract(
-                        "remote computer control is disabled".into(),
-                    ));
-                }
                 let device_secret = self.remote_device_secret(&device_id, false)?;
                 (
                     "mahayana.remote.computer.heartbeat",
@@ -2698,7 +2700,7 @@ impl FeatureHostController {
                 "registered" => json!({
                     "deviceId": payload.get("deviceId"),
                     "label": payload.get("label"),
-                    "pairingCode": "AB12CD34",
+                    "pairingCode": "AB12CD34EF56",
                     "pairingExpiresAt": now_millis() / 1000 + 600,
                 }),
                 "heartbeat" => json!({"ok": true, "lastSeenAt": now_millis() / 1000}),
@@ -5504,6 +5506,11 @@ impl FeatureHostController {
         if !create {
             return Err(FeatureHostError::Contract(
                 "remote computer must be registered by this desktop before use".into(),
+            ));
+        }
+        if state.remote_computer_device_secrets.len() >= REMOTE_DEVICE_SECRET_MAX_ENTRIES {
+            return Err(FeatureHostError::Contract(
+                "too many local remote computer device identities are stored; reset an old profile before registering another".into(),
             ));
         }
         let secret = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
@@ -10611,18 +10618,35 @@ fn persist_product_host_settings(
         .map_err(|error| FeatureHostError::Contract(format!("commit host settings: {error}")))
 }
 
+fn valid_remote_computer_device_secret(device_id: &str, secret: &str) -> bool {
+    is_safe_memory_agent_id(device_id)
+        && secret.len() >= 48
+        && secret.len() <= 256
+        && secret.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn load_remote_computer_device_secrets(path: &Path) -> BTreeMap<String, String> {
-    std::fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<BTreeMap<String, String>>(&bytes).ok())
-        .unwrap_or_default()
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return BTreeMap::new();
+    };
+    if metadata.len() > REMOTE_DEVICE_SECRET_MAX_BYTES {
+        return BTreeMap::new();
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return BTreeMap::new();
+    };
+    if bytes.len() as u64 > REMOTE_DEVICE_SECRET_MAX_BYTES {
+        return BTreeMap::new();
+    }
+    let Ok(secrets) = serde_json::from_slice::<BTreeMap<String, String>>(&bytes) else {
+        return BTreeMap::new();
+    };
+    if secrets.len() > REMOTE_DEVICE_SECRET_MAX_ENTRIES {
+        return BTreeMap::new();
+    }
+    secrets
         .into_iter()
-        .filter(|(device_id, secret)| {
-            is_safe_memory_agent_id(device_id)
-                && secret.len() >= 48
-                && secret.len() <= 256
-                && secret.bytes().all(|byte| byte.is_ascii_hexdigit())
-        })
+        .filter(|(device_id, secret)| valid_remote_computer_device_secret(device_id, secret))
         .collect()
 }
 
@@ -10630,6 +10654,16 @@ fn persist_remote_computer_device_secrets(
     path: &Path,
     secrets: &BTreeMap<String, String>,
 ) -> Result<(), FeatureHostError> {
+    if secrets.len() > REMOTE_DEVICE_SECRET_MAX_ENTRIES
+        || secrets
+            .iter()
+            .any(|(device_id, secret)| !valid_remote_computer_device_secret(device_id, secret))
+    {
+        return Err(FeatureHostError::Contract(
+            "remote device secret state exceeds its safe entry limit or contains invalid data"
+                .into(),
+        ));
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             FeatureHostError::Contract(format!("create remote device directory: {error}"))
@@ -10639,6 +10673,11 @@ fn persist_remote_computer_device_secrets(
     let bytes = serde_json::to_vec_pretty(secrets).map_err(|error| {
         FeatureHostError::Contract(format!("serialize remote device secret: {error}"))
     })?;
+    if bytes.len() as u64 > REMOTE_DEVICE_SECRET_MAX_BYTES {
+        return Err(FeatureHostError::Contract(
+            "remote device secret state exceeds its safe byte limit".into(),
+        ));
+    }
     std::fs::write(&temp, bytes).map_err(|error| {
         FeatureHostError::Contract(format!("write remote device secret: {error}"))
     })?;
@@ -10684,6 +10723,34 @@ mod remote_device_secret_tests {
                 & 0o777;
             assert_eq!(mode, 0o600);
         }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn remote_device_secret_state_limits_fail_closed() {
+        let path = std::env::temp_dir().join(format!(
+            "fabushi-remote-device-secret-limit-test-{}-{}.json",
+            std::process::id(),
+            now_millis()
+        ));
+        std::fs::write(
+            &path,
+            vec![b'x'; REMOTE_DEVICE_SECRET_MAX_BYTES as usize + 1],
+        )
+        .expect("write oversized device secret state");
+        assert!(load_remote_computer_device_secrets(&path).is_empty());
+
+        let secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string();
+        let too_many = (0..=REMOTE_DEVICE_SECRET_MAX_ENTRIES)
+            .map(|index| (format!("fabushi-device-{index}"), secret.clone()))
+            .collect::<BTreeMap<_, _>>();
+        assert!(persist_remote_computer_device_secrets(&path, &too_many).is_err());
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&too_many).expect("serialize oversized map"),
+        )
+        .expect("write oversized entry map");
+        assert!(load_remote_computer_device_secrets(&path).is_empty());
         let _ = std::fs::remove_file(path);
     }
 }

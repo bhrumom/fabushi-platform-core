@@ -249,10 +249,15 @@ fn parse_transport(
                 .get("command")
                 .and_then(Value::as_str)
                 .ok_or_else(|| McpError::InvalidPlugin("stdio server has no command".into()))?;
-            let command = if Path::new(command).is_absolute() {
+            let command_path = Path::new(command);
+            let command = if command_path.is_absolute() {
+                PathBuf::from(command)
+            } else if is_bare_executable(command) {
+                // Bare commands such as "node" are resolved through PATH. Only
+                // explicit relative paths are rooted inside the installed plugin.
                 PathBuf::from(command)
             } else {
-                safe_plugin_join(plugin_root, Path::new(command))?
+                safe_plugin_join(plugin_root, command_path)?
             };
             let cwd = value
                 .get("cwd")
@@ -571,6 +576,10 @@ fn safe_plugin_join(root: &Path, relative: &Path) -> Result<PathBuf, McpError> {
     Ok(path)
 }
 
+fn is_bare_executable(command: &str) -> bool {
+    !command.is_empty() && command != "." && command != ".." && !command.contains(['/', '\\'])
+}
+
 fn expand_secret(value: &str, session_token: Option<&str>) -> String {
     match session_token {
         Some(token) => value.replace("${MAHAYANA_SESSION_TOKEN}", token),
@@ -639,6 +648,27 @@ mod tests {
             None,
         );
         assert!(matches!(result, Err(McpError::UnsafeTransport(_))));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn preserves_bare_stdio_commands_for_path_lookup() {
+        let root =
+            std::env::temp_dir().join(format!("mahayana-mcp-command-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create root");
+        let resolved = parse_transport(
+            &root,
+            json!({"type":"stdio","command":"node","cwd":"."}),
+            None,
+        )
+        .expect("parse bare command");
+        match resolved {
+            McpTransport::Stdio { command, cwd, .. } => {
+                assert_eq!(command, PathBuf::from("node"));
+                assert_eq!(cwd, root);
+            }
+            McpTransport::Http { .. } => panic!("expected stdio transport"),
+        }
         fs::remove_dir_all(root).expect("cleanup");
     }
 

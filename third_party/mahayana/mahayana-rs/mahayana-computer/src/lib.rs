@@ -390,7 +390,7 @@ mod portable {
     fn named_key(raw: &str) -> Result<Key, ComputerError> {
         let normalized = raw.trim().to_ascii_lowercase();
         let key = match normalized.as_str() {
-            "ctrl" | "control" => Key::Control,
+            "ctrl" | "control" | "primary" => Key::Control,
             "shift" => Key::Shift,
             "alt" | "option" => Key::Alt,
             "meta" | "cmd" | "command" | "super" | "win" | "windows" => Key::Meta,
@@ -896,7 +896,9 @@ mod macos {
                 "ctrl" | "control" => flags |= CGEventFlags::CGEventFlagControl,
                 "alt" | "option" => flags |= CGEventFlags::CGEventFlagAlternate,
                 "shift" => flags |= CGEventFlags::CGEventFlagShift,
-                "cmd" | "command" | "meta" | "super" => flags |= CGEventFlags::CGEventFlagCommand,
+                "cmd" | "command" | "meta" | "super" | "primary" => {
+                    flags |= CGEventFlags::CGEventFlagCommand
+                }
                 other => {
                     return Err(ComputerError::InvalidAction(format!(
                         "unsupported modifier: {other}"

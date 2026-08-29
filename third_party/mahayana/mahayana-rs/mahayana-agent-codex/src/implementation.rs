@@ -146,6 +146,112 @@ fn shared_installed_plugin_overrides(
     ))
 }
 
+fn bundled_computer_mcp_override() -> Result<Option<(String, toml::Value)>, AgentError> {
+    let Some(command) = std::env::var_os("MAHAYANA_COMPUTER_MCP_COMMAND") else {
+        return Ok(None);
+    };
+    let Some(entry) = std::env::var_os("MAHAYANA_COMPUTER_MCP_ENTRY") else {
+        return Err(AgentError::Backend(
+            "bundled computer MCP command is configured without an entry point".into(),
+        ));
+    };
+    let command = PathBuf::from(command);
+    let entry = PathBuf::from(entry);
+    if !command.is_absolute() || !entry.is_absolute() {
+        return Err(AgentError::Backend(
+            "bundled computer MCP paths must be absolute".into(),
+        ));
+    }
+    if !command.is_file() {
+        return Err(AgentError::Backend(format!(
+            "bundled computer MCP command is unavailable: {}",
+            command.display()
+        )));
+    }
+    if !entry.is_file() {
+        return Err(AgentError::Backend(format!(
+            "bundled computer MCP entry point is unavailable: {}",
+            entry.display()
+        )));
+    }
+
+    let mut environment = toml::map::Map::new();
+    if std::env::var("MAHAYANA_COMPUTER_MCP_ELECTRON_NODE").as_deref() == Ok("1") {
+        environment.insert(
+            "ELECTRON_RUN_AS_NODE".into(),
+            toml::Value::String("1".into()),
+        );
+    }
+    for (source, target) in [
+        ("MAHAYANA_COMPUTER_MCP_HOME", "CHATGPT_COMPUTER_HOME"),
+        (
+            "MAHAYANA_COMPUTER_MCP_NATIVE_HELPER",
+            "CHATGPT_COMPUTER_NATIVE_HELPER",
+        ),
+        (
+            "MAHAYANA_COMPUTER_MCP_MAC_APP_DIR",
+            "CHATGPT_COMPUTER_MAC_APP_DIR",
+        ),
+        (
+            "MAHAYANA_COMPUTER_MCP_POLICY_FILE",
+            "FABUSHI_COMPUTER_POLICY_FILE",
+        ),
+    ] {
+        if let Some(value) = std::env::var_os(source) {
+            let value = PathBuf::from(value);
+            if !value.is_absolute() {
+                return Err(AgentError::Backend(format!(
+                    "bundled computer MCP environment path {source} must be absolute"
+                )));
+            }
+            environment.insert(
+                target.into(),
+                toml::Value::String(value.to_string_lossy().into_owned()),
+            );
+        }
+    }
+
+    let mut server = toml::map::Map::new();
+    server.insert(
+        "command".into(),
+        toml::Value::String(command.to_string_lossy().into_owned()),
+    );
+    server.insert(
+        "args".into(),
+        toml::Value::Array(vec![toml::Value::String(
+            entry.to_string_lossy().into_owned(),
+        )]),
+    );
+    server.insert("enabled".into(), toml::Value::Boolean(true));
+    server.insert("startup_timeout_sec".into(), toml::Value::Integer(30));
+    server.insert("tool_timeout_sec".into(), toml::Value::Integer(120));
+    if let Some(cwd) = std::env::var_os("MAHAYANA_COMPUTER_MCP_CWD") {
+        let cwd = PathBuf::from(cwd);
+        if !cwd.is_absolute() {
+            return Err(AgentError::Backend(
+                "bundled computer MCP working directory must be absolute".into(),
+            ));
+        }
+        if !cwd.is_dir() {
+            return Err(AgentError::Backend(format!(
+                "bundled computer MCP working directory is unavailable: {}",
+                cwd.display()
+            )));
+        }
+        server.insert(
+            "cwd".into(),
+            toml::Value::String(cwd.to_string_lossy().into_owned()),
+        );
+    }
+    if !environment.is_empty() {
+        server.insert("env".into(), toml::Value::Table(environment));
+    }
+    Ok(Some((
+        "mcp_servers.fabushi_computer".into(),
+        toml::Value::Table(server),
+    )))
+}
+
 fn shared_installed_plugin_roots(runtime_codex_home: &Path) -> Result<Vec<PathBuf>, AgentError> {
     let Ok(shared_codex_home) = find_codex_home() else {
         return Ok(Vec::new());
@@ -1509,6 +1615,9 @@ impl CodexAgentBackend {
         let mut cli_overrides = Vec::new();
         if settings.inherit_installed_plugins {
             cli_overrides.extend(shared_installed_plugin_overrides(&settings.codex_home)?);
+        }
+        if let Some(computer_mcp) = bundled_computer_mcp_override()? {
+            cli_overrides.push(computer_mcp);
         }
         let mut config = ConfigBuilder::default()
             .codex_home(settings.codex_home)
