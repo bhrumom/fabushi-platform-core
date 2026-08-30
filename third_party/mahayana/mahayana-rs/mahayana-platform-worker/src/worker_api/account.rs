@@ -591,7 +591,12 @@ pub(super) async fn browser_login_password(
     )?
     .run()
     .await?;
-    browser_result_page(true, "登录完成，正在返回 Fabushi", Some(&attempt_id))
+    browser_result_page_for_device(
+        true,
+        "登录完成，正在返回 Fabushi",
+        Some(&attempt_id),
+        &attempt.device_id,
+    )
 }
 
 fn normalize_registration_email(value: &str) -> Option<String> {
@@ -944,7 +949,12 @@ pub(super) async fn browser_registration_complete(
     )?
     .run()
     .await?;
-    browser_result_page(true, "注册完成，正在返回 Fabushi", Some(&attempt_id))
+    browser_result_page_for_device(
+        true,
+        "注册完成，正在返回 Fabushi",
+        Some(&attempt_id),
+        &attempt.device_id,
+    )
 }
 
 pub(super) async fn browser_login_reopen(
@@ -1371,10 +1381,11 @@ pub(super) async fn oauth_callback(
     )?
     .run()
     .await?;
-    browser_result_page(
+    browser_result_page_for_device(
         true,
         "登录完成，正在返回 Fabushi",
         Some(&attempt.attempt_id),
+        &attempt.device_id,
     )
 }
 
@@ -1687,6 +1698,32 @@ pub(super) async fn create_account_session_value(
 
 fn browser_cancelled_page(message: &str, attempt_id: Option<&str>) -> Result<Response> {
     browser_result_page_with_status("cancelled", false, message, attempt_id)
+}
+
+fn browser_result_page_for_device(
+    success: bool,
+    message: &str,
+    attempt_id: Option<&str>,
+    device_id: &str,
+) -> Result<Response> {
+    if success {
+        if let Some(request_id) = device_id.strip_prefix("mcp-oauth-") {
+            let valid = (32..=128).contains(&request_id.len())
+                && request_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
+            if valid {
+                let return_url = format!(
+                    "https://fabushi-mcp.ombhrum.com/oauth/fabushi/complete?request_id={request_id}"
+                );
+                let literal = serde_json::to_string(&return_url).unwrap_or_else(|_| "null".into());
+                return browser_html_response(format!(
+                    r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Fabushi 登录</title></head><body><main>登录成功，正在返回 AI 客户端…</main><script>location.replace({literal});</script></body></html>"#
+                ));
+            }
+        }
+    }
+    browser_result_page(success, message, attempt_id)
 }
 
 fn browser_result_page(success: bool, message: &str, attempt_id: Option<&str>) -> Result<Response> {
