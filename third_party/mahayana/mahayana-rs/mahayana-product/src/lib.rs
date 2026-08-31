@@ -692,6 +692,36 @@ impl MahayanaProductClient {
         Ok(true)
     }
 
+    /// Returns the current account access credential to the trusted desktop
+    /// main process so the installed application can register its own remote
+    /// device. Refresh credentials never leave the Rust-owned session store.
+    pub fn device_agent_session(&self) -> Result<Value, ProductError> {
+        let session = self.required_session()?;
+        let access_token = self.active_session_token(session)?;
+        let current = self.required_session()?;
+        let session_id = optional_string(&current, "sessionId")
+            .ok_or_else(|| ProductError::Session("account session is missing sessionId".into()))?;
+        let device_id = optional_string(&current, "deviceId")
+            .ok_or_else(|| ProductError::Session("account session is missing deviceId".into()))?;
+        let user = current.get("user").cloned().unwrap_or(Value::Null);
+        let user_id = current
+            .get("userId")
+            .cloned()
+            .or_else(|| user.get("id").cloned())
+            .ok_or_else(|| ProductError::Session("account session is missing userId".into()))?;
+        Ok(json!({
+            "accessToken": access_token,
+            "accessTokenExpiresAt": explicit_expiration_seconds(&current),
+            "sessionId": session_id,
+            "deviceId": device_id,
+            "username": current.get("username").cloned().unwrap_or(Value::Null),
+            "userId": user_id,
+            "user": user,
+            "provider": current.get("provider").cloned().unwrap_or(Value::String("official".into())),
+            "ciRunner": current.get("ciRunner").and_then(Value::as_bool).unwrap_or(false),
+        }))
+    }
+
     /// Stores the environment-provisioned smoke-test credential in the same
     /// encrypted Mahayana session backend used by normal account logins. On a
     /// headless CI runner without an OS keyring, only a SHA-256 login marker is

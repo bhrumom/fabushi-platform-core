@@ -175,6 +175,12 @@ impl AppHost {
                 .feature
                 .auth_status()
                 .map_err(|error| AppHostError::Operation(error.to_string())),
+            // Main-process only: this method is intentionally absent from the
+            // renderer IPC allowlist. It never returns a refresh credential.
+            "feature.auth.deviceAgentSession" => self
+                .product
+                .device_agent_session()
+                .map_err(|error| AppHostError::Operation(error.to_string())),
             "feature.auth.providers" => self
                 .feature
                 .auth_providers()
