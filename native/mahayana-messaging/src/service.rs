@@ -510,6 +510,85 @@ impl<S: MessagingStateStore> MessagingService<S> {
                     return Err(denied("conversation state update requires membership"));
                 }
             }
+            ClientCommand::UpdateConversationInfo {
+                conversation_id, ..
+            }
+            | ClientCommand::SetConversationParticipant {
+                conversation_id, ..
+            }
+            | ClientCommand::RemoveConversationParticipant {
+                conversation_id, ..
+            } => {
+                let existing = self
+                    .engine
+                    .state()
+                    .conversations
+                    .get(conversation_id)
+                    .ok_or_else(|| denied("conversation management target does not exist"))?;
+                let caller = existing
+                    .participants
+                    .iter()
+                    .find(|participant| &participant.actor_id == actor_id)
+                    .ok_or_else(|| denied("conversation management requires membership"))?;
+                if !matches!(
+                    caller.role,
+                    crate::actor::ParticipantRole::Owner | crate::actor::ParticipantRole::Admin
+                ) {
+                    return Err(denied("conversation management requires owner/admin role"));
+                }
+                match command {
+                    ClientCommand::SetConversationParticipant { participant, .. } => {
+                        let existing_target = existing
+                            .participants
+                            .iter()
+                            .find(|item| item.actor_id == participant.actor_id);
+                        if participant.role == crate::actor::ParticipantRole::Owner
+                            && existing.owner_id.as_ref() != Some(&participant.actor_id)
+                        {
+                            return Err(denied("conversation owner cannot be reassigned through participant management"));
+                        }
+                        if caller.role == crate::actor::ParticipantRole::Admin
+                            && (matches!(
+                                participant.role,
+                                crate::actor::ParticipantRole::Owner
+                                    | crate::actor::ParticipantRole::Admin
+                            ) || existing_target.is_some_and(|target| {
+                                matches!(
+                                    target.role,
+                                    crate::actor::ParticipantRole::Owner
+                                        | crate::actor::ParticipantRole::Admin
+                                )
+                            }))
+                        {
+                            return Err(denied("admins cannot manage owner/admin roles"));
+                        }
+                    }
+                    ClientCommand::RemoveConversationParticipant {
+                        actor_id: target_actor_id,
+                        ..
+                    } => {
+                        if existing.owner_id.as_ref() == Some(target_actor_id) {
+                            return Err(denied("conversation owner cannot be removed"));
+                        }
+                        if caller.role == crate::actor::ParticipantRole::Admin
+                            && existing
+                                .participants
+                                .iter()
+                                .find(|item| &item.actor_id == target_actor_id)
+                                .is_some_and(|target| {
+                                    matches!(
+                                        target.role,
+                                        crate::actor::ParticipantRole::Owner
+                                            | crate::actor::ParticipantRole::Admin
+                                    )
+                                })
+                        {
+                            return Err(denied("admins cannot remove owner/admin participants"));
+                        }
+                    }
+                    _ => {}
+                }
+            }
             ClientCommand::UpdateConversation { conversation } => {
                 let existing = self
                     .engine
@@ -775,6 +854,23 @@ impl<S: MessagingStateStore> MessagingService<S> {
         projected
     }
 
+    fn project_message_for_actor(&self, actor_id: &ActorId, message: &Message) -> Message {
+        let mut projected = message.clone();
+        if let MessageContent::Poll { options, .. } = &mut projected.content {
+            let selected = self
+                .engine
+                .state()
+                .poll_votes
+                .get(&message.conversation_id)
+                .and_then(|messages| messages.get(&message.id))
+                .and_then(|actors| actors.get(actor_id));
+            for option in options {
+                option.chosen = selected.is_some_and(|ids| ids.contains(&option.id));
+            }
+        }
+        projected
+    }
+
     fn sync_envelope(&self, actor_id: &ActorId, limit: u32, server_time_ms: i64) -> ServerEnvelope {
         let state = self.engine.state();
         let max_items = usize::try_from(limit.max(1)).unwrap_or(usize::MAX);
@@ -828,7 +924,7 @@ impl<S: MessagingStateStore> MessagingService<S> {
                     .filter_map(|id| state.messages.get(id))
                     .flat_map(|messages| messages.values())
                     .take(max_items)
-                    .cloned()
+                    .map(|message| self.project_message_for_actor(actor_id, message))
                     .collect(),
                 folders: state
                     .folders
@@ -974,6 +1070,29 @@ impl<S: MessagingStateStore> MessagingService<S> {
             | ClientCommand::UpdateConversation { conversation } => {
                 vec![Command::UpsertConversation { conversation }]
             }
+            ClientCommand::UpdateConversationInfo {
+                conversation_id,
+                title,
+                description,
+            } => vec![Command::UpdateConversationInfo {
+                conversation_id,
+                title,
+                description,
+            }],
+            ClientCommand::SetConversationParticipant {
+                conversation_id,
+                participant,
+            } => vec![Command::SetConversationParticipant {
+                conversation_id,
+                participant,
+            }],
+            ClientCommand::RemoveConversationParticipant {
+                conversation_id,
+                actor_id: target_actor_id,
+            } => vec![Command::RemoveConversationParticipant {
+                conversation_id,
+                actor_id: target_actor_id,
+            }],
             ClientCommand::ArchiveConversation {
                 conversation_id,
                 archived,
@@ -1137,6 +1256,16 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 message_id,
                 pinned,
             }],
+            ClientCommand::VotePoll {
+                conversation_id,
+                message_id,
+                option_ids,
+            } => vec![Command::VotePoll {
+                conversation_id,
+                message_id,
+                actor_id: actor_id.clone(),
+                option_ids,
+            }],
             ClientCommand::Search { .. }
             | ClientCommand::StartTyping { .. }
             | ClientCommand::StopTyping { .. } => Vec::new(),
@@ -1283,6 +1412,40 @@ impl<S: MessagingStateStore> MessagingService<S> {
             Event::ConversationUpserted { conversation } => {
                 ServerEvent::ConversationChanged { conversation }
             }
+            Event::ConversationInfoUpdated {
+                conversation_id, ..
+            } => self
+                .engine
+                .state()
+                .conversations
+                .get(&conversation_id)
+                .cloned()
+                .map(|conversation| ServerEvent::ConversationChanged { conversation })?,
+            Event::ConversationParticipantUpserted {
+                conversation_id, ..
+            } => self
+                .engine
+                .state()
+                .conversations
+                .get(&conversation_id)
+                .cloned()
+                .map(|conversation| ServerEvent::ConversationParticipantChanged {
+                    conversation,
+                    removed_actor_id: None,
+                })?,
+            Event::ConversationParticipantRemoved {
+                conversation_id,
+                actor_id,
+            } => self
+                .engine
+                .state()
+                .conversations
+                .get(&conversation_id)
+                .cloned()
+                .map(|conversation| ServerEvent::ConversationParticipantChanged {
+                    conversation,
+                    removed_actor_id: Some(actor_id),
+                })?,
             Event::ConversationArchived {
                 conversation_id, ..
             }
@@ -1332,6 +1495,11 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 ..
             }
             | Event::MessagePinned {
+                conversation_id,
+                message_id: server_message_id,
+                ..
+            }
+            | Event::PollVoteChanged {
                 conversation_id,
                 message_id: server_message_id,
                 ..
@@ -1443,6 +1611,15 @@ impl<S: MessagingStateStore> MessagingService<S> {
             }
             ServerEvent::ConversationChanged { conversation } => {
                 Self::extend_conversation_audience(&mut audience, conversation);
+            }
+            ServerEvent::ConversationParticipantChanged {
+                conversation,
+                removed_actor_id,
+            } => {
+                Self::extend_conversation_audience(&mut audience, conversation);
+                if let Some(actor_id) = removed_actor_id {
+                    audience.insert(actor_id.clone());
+                }
             }
             ServerEvent::MarkedUnreadChanged { actor_id, .. } => {
                 audience.clear();

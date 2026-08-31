@@ -1,4 +1,4 @@
-use crate::actor::{Actor, ActorId, Presence};
+use crate::actor::{Actor, ActorId, Participant, Presence};
 use crate::blob_store::{BlobId, BlobMetadata, BlobUploadStatus};
 use crate::bot::{BotExecution, BotInvocation, BotProfile};
 use crate::community::{CommunityMember, CommunityState, ForumTopicState, InviteLink, JoinRequest};
@@ -70,6 +70,19 @@ pub enum ClientCommand {
     },
     UpdateConversation {
         conversation: Conversation,
+    },
+    UpdateConversationInfo {
+        conversation_id: ConversationId,
+        title: String,
+        description: Option<String>,
+    },
+    SetConversationParticipant {
+        conversation_id: ConversationId,
+        participant: Participant,
+    },
+    RemoveConversationParticipant {
+        conversation_id: ConversationId,
+        actor_id: ActorId,
     },
     ArchiveConversation {
         conversation_id: ConversationId,
@@ -151,6 +164,11 @@ pub enum ClientCommand {
         conversation_id: ConversationId,
         message_id: MessageId,
         pinned: bool,
+    },
+    VotePoll {
+        conversation_id: ConversationId,
+        message_id: MessageId,
+        option_ids: Vec<String>,
     },
     StartTyping {
         conversation_id: ConversationId,
@@ -285,6 +303,10 @@ pub enum ServerEvent {
     },
     ConversationChanged {
         conversation: Conversation,
+    },
+    ConversationParticipantChanged {
+        conversation: Conversation,
+        removed_actor_id: Option<ActorId>,
     },
     MarkedUnreadChanged {
         conversation_id: ConversationId,
