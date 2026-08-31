@@ -8946,6 +8946,7 @@ dependencies = [
 name = "mahayana-app-host"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "mahayana-core",
  "mahayana-feature-host",
  "mahayana-host",
