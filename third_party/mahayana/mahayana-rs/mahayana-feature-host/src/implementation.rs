@@ -1038,6 +1038,23 @@ impl FeatureHostController {
         request_id: String,
         envelope: Value,
     ) -> Result<CommandAccepted, FeatureHostError> {
+        self.execute_messaging_sync(request_id.clone(), envelope)?;
+        Ok(CommandAccepted {
+            request_id,
+            operation_id: None,
+        })
+    }
+
+    /// Executes one messaging envelope against the exact same persistent
+    /// `MessagingService` used by desktop and also returns the resulting server
+    /// envelopes to native shells. The envelopes are still projected onto the
+    /// regular FeatureHost event queue, so desktop/event-driven consumers retain
+    /// their existing behavior while iOS and Android can update synchronously.
+    pub fn execute_messaging_sync(
+        &self,
+        request_id: String,
+        envelope: Value,
+    ) -> Result<Vec<Value>, FeatureHostError> {
         static MESSAGING_IO_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         let _io_guard = MESSAGING_IO_LOCK
             .get_or_init(|| Mutex::new(()))
@@ -1061,19 +1078,22 @@ impl FeatureHostController {
         let responses = service
             .handle(client_envelope, now_millis())
             .map_err(|error| FeatureHostError::Contract(error.to_string()))?;
+        let envelopes = responses
+            .into_iter()
+            .map(|response| {
+                serde_json::to_value(response)
+                    .map_err(|error| FeatureHostError::Contract(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut state = self.state()?;
-        for response in responses {
+        for envelope in &envelopes {
             state.events.push_back(HostEvent::MessagingEvent {
                 timestamp: timestamp(),
                 request_id: request_id.clone(),
-                envelope: serde_json::to_value(response)
-                    .map_err(|error| FeatureHostError::Contract(error.to_string()))?,
+                envelope: envelope.clone(),
             });
         }
-        Ok(CommandAccepted {
-            request_id,
-            operation_id: None,
-        })
+        Ok(envelopes)
     }
 
     fn execute_automation(

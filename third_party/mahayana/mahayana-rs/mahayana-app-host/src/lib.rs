@@ -206,6 +206,7 @@ impl AppHost {
             "feature.plugin.active" => self.active_plugin(params),
             "feature.plugin.listInstalled" => self.list_installed_plugins(),
             "feature.plugin.uiDocument" => self.plugin_ui_document(params),
+            "feature.messaging.execute" => self.feature_messaging_execute(params),
             "feature.messaging.access.issue" => self.feature_messaging_access_issue(params),
             other => Err(AppHostError::InvalidRequest(format!(
                 "unknown feature method {other}"
@@ -256,6 +257,19 @@ impl AppHost {
             .interrupt(operation_id)
             .map_err(|error| AppHostError::Operation(error.to_string()))?;
         Ok(Value::Null)
+    }
+
+    fn feature_messaging_execute(&self, params: Value) -> Result<Value, AppHostError> {
+        let request_id = string_param(&params, "requestId")?.to_string();
+        let envelope = params
+            .get("envelope")
+            .cloned()
+            .ok_or_else(|| AppHostError::InvalidRequest("envelope is required".into()))?;
+        let envelopes = self
+            .feature
+            .execute_messaging_sync(request_id, envelope)
+            .map_err(|error| AppHostError::Operation(error.to_string()))?;
+        Ok(json!({"envelopes": envelopes}))
     }
 
     fn feature_messaging_access_issue(&self, params: Value) -> Result<Value, AppHostError> {
