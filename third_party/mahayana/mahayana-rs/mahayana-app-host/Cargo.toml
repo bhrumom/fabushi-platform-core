@@ -9,6 +9,7 @@ autobins = false
 crate-type = ["rlib"]
 
 [dependencies]
+base64.workspace = true
 mahayana-core.workspace = true
 mahayana-host-protocol.workspace = true
 mahayana-js-runtime.workspace = true

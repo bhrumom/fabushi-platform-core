@@ -12,6 +12,7 @@ use chrono::TimeZone;
 use chrono::Timelike;
 use chrono::Utc;
 
+use fabushi_messaging_core::BlobId;
 use fabushi_messaging_core::ClientEnvelope as MessagingClientEnvelope;
 use fabushi_messaging_core::FileBlobStore;
 use fabushi_messaging_core::JsonFileStateStore;
@@ -1094,6 +1095,28 @@ impl FeatureHostController {
             });
         }
         Ok(envelopes)
+    }
+
+    pub fn read_messaging_blob_range(
+        &self,
+        blob_id: &str,
+        offset: u64,
+        length: u64,
+    ) -> Result<(fabushi_messaging_core::BlobMetadata, Vec<u8>), FeatureHostError> {
+        let root = self
+            .memory_root_path
+            .as_deref()
+            .ok_or_else(|| FeatureHostError::Contract("messaging storage is unavailable".into()))?;
+        let blob_id = BlobId::new(blob_id.to_string())
+            .map_err(|error| FeatureHostError::Contract(error.to_string()))?;
+        let store = FileBlobStore::new(root.join("_messaging").join("blobs"));
+        let metadata = store
+            .metadata(&blob_id)
+            .map_err(|error| FeatureHostError::Contract(error.to_string()))?;
+        let bytes = store
+            .read_range(&blob_id, offset, length.min(1024 * 1024))
+            .map_err(|error| FeatureHostError::Contract(error.to_string()))?;
+        Ok((metadata, bytes))
     }
 
     fn execute_automation(

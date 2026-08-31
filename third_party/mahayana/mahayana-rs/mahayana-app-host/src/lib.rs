@@ -1,3 +1,4 @@
+use base64::Engine as _;
 use mahayana_core::{ModelProviderMode, RuntimeConfig};
 use mahayana_feature_host::FeatureHostController;
 use mahayana_host::HostCreateConfig;
@@ -207,6 +208,7 @@ impl AppHost {
             "feature.plugin.listInstalled" => self.list_installed_plugins(),
             "feature.plugin.uiDocument" => self.plugin_ui_document(params),
             "feature.messaging.execute" => self.feature_messaging_execute(params),
+            "feature.messaging.blob.read" => self.feature_messaging_blob_read(params),
             "feature.messaging.access.issue" => self.feature_messaging_access_issue(params),
             other => Err(AppHostError::InvalidRequest(format!(
                 "unknown feature method {other}"
@@ -270,6 +272,25 @@ impl AppHost {
             .execute_messaging_sync(request_id, envelope)
             .map_err(|error| AppHostError::Operation(error.to_string()))?;
         Ok(json!({"envelopes": envelopes}))
+    }
+
+    fn feature_messaging_blob_read(&self, params: Value) -> Result<Value, AppHostError> {
+        let blob_id = string_param(&params, "blobId")?;
+        let offset = params.get("offset").and_then(Value::as_u64).unwrap_or(0);
+        let length = params
+            .get("length")
+            .and_then(Value::as_u64)
+            .unwrap_or(1024 * 1024)
+            .clamp(1, 1024 * 1024);
+        let (metadata, bytes) = self
+            .feature
+            .read_messaging_blob_range(blob_id, offset, length)
+            .map_err(|error| AppHostError::Operation(error.to_string()))?;
+        Ok(json!({
+            "metadata": metadata,
+            "offset": offset,
+            "dataBase64": base64::engine::general_purpose::STANDARD.encode(bytes),
+        }))
     }
 
     fn feature_messaging_access_issue(&self, params: Value) -> Result<Value, AppHostError> {
