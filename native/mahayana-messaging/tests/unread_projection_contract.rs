@@ -163,3 +163,163 @@ fn unread_projection_is_actor_scoped_and_read_cursor_survives_reload() {
         Some(first_message_id.0.as_str())
     );
 }
+
+#[test]
+fn draft_and_marked_unread_are_actor_scoped_and_persisted() {
+    let mut service = MessagingService::load(MemoryStateStore::default()).unwrap();
+    let me = ActorId::new("human:draft-me");
+    let peer = ActorId::new("human:draft-peer");
+    let conversation_id = "direct:draft-unread-contract";
+
+    handle(
+        &mut service,
+        "human:draft-me",
+        "profile-me",
+        ClientCommand::UpsertProfile {
+            actor: Actor::human("human:draft-me", "Me"),
+        },
+        1,
+    );
+    handle(
+        &mut service,
+        "human:draft-peer",
+        "profile-peer",
+        ClientCommand::UpsertProfile {
+            actor: Actor::human("human:draft-peer", "Peer"),
+        },
+        2,
+    );
+    handle(
+        &mut service,
+        "human:draft-me",
+        "conversation",
+        ClientCommand::CreateConversation {
+            conversation: Conversation::direct(
+                conversation_id,
+                "Draft contract",
+                vec![
+                    Participant {
+                        actor_id: me.clone(),
+                        role: ParticipantRole::Owner,
+                        joined_at_ms: 3,
+                        muted_until_ms: None,
+                    },
+                    Participant {
+                        actor_id: peer.clone(),
+                        role: ParticipantRole::Member,
+                        joined_at_ms: 3,
+                        muted_until_ms: None,
+                    },
+                ],
+                3,
+            ),
+        },
+        3,
+    );
+
+    handle(
+        &mut service,
+        "human:draft-me",
+        "draft",
+        ClientCommand::SetDraft {
+            conversation_id: ConversationId::new(conversation_id),
+            text: "跨设备草稿".into(),
+            reply_to_message_id: None,
+        },
+        4,
+    );
+    handle(
+        &mut service,
+        "human:draft-me",
+        "marked-unread",
+        ClientCommand::SetMarkedUnread {
+            conversation_id: ConversationId::new(conversation_id),
+            marked_unread: true,
+        },
+        5,
+    );
+
+    let mine = handle(
+        &mut service,
+        "human:draft-me",
+        "sync-me",
+        ClientCommand::Sync {
+            cursor: None,
+            limit: 100,
+        },
+        6,
+    );
+    let (my_conversation, my_drafts) = mine
+        .into_iter()
+        .find_map(|envelope| match envelope.event {
+            ServerEvent::SyncBatch {
+                conversations,
+                drafts,
+                ..
+            } => Some((
+                conversations
+                    .into_iter()
+                    .find(|item| item.id == ConversationId::new(conversation_id))
+                    .unwrap(),
+                drafts,
+            )),
+            _ => None,
+        })
+        .unwrap();
+    assert!(my_conversation.marked_unread);
+    assert_eq!(my_drafts.len(), 1);
+    assert_eq!(my_drafts[0].text, "跨设备草稿");
+    assert_eq!(my_drafts[0].actor_id, me);
+
+    let theirs = handle(
+        &mut service,
+        "human:draft-peer",
+        "sync-peer",
+        ClientCommand::Sync {
+            cursor: None,
+            limit: 100,
+        },
+        7,
+    );
+    let (peer_conversation, peer_drafts) = theirs
+        .into_iter()
+        .find_map(|envelope| match envelope.event {
+            ServerEvent::SyncBatch {
+                conversations,
+                drafts,
+                ..
+            } => Some((
+                conversations
+                    .into_iter()
+                    .find(|item| item.id == ConversationId::new(conversation_id))
+                    .unwrap(),
+                drafts,
+            )),
+            _ => None,
+        })
+        .unwrap();
+    assert!(!peer_conversation.marked_unread);
+    assert!(peer_drafts.is_empty());
+
+    let store = service.into_store();
+    let mut restored = MessagingService::load(store).unwrap();
+    let restored_sync = handle(
+        &mut restored,
+        "human:draft-me",
+        "sync-restored",
+        ClientCommand::Sync {
+            cursor: None,
+            limit: 100,
+        },
+        8,
+    );
+    let restored_drafts = restored_sync
+        .into_iter()
+        .find_map(|envelope| match envelope.event {
+            ServerEvent::SyncBatch { drafts, .. } => Some(drafts),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(restored_drafts.len(), 1);
+    assert_eq!(restored_drafts[0].text, "跨设备草稿");
+}

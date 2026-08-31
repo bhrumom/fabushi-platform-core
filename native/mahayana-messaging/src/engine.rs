@@ -4,7 +4,9 @@ use crate::community::{
     CommunityError, CommunityMember, CommunityState, ForumTopicState, InviteLink, JoinRequest,
     MemberStatus,
 };
-use crate::conversation::{Conversation, ConversationFolder, ConversationId, NotificationSettings};
+use crate::conversation::{
+    Conversation, ConversationDraft, ConversationFolder, ConversationId, NotificationSettings,
+};
 use crate::message::{
     ClientMessageId, DeliveryState, Message, MessageContent, MessageId, ReactionSummary,
 };
@@ -43,6 +45,14 @@ pub enum Command {
     PinConversation {
         conversation_id: ConversationId,
         pinned: bool,
+    },
+    SetMarkedUnread {
+        conversation_id: ConversationId,
+        actor_id: ActorId,
+        marked_unread: bool,
+    },
+    SetDraft {
+        draft: ConversationDraft,
     },
     SetConversationNotifications {
         conversation_id: ConversationId,
@@ -251,6 +261,14 @@ pub enum Event {
         conversation_id: ConversationId,
         pinned: bool,
     },
+    ConversationMarkedUnread {
+        conversation_id: ConversationId,
+        actor_id: ActorId,
+        marked_unread: bool,
+    },
+    DraftChanged {
+        draft: ConversationDraft,
+    },
     ConversationNotificationsUpdated {
         conversation_id: ConversationId,
         settings: NotificationSettings,
@@ -348,6 +366,8 @@ pub struct MessagingState {
     pub folders: BTreeMap<String, ConversationFolder>,
     pub messages: BTreeMap<ConversationId, BTreeMap<MessageId, Message>>,
     pub read_cursors: BTreeMap<ConversationId, BTreeMap<ActorId, MessageId>>,
+    pub marked_unread_by_actor: BTreeMap<ConversationId, BTreeSet<ActorId>>,
+    pub drafts: BTreeMap<ConversationId, BTreeMap<ActorId, ConversationDraft>>,
     pub invoices: BTreeMap<String, Invoice>,
     pub orders: BTreeMap<String, PaymentOrder>,
     pub wallet: WalletLedger,
@@ -601,6 +621,24 @@ impl MessagingEngine {
                     conversation_id,
                     pinned,
                 }])
+            }
+            Command::SetMarkedUnread {
+                conversation_id,
+                actor_id,
+                marked_unread,
+            } => {
+                self.require_conversation(&conversation_id)?;
+                self.require_actor(&actor_id)?;
+                Ok(vec![Event::ConversationMarkedUnread {
+                    conversation_id,
+                    actor_id,
+                    marked_unread,
+                }])
+            }
+            Command::SetDraft { draft } => {
+                self.require_conversation(&draft.conversation_id)?;
+                self.require_actor(&draft.actor_id)?;
+                Ok(vec![Event::DraftChanged { draft }])
             }
             Command::SetConversationNotifications {
                 conversation_id,
@@ -1457,6 +1495,44 @@ impl MessagingEngine {
                     conversation.pinned = pinned;
                 }
             }
+            Event::ConversationMarkedUnread {
+                conversation_id,
+                actor_id,
+                marked_unread,
+            } => {
+                let actors = self
+                    .state
+                    .marked_unread_by_actor
+                    .entry(conversation_id.clone())
+                    .or_default();
+                if marked_unread {
+                    actors.insert(actor_id.clone());
+                } else {
+                    actors.remove(&actor_id);
+                }
+                if actors.is_empty() {
+                    self.state.marked_unread_by_actor.remove(&conversation_id);
+                }
+                if let Some(conversation) = self.state.conversations.get_mut(&conversation_id) {
+                    conversation.marked_unread = marked_unread;
+                }
+            }
+            Event::DraftChanged { draft } => {
+                if draft.text.trim().is_empty() && draft.reply_to_message_id.is_none() {
+                    if let Some(by_actor) = self.state.drafts.get_mut(&draft.conversation_id) {
+                        by_actor.remove(&draft.actor_id);
+                        if by_actor.is_empty() {
+                            self.state.drafts.remove(&draft.conversation_id);
+                        }
+                    }
+                } else {
+                    self.state
+                        .drafts
+                        .entry(draft.conversation_id.clone())
+                        .or_default()
+                        .insert(draft.actor_id.clone(), draft);
+                }
+            }
             Event::ConversationNotificationsUpdated {
                 conversation_id,
                 settings,
@@ -1559,7 +1635,13 @@ impl MessagingEngine {
                     .read_cursors
                     .entry(conversation_id.clone())
                     .or_default()
-                    .insert(actor_id, message_id.clone());
+                    .insert(actor_id.clone(), message_id.clone());
+                if let Some(actors) = self.state.marked_unread_by_actor.get_mut(&conversation_id) {
+                    actors.remove(&actor_id);
+                    if actors.is_empty() {
+                        self.state.marked_unread_by_actor.remove(&conversation_id);
+                    }
+                }
                 // Keep legacy snapshot fields coherent for older readers. Actor-specific
                 // clients receive the authoritative read state from the projected sync view.
                 if let Some(conversation) = self.state.conversations.get_mut(&conversation_id) {

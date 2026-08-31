@@ -2,7 +2,9 @@ use crate::actor::{Actor, ActorId, Presence};
 use crate::blob_store::{BlobId, BlobMetadata, BlobUploadStatus};
 use crate::bot::{BotExecution, BotInvocation, BotProfile};
 use crate::community::{CommunityMember, CommunityState, ForumTopicState, InviteLink, JoinRequest};
-use crate::conversation::{Conversation, ConversationFolder, ConversationId, NotificationSettings};
+use crate::conversation::{
+    Conversation, ConversationDraft, ConversationFolder, ConversationId, NotificationSettings,
+};
 use crate::message::{ClientMessageId, Message, MessageContent, MessageId, ReactionSummary};
 use crate::miniapp::{
     MiniAppGrant, MiniAppManifest, MiniAppRequest, MiniAppResponse, MiniAppSession,
@@ -76,6 +78,15 @@ pub enum ClientCommand {
     PinConversation {
         conversation_id: ConversationId,
         pinned: bool,
+    },
+    SetMarkedUnread {
+        conversation_id: ConversationId,
+        marked_unread: bool,
+    },
+    SetDraft {
+        conversation_id: ConversationId,
+        text: String,
+        reply_to_message_id: Option<MessageId>,
     },
     SetConversationNotifications {
         conversation_id: ConversationId,
@@ -251,6 +262,7 @@ pub enum ServerEvent {
         conversations: Vec<Conversation>,
         messages: Vec<Message>,
         folders: Vec<ConversationFolder>,
+        drafts: Vec<ConversationDraft>,
         invoices: Vec<Invoice>,
         orders: Vec<PaymentOrder>,
         stories: Vec<Story>,
@@ -273,6 +285,14 @@ pub enum ServerEvent {
     },
     ConversationChanged {
         conversation: Conversation,
+    },
+    MarkedUnreadChanged {
+        conversation_id: ConversationId,
+        actor_id: ActorId,
+        marked_unread: bool,
+    },
+    DraftChanged {
+        draft: ConversationDraft,
     },
     FolderChanged {
         folder: ConversationFolder,

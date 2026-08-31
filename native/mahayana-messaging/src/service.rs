@@ -1,7 +1,7 @@
 use crate::actor::{ActorId, ActorKind};
 use crate::blob_store::{BlobStoreError, FileBlobStore};
 use crate::bot::BotInvocation;
-use crate::conversation::{Conversation, ConversationId, ConversationKind};
+use crate::conversation::{Conversation, ConversationDraft, ConversationId, ConversationKind};
 use crate::engine::{Command, EngineError, Event, MessagingEngine};
 use crate::message::{ClientMessageId, DeliveryState, Message, MessageContent, MessageId};
 use crate::payment::Money;
@@ -489,6 +489,27 @@ impl<S: MessagingStateStore> MessagingService<S> {
                     return Err(denied("conversation creator must be an owner/participant"));
                 }
             }
+            ClientCommand::SetMarkedUnread {
+                conversation_id, ..
+            }
+            | ClientCommand::SetDraft {
+                conversation_id, ..
+            } => {
+                let existing = self
+                    .engine
+                    .state()
+                    .conversations
+                    .get(conversation_id)
+                    .ok_or_else(|| denied("conversation state target does not exist"))?;
+                let caller_is_member = existing
+                    .participants
+                    .iter()
+                    .any(|participant| &participant.actor_id == actor_id)
+                    || existing.owner_id.as_ref() == Some(actor_id);
+                if !caller_is_member {
+                    return Err(denied("conversation state update requires membership"));
+                }
+            }
             ClientCommand::UpdateConversation { conversation } => {
                 let existing = self
                     .engine
@@ -685,6 +706,7 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 conversations: Vec::new(),
                 messages: Vec::new(),
                 folders: Vec::new(),
+                drafts: Vec::new(),
                 invoices: Vec::new(),
                 orders: Vec::new(),
                 stories: Vec::new(),
@@ -746,6 +768,10 @@ impl<S: MessagingStateStore> MessagingService<S> {
             })
             .count();
         projected.unread_count = u32::try_from(unread).unwrap_or(u32::MAX);
+        projected.marked_unread = state
+            .marked_unread_by_actor
+            .get(&conversation.id)
+            .is_some_and(|actors| actors.contains(actor_id));
         projected
     }
 
@@ -814,6 +840,12 @@ impl<S: MessagingStateStore> MessagingService<S> {
                             .any(|id| visible_conversation_ids.contains(id))
                     })
                     .take(max_items)
+                    .cloned()
+                    .collect(),
+                drafts: visible_conversation_ids
+                    .iter()
+                    .filter_map(|conversation_id| state.drafts.get(conversation_id))
+                    .filter_map(|by_actor| by_actor.get(actor_id))
                     .cloned()
                     .collect(),
                 invoices: state
@@ -955,6 +987,27 @@ impl<S: MessagingStateStore> MessagingService<S> {
             } => vec![Command::PinConversation {
                 conversation_id,
                 pinned,
+            }],
+            ClientCommand::SetMarkedUnread {
+                conversation_id,
+                marked_unread,
+            } => vec![Command::SetMarkedUnread {
+                conversation_id,
+                actor_id: actor_id.clone(),
+                marked_unread,
+            }],
+            ClientCommand::SetDraft {
+                conversation_id,
+                text,
+                reply_to_message_id,
+            } => vec![Command::SetDraft {
+                draft: ConversationDraft {
+                    conversation_id,
+                    actor_id: actor_id.clone(),
+                    text,
+                    reply_to_message_id: reply_to_message_id.map(|id| id.0),
+                    updated_at_ms: now_ms,
+                },
             }],
             ClientCommand::SetConversationNotifications {
                 conversation_id,
@@ -1245,6 +1298,16 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 .get(&conversation_id)
                 .cloned()
                 .map(|conversation| ServerEvent::ConversationChanged { conversation })?,
+            Event::ConversationMarkedUnread {
+                conversation_id,
+                actor_id,
+                marked_unread,
+            } => ServerEvent::MarkedUnreadChanged {
+                conversation_id,
+                actor_id,
+                marked_unread,
+            },
+            Event::DraftChanged { draft } => ServerEvent::DraftChanged { draft },
             Event::FolderUpserted { folder } => ServerEvent::FolderChanged { folder },
             Event::FolderDeleted { folder_id } => ServerEvent::FolderDeleted { folder_id },
             Event::MessageQueued { message } => ServerEvent::MessageAdded { message },
@@ -1380,6 +1443,14 @@ impl<S: MessagingStateStore> MessagingService<S> {
             }
             ServerEvent::ConversationChanged { conversation } => {
                 Self::extend_conversation_audience(&mut audience, conversation);
+            }
+            ServerEvent::MarkedUnreadChanged { actor_id, .. } => {
+                audience.clear();
+                audience.insert(actor_id.clone());
+            }
+            ServerEvent::DraftChanged { draft } => {
+                audience.clear();
+                audience.insert(draft.actor_id.clone());
             }
             ServerEvent::MessageAdded { message } | ServerEvent::MessageChanged { message } => {
                 self.extend_conversation_id_audience(&mut audience, &message.conversation_id);
