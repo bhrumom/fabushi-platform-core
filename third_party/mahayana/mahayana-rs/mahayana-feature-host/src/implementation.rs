@@ -2597,7 +2597,13 @@ impl FeatureHostController {
         let remote_enabled = self.state()?.settings.remote_control_enabled;
         let (method, action, payload, local_transition) = match command {
             FeatureCommand::RemoteComputerRegister {
-                device_id, label, ..
+                device_id,
+                label,
+                provider,
+                platform,
+                app_version,
+                capabilities,
+                ..
             } => {
                 // Registration is device presence, not authorization to control.
                 // Keeping it available while remote control is disabled lets the
@@ -2605,10 +2611,21 @@ impl FeatureHostController {
                 // polling, activation, signaling, screenshots, and input remain
                 // gated below by `remote_control_enabled`.
                 let device_secret = self.remote_device_secret(&device_id, true)?;
+                let provider = provider.unwrap_or_else(|| "fabushi-webrtc".to_string());
+                let platform = platform.unwrap_or_else(|| "unknown".to_string());
+                let app_version = app_version.unwrap_or_else(|| "unknown".to_string());
                 (
                     "mahayana.remote.computer.register",
                     "registered",
-                    json!({"deviceId": device_id, "label": label, "deviceSecret": device_secret}),
+                    json!({
+                        "deviceId": device_id,
+                        "label": label,
+                        "deviceSecret": device_secret,
+                        "provider": provider,
+                        "platform": platform,
+                        "appVersion": app_version,
+                        "capabilities": capabilities,
+                    }),
                     None,
                 )
             }

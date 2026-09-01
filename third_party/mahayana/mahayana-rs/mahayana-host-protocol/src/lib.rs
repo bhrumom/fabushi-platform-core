@@ -1479,6 +1479,18 @@ pub enum FeatureCommand {
         #[serde(rename = "deviceId")]
         device_id: String,
         label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        platform: Option<String>,
+        #[serde(
+            rename = "appVersion",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        app_version: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
     },
     #[serde(rename = "remoteComputer.heartbeat")]
     RemoteComputerHeartbeat {

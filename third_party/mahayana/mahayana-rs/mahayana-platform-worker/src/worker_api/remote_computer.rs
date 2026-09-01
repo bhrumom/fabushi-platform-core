@@ -16,6 +16,14 @@ struct RemoteComputerRegisterRequest {
     device_id: String,
     label: String,
     device_secret: String,
+    #[serde(default = "default_remote_provider")]
+    provider: String,
+    #[serde(default = "default_remote_platform")]
+    platform: String,
+    #[serde(default = "default_remote_app_version")]
+    app_version: String,
+    #[serde(default)]
+    capabilities: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -91,6 +99,11 @@ struct RemoteComputerSessionCloseRequest {
 struct RemoteComputerRow {
     device_id: String,
     label: String,
+    provider: String,
+    platform: String,
+    app_version: String,
+    capabilities_json: String,
+    active_session_count: i64,
     last_seen_at: i64,
     created_at: i64,
 }
@@ -204,6 +217,69 @@ fn remote_label(value: &str) -> Option<String> {
     (!value.is_empty() && value.chars().count() <= 80).then(|| value.to_string())
 }
 
+fn default_remote_provider() -> String {
+    "fabushi-webrtc".to_string()
+}
+
+fn default_remote_platform() -> String {
+    "unknown".to_string()
+}
+
+fn default_remote_app_version() -> String {
+    "unknown".to_string()
+}
+
+fn remote_provider(value: &str) -> Option<String> {
+    let value = value.trim();
+    matches!(value, "fabushi-webrtc" | "rustdesk-sidecar").then(|| value.to_string())
+}
+
+fn remote_platform(value: &str) -> Option<String> {
+    let value = value.trim();
+    matches!(
+        value,
+        "windows" | "macos" | "linux" | "android" | "ios" | "web" | "unknown"
+    )
+    .then(|| value.to_string())
+}
+
+fn remote_app_version(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()
+        && value.len() <= 64
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || ".+_-".contains(character)))
+    .then(|| value.to_string())
+}
+
+fn remote_capabilities(values: &[String]) -> Option<Vec<String>> {
+    if values.len() > 32 {
+        return None;
+    }
+    let mut normalized = Vec::with_capacity(values.len());
+    for value in values {
+        let value = value.trim();
+        if !matches!(
+            value,
+            "remote-desktop"
+                | "input"
+                | "clipboard"
+                | "file-transfer"
+                | "display"
+                | "audio"
+                | "session-management"
+        ) {
+            return None;
+        }
+        if !normalized.iter().any(|existing| existing == value) {
+            normalized.push(value.to_string());
+        }
+    }
+    normalized.sort();
+    Some(normalized)
+}
+
 fn remote_role(value: &str) -> bool {
     matches!(value, "desktop" | "mobile")
 }
@@ -273,11 +349,19 @@ pub(super) async fn remote_computer_list(
     let database = context.env.d1(DATABASE_BINDING)?;
     let rows = worker::query!(
         &database,
-        "SELECT device_id, label, last_seen_at, created_at
-         FROM remote_computers
-         WHERE user_id = ?1 AND revoked_at IS NULL
-         ORDER BY last_seen_at DESC LIMIT 64",
-        &account.user_id
+        "SELECT computer.device_id, computer.label, computer.provider,
+                computer.platform, computer.app_version, computer.capabilities_json,
+                (SELECT COUNT(*) FROM remote_computer_sessions session
+                 WHERE session.user_id = computer.user_id
+                   AND session.device_id = computer.device_id
+                   AND session.state = 'active'
+                   AND session.expires_at > ?2) AS active_session_count,
+                computer.last_seen_at, computer.created_at
+         FROM remote_computers computer
+         WHERE computer.user_id = ?1 AND computer.revoked_at IS NULL
+         ORDER BY computer.last_seen_at DESC LIMIT 64",
+        &account.user_id,
+        now_seconds()
     )?
     .all()
     .await?
@@ -286,9 +370,18 @@ pub(super) async fn remote_computer_list(
     let computers = rows
         .into_iter()
         .map(|row| {
+            let capabilities = serde_json::from_str::<Vec<String>>(&row.capabilities_json)
+                .ok()
+                .and_then(|values| remote_capabilities(&values))
+                .unwrap_or_default();
             json!({
                 "deviceId": row.device_id,
                 "label": row.label,
+                "provider": row.provider,
+                "platform": row.platform,
+                "appVersion": row.app_version,
+                "capabilities": capabilities,
+                "activeSessionCount": row.active_session_count,
                 "lastSeenAt": row.last_seen_at,
                 "createdAt": row.created_at,
                 "online": now.saturating_sub(row.last_seen_at) <= 45,
@@ -335,6 +428,28 @@ pub(super) async fn remote_computer_register(
             "Computer device secret is invalid.",
         );
     }
+    let Some(provider) = remote_provider(&input.provider) else {
+        return error_response(400, "invalid_provider", "Computer provider is invalid.");
+    };
+    let Some(platform) = remote_platform(&input.platform) else {
+        return error_response(400, "invalid_platform", "Computer platform is invalid.");
+    };
+    let Some(app_version) = remote_app_version(&input.app_version) else {
+        return error_response(
+            400,
+            "invalid_app_version",
+            "Computer appVersion is invalid.",
+        );
+    };
+    let Some(capabilities) = remote_capabilities(&input.capabilities) else {
+        return error_response(
+            400,
+            "invalid_capabilities",
+            "Computer capabilities are invalid.",
+        );
+    };
+    let capabilities_json = serde_json::to_string(&capabilities)
+        .map_err(|error| worker::Error::RustError(error.to_string()))?;
     let device_secret_hash = remote_secret_hash(&input.device_secret);
     let code = new_remote_pairing_code();
     let code_hash = remote_secret_hash(&code);
@@ -344,16 +459,21 @@ pub(super) async fn remote_computer_register(
     let result = worker::query!(
         &database,
         "INSERT INTO remote_computers
-         (device_id, user_id, label, device_secret_hash, pairing_code_hash, pairing_expires_at, created_at, last_seen_at, revoked_at)
-         SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, NULL
+         (device_id, user_id, label, device_secret_hash, pairing_code_hash, pairing_expires_at,
+          created_at, last_seen_at, revoked_at, provider, platform, app_version, capabilities_json)
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, NULL, ?8, ?9, ?10, ?11
          WHERE (SELECT COUNT(*) FROM remote_computers existing
                 WHERE existing.user_id = ?2 AND existing.revoked_at IS NULL
-                  AND existing.device_id <> ?1) < ?8
+                  AND existing.device_id <> ?1) < ?12
          ON CONFLICT(device_id) DO UPDATE SET
            label = excluded.label,
            pairing_code_hash = excluded.pairing_code_hash,
            pairing_expires_at = excluded.pairing_expires_at,
            last_seen_at = excluded.last_seen_at,
+           provider = excluded.provider,
+           platform = excluded.platform,
+           app_version = excluded.app_version,
+           capabilities_json = excluded.capabilities_json,
            revoked_at = NULL
          WHERE remote_computers.user_id = excluded.user_id
            AND remote_computers.device_secret_hash = excluded.device_secret_hash",
@@ -364,6 +484,10 @@ pub(super) async fn remote_computer_register(
         &code_hash,
         expires_at,
         now,
+        &provider,
+        &platform,
+        &app_version,
+        &capabilities_json,
         REMOTE_COMPUTER_MAX_PER_ACCOUNT
     )?
     .run()
@@ -396,6 +520,10 @@ pub(super) async fn remote_computer_register(
     Ok(Response::from_json(&json!({
         "deviceId": input.device_id,
         "label": label,
+        "provider": provider,
+        "platform": platform,
+        "appVersion": app_version,
+        "capabilities": capabilities,
         "pairingCode": code,
         "pairingExpiresAt": expires_at,
     }))?

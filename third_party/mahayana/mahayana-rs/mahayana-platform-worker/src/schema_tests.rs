@@ -49,6 +49,26 @@ fn remote_computer_migration_keeps_control_plane_separate_from_desktop_data() {
 }
 
 #[test]
+fn remote_computer_inventory_migration_is_additive_and_secret_free() {
+    for required in [
+        "provider TEXT NOT NULL DEFAULT 'fabushi-webrtc'",
+        "platform TEXT NOT NULL DEFAULT 'unknown'",
+        "app_version TEXT NOT NULL DEFAULT 'unknown'",
+        "capabilities_json TEXT NOT NULL DEFAULT '[]'",
+        "rustdesk-sidecar",
+        "remote_computers_inventory_idx",
+    ] {
+        assert!(
+            REMOTE_COMPUTER_INVENTORY_SCHEMA_V15.contains(required),
+            "missing {required}"
+        );
+    }
+    assert!(!REMOTE_COMPUTER_INVENTORY_SCHEMA_V15.contains("device_secret TEXT"));
+    assert!(!REMOTE_COMPUTER_INVENTORY_SCHEMA_V15.contains("screenshot_data"));
+    assert!(!REMOTE_COMPUTER_INVENTORY_SCHEMA_V15.contains("input_payload"));
+}
+
+#[test]
 fn ci_runner_auth_is_exact_workflow_and_linked_account_scoped() {
     for required in [
         "token.actions.githubusercontent.com",
