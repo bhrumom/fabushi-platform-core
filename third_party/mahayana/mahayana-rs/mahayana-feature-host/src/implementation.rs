@@ -23,9 +23,8 @@ use mahayana_core::ApprovalDecision as RuntimeApprovalDecision;
 #[cfg(feature = "production")]
 use mahayana_core::ApprovalId;
 #[cfg(feature = "production")]
-use mahayana_core::CODEX_ASSISTANT_CONVERSATION_ID;
-#[cfg(feature = "production")]
 use mahayana_core::ConversationId;
+use mahayana_core::MAHAYANA_AI_CONVERSATION_ID;
 #[cfg(feature = "production")]
 use mahayana_core::MessageRole as RuntimeMessageRole;
 #[cfg(feature = "production")]
@@ -6735,7 +6734,7 @@ impl FeatureHostController {
         let conversation_id = requested_conversation_id
             .map(ConversationId)
             .or_else(|| bot_conversation_id.map(ConversationId))
-            .unwrap_or_else(|| ConversationId(CODEX_ASSISTANT_CONVERSATION_ID.to_string()));
+            .unwrap_or_else(|| ConversationId(MAHAYANA_AI_CONVERSATION_ID.to_string()));
         let (provider, routed_model) = match self.runtime()?.execute(RuntimeCommand::Status)? {
             RuntimeResponse::Status(status) => (
                 format!("{:?}", status.model_provider).to_lowercase(),
@@ -6794,6 +6793,18 @@ impl FeatureHostController {
                 .clone()
                 .unwrap_or_else(|| "mahayana-assistant".into()),
         );
+        state.events.push_back(HostEvent::ChatMessage {
+            timestamp: timestamp(),
+            role: MessageRole::User,
+            text,
+            operation_id: None,
+        });
+        state.events.push_back(HostEvent::OperationStarted {
+            timestamp: timestamp(),
+            operation_id: operation_id.clone(),
+            label: "chat-response".into(),
+            interruptible: true,
+        });
         state.events.push_back(HostEvent::ModelRouted {
             timestamp: timestamp(),
             operation_id: operation_id.clone(),
@@ -6816,18 +6827,6 @@ impl FeatureHostController {
                 total: None,
             });
         }
-        state.events.push_back(HostEvent::ChatMessage {
-            timestamp: timestamp(),
-            role: MessageRole::User,
-            text,
-            operation_id: None,
-        });
-        state.events.push_back(HostEvent::OperationStarted {
-            timestamp: timestamp(),
-            operation_id: operation_id.clone(),
-            label: "chat-response".into(),
-            interruptible: true,
-        });
         Ok(CommandAccepted {
             request_id,
             operation_id: Some(operation_id),
@@ -7103,7 +7102,7 @@ impl FeatureHostController {
             }
             FeatureCommand::ConversationList { query, .. } => {
                 let mut conversations = vec![ConversationSummary {
-                    id: "codex:agent:assistant".into(),
+                    id: MAHAYANA_AI_CONVERSATION_ID.into(),
                     title: "大乘助手".into(),
                     kind: "codex".into(),
                     pinned: true,
@@ -7141,7 +7140,7 @@ impl FeatureHostController {
                     title: "大乘助手".into(),
                     kind: "agent".into(),
                     mention: "@agent.mahayana".into(),
-                    conversation_id: "codex:agent:assistant".into(),
+                    conversation_id: MAHAYANA_AI_CONVERSATION_ID.into(),
                     provider: "codex".into(),
                     plugin_id: None,
                     description: "大乘共享智能代理".into(),
@@ -8062,7 +8061,7 @@ fn default_bots() -> BTreeMap<String, BotSummary> {
             notifications_enabled: true,
             notify_on_updates: true,
             unread: false,
-            conversation_id: Some("codex:agent:assistant".into()),
+            conversation_id: Some(MAHAYANA_AI_CONVERSATION_ID.into()),
         },
         BotSummary {
             id: "research-bot".into(),
@@ -12715,7 +12714,7 @@ mod tests {
         )
         .expect("create production event Host");
         let operation_id = OperationId("operation-1".into());
-        let conversation_id = ConversationId(CODEX_ASSISTANT_CONVERSATION_ID.into());
+        let conversation_id = ConversationId(MAHAYANA_AI_CONVERSATION_ID.into());
 
         let delta = controller
             .translate_runtime_event(RuntimeEvent::MessageDelta {

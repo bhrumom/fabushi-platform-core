@@ -346,7 +346,7 @@ fn default_surface_bots() -> Vec<BotSummary> {
             notifications_enabled: true,
             notify_on_updates: true,
             unread: false,
-            conversation_id: Some("codex:agent:assistant".into()),
+            conversation_id: Some("mahayana-ai:agent:assistant".into()),
         },
         BotSummary {
             id: "research-bot".into(),

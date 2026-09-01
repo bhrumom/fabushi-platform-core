@@ -12,15 +12,19 @@ use mahayana_core::Conversation;
 use mahayana_core::ConversationId;
 use mahayana_core::DEFAULT_DACHENG_RESPONSES_BASE_URL;
 use mahayana_core::DEFAULT_DEEPSEEK_MODEL;
+use mahayana_core::MAHAYANA_AI_CONVERSATION_ID;
 use mahayana_core::MODEL_RUNTIME_VERSION;
 use mahayana_core::Message;
 use mahayana_core::MessageId;
 use mahayana_core::MessageRole;
 use mahayana_core::ModelProviderMode;
+use mahayana_core::ModelTokenUsage;
+use mahayana_core::ModelTokenUsageSnapshot;
 use mahayana_core::OperationId;
 use mahayana_core::PeerKind;
 use mahayana_core::PluginCommandDescriptor;
 use mahayana_core::RUNTIME_ABI_VERSION;
+use mahayana_core::RuntimeActivityStatus;
 use mahayana_core::RuntimeCommand;
 use mahayana_core::RuntimeEvent;
 use mahayana_core::RuntimeResponse;
@@ -48,6 +52,22 @@ use web_sys::Response;
 struct WebConfig {
     model: String,
     responses_base_url: String,
+    #[serde(default = "default_product_base_url")]
+    product_base_url: String,
+    #[serde(default = "default_max_model_turns")]
+    max_model_turns: usize,
+}
+
+const DEFAULT_MAX_MODEL_TURNS: usize = 16;
+const MAX_MAX_MODEL_TURNS: usize = 32;
+const DEFAULT_PRODUCT_BASE_URL: &str = "https://api.ombhrum.com";
+
+fn default_max_model_turns() -> usize {
+    DEFAULT_MAX_MODEL_TURNS
+}
+
+fn default_product_base_url() -> String {
+    DEFAULT_PRODUCT_BASE_URL.to_string()
 }
 
 impl Default for WebConfig {
@@ -55,6 +75,8 @@ impl Default for WebConfig {
         Self {
             model: DEFAULT_DEEPSEEK_MODEL.to_string(),
             responses_base_url: DEFAULT_DACHENG_RESPONSES_BASE_URL.to_string(),
+            product_base_url: default_product_base_url(),
+            max_model_turns: DEFAULT_MAX_MODEL_TURNS,
         }
     }
 }
@@ -85,6 +107,7 @@ struct WebState {
     active_operations: HashSet<OperationId>,
     plugins: HashMap<String, BrowserPlugin>,
     account_session: Option<WebAccountSession>,
+    browser_login_poll_secrets: HashMap<String, String>,
     next_id: u64,
 }
 
@@ -133,13 +156,19 @@ pub struct MahayanaWebRuntime {
 impl MahayanaWebRuntime {
     #[wasm_bindgen(constructor)]
     pub fn new(config_json: &str) -> Result<MahayanaWebRuntime, JsValue> {
-        let config: WebConfig = if config_json.trim().is_empty() {
+        let mut config: WebConfig = if config_json.trim().is_empty() {
             WebConfig::default()
         } else {
             serde_json::from_str(config_json).map_err(js_error)?
         };
+        config.max_model_turns = config.max_model_turns.clamp(1, MAX_MAX_MODEL_TURNS);
         if !config.responses_base_url.starts_with("https://") {
             return Err(JsValue::from_str("Responses endpoint must use HTTPS"));
+        }
+        if !config.product_base_url.starts_with("https://") {
+            return Err(JsValue::from_str(
+                "Mahayana product endpoint must use HTTPS",
+            ));
         }
         let mut state = WebState {
             config,
@@ -149,6 +178,7 @@ impl MahayanaWebRuntime {
             active_operations: HashSet::new(),
             plugins: HashMap::new(),
             account_session: None,
+            browser_login_poll_secrets: HashMap::new(),
             next_id: 0,
         };
         state.events.push_back(RuntimeEvent::Ready {
@@ -821,6 +851,10 @@ async fn execute_product_command(
                 "loggedIn": false,
             }))
         }
+        "mahayana.auth.browser.start" => web_browser_login_start(state, &command).await,
+        "mahayana.auth.browser.poll" => web_browser_login_poll(state, &command).await,
+        "mahayana.auth.browser.cancel" => web_browser_login_cancel(state, &command).await,
+        "mahayana.auth.browser.reopen" => web_browser_login_reopen(state, &command).await,
         "mahayana.platform.request" => platform_product_request(state, &command).await,
         _ => {
             let route = product_command_route(command_type, &command)?;
@@ -834,7 +868,9 @@ async fn execute_product_command(
                 )
                 .await?
             } else {
+                let product_base_url = state.borrow().config.product_base_url.clone();
                 raw_product_fetch(
+                    &product_base_url,
                     route.method,
                     &route.path,
                     &route.query,
@@ -857,6 +893,164 @@ async fn execute_product_command(
     }
 }
 
+async fn web_browser_login_start(
+    state: Rc<RefCell<WebState>>,
+    command: &Value,
+) -> Result<Value, JsValue> {
+    let platform = optional_product_string(command, "platform").unwrap_or_else(|| "web".into());
+    let device_id =
+        optional_product_string(command, "deviceId").unwrap_or_else(|| "fabushi-web-wasm".into());
+    let product_base_url = state.borrow().config.product_base_url.clone();
+    let response = raw_product_fetch(
+        &product_base_url,
+        "POST",
+        "/api/auth/browser/start",
+        &[],
+        Some(&json!({"platform": platform, "deviceId": device_id})),
+        None,
+    )
+    .await?;
+    ensure_product_success(&response)?;
+    let mut data = response.data;
+    let attempt_id = required_product_string(&data, "attemptId")?.to_string();
+    let poll_secret = required_product_string(&data, "pollSecret")?.to_string();
+    state
+        .borrow_mut()
+        .browser_login_poll_secrets
+        .insert(attempt_id, poll_secret);
+    if let Some(object) = data.as_object_mut() {
+        object.remove("pollSecret");
+    }
+    strip_web_credentials(&mut data);
+    Ok(data)
+}
+
+async fn web_browser_login_poll(
+    state: Rc<RefCell<WebState>>,
+    command: &Value,
+) -> Result<Value, JsValue> {
+    let attempt_id = required_product_string(command, "attemptId")?;
+    let Some(poll_secret) = state
+        .borrow()
+        .browser_login_poll_secrets
+        .get(attempt_id)
+        .cloned()
+    else {
+        return Ok(json!({"status": "expired"}));
+    };
+    let product_base_url = state.borrow().config.product_base_url.clone();
+    let response = raw_product_fetch(
+        &product_base_url,
+        "POST",
+        &format!("/api/auth/browser/attempts/{attempt_id}"),
+        &[],
+        Some(&json!({"pollSecret": poll_secret})),
+        None,
+    )
+    .await?;
+    ensure_product_success(&response)?;
+    let mut data = response.data;
+    let status = data
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("failed");
+    let terminal = matches!(status, "completed" | "expired" | "cancelled" | "failed");
+    if status == "completed" {
+        let provider = data
+            .get("provider")
+            .and_then(Value::as_str)
+            .unwrap_or("browser");
+        let session = data.get("session").cloned().unwrap_or_else(|| data.clone());
+        let account_session = web_session_from_response(&session, provider).ok_or_else(|| {
+            JsValue::from_str("browser login completed without a Rust account session")
+        })?;
+        let user = session.get("user").cloned().unwrap_or(Value::Null);
+        state.borrow_mut().account_session = Some(account_session);
+        data["auth"] = json!({
+            "@type": "mahayana.auth.session",
+            "loggedIn": true,
+            "provider": provider,
+            "user": user,
+        });
+    }
+    if terminal {
+        state
+            .borrow_mut()
+            .browser_login_poll_secrets
+            .remove(attempt_id);
+    }
+    strip_web_credentials(&mut data);
+    Ok(data)
+}
+
+async fn web_browser_login_cancel(
+    state: Rc<RefCell<WebState>>,
+    command: &Value,
+) -> Result<Value, JsValue> {
+    let attempt_id = required_product_string(command, "attemptId")?;
+    let Some(poll_secret) = state
+        .borrow()
+        .browser_login_poll_secrets
+        .get(attempt_id)
+        .cloned()
+    else {
+        return Ok(json!({"status": "expired"}));
+    };
+    let product_base_url = state.borrow().config.product_base_url.clone();
+    let response = raw_product_fetch(
+        &product_base_url,
+        "POST",
+        &format!("/api/auth/browser/attempts/{attempt_id}/cancel"),
+        &[],
+        Some(&json!({"pollSecret": poll_secret})),
+        None,
+    )
+    .await?;
+    ensure_product_success(&response)?;
+    let mut data = response.data;
+    let terminal = matches!(
+        data.get("status").and_then(Value::as_str),
+        Some("cancelled" | "expired" | "failed")
+    );
+    if terminal {
+        state
+            .borrow_mut()
+            .browser_login_poll_secrets
+            .remove(attempt_id);
+    }
+    strip_web_credentials(&mut data);
+    Ok(data)
+}
+
+async fn web_browser_login_reopen(
+    state: Rc<RefCell<WebState>>,
+    command: &Value,
+) -> Result<Value, JsValue> {
+    let attempt_id = required_product_string(command, "attemptId")?;
+    let Some(poll_secret) = state
+        .borrow()
+        .browser_login_poll_secrets
+        .get(attempt_id)
+        .cloned()
+    else {
+        return Ok(json!({"status": "expired"}));
+    };
+    let product_base_url = state.borrow().config.product_base_url.clone();
+    let response = raw_product_fetch(
+        &product_base_url,
+        "POST",
+        &format!("/api/auth/browser/attempts/{attempt_id}/reopen"),
+        &[],
+        Some(&json!({"pollSecret": poll_secret})),
+        None,
+    )
+    .await?;
+    ensure_product_success(&response)?;
+    let mut data = response.data;
+    strip_web_credentials(&mut data);
+    Ok(data)
+}
+
 struct ProductCommandRoute {
     method: &'static str,
     path: String,
@@ -872,6 +1066,9 @@ fn product_command_route(
     command: &Value,
 ) -> Result<ProductCommandRoute, JsValue> {
     let route = match command_type {
+        "mahayana.auth.oauth.providers" => {
+            unauthenticated_route("GET", "/api/auth/oauth/providers", None)
+        }
         "mahayana.auth.password.login" => ProductCommandRoute {
             method: "POST",
             path: "/api/auth/login".into(),
@@ -1127,9 +1324,18 @@ async fn platform_product_request(
         .and_then(Value::as_bool)
         .unwrap_or(true);
     let response = if authenticated {
-        authenticated_product_fetch(state, &method, path, &query, body).await?
+        authenticated_product_fetch(Rc::clone(&state), &method, path, &query, body).await?
     } else {
-        raw_product_fetch(&method, path, &query, body.as_ref(), None).await?
+        let product_base_url = state.borrow().config.product_base_url.clone();
+        raw_product_fetch(
+            &product_base_url,
+            &method,
+            path,
+            &query,
+            body.as_ref(),
+            None,
+        )
+        .await?
     };
     let mut data = response.data;
     strip_web_credentials(&mut data);
@@ -1156,10 +1362,27 @@ async fn authenticated_product_fetch(
     body: Option<Value>,
 ) -> Result<ProductHttpResponse, JsValue> {
     let token = active_web_access_token(Rc::clone(&state), false).await?;
-    let mut response = raw_product_fetch(method, path, query, body.as_ref(), Some(&token)).await?;
+    let product_base_url = state.borrow().config.product_base_url.clone();
+    let mut response = raw_product_fetch(
+        &product_base_url,
+        method,
+        path,
+        query,
+        body.as_ref(),
+        Some(&token),
+    )
+    .await?;
     if response.status_code == 401 {
         let token = active_web_access_token(Rc::clone(&state), true).await?;
-        response = raw_product_fetch(method, path, query, body.as_ref(), Some(&token)).await?;
+        response = raw_product_fetch(
+            &product_base_url,
+            method,
+            path,
+            query,
+            body.as_ref(),
+            Some(&token),
+        )
+        .await?;
     }
     Ok(response)
 }
@@ -1181,7 +1404,9 @@ async fn active_web_access_token(
         state.borrow_mut().account_session = None;
         return Err(JsValue::from_str("Mahayana account session has expired"));
     }
+    let product_base_url = state.borrow().config.product_base_url.clone();
     let response = raw_product_fetch(
+        &product_base_url,
         "POST",
         "/api/auth/refresh",
         &[],
@@ -1203,13 +1428,14 @@ async fn active_web_access_token(
 }
 
 async fn raw_product_fetch(
+    product_base_url: &str,
     method: &str,
     path: &str,
     query: &[(String, String)],
     body: Option<&Value>,
     access_token: Option<&str>,
 ) -> Result<ProductHttpResponse, JsValue> {
-    let mut url = path.to_string();
+    let mut url = format!("{}{}", product_base_url.trim_end_matches('/'), path);
     if !query.is_empty() {
         url.push('?');
         url.push_str(
@@ -1228,7 +1454,7 @@ async fn raw_product_fetch(
     }
     let options = RequestInit::new();
     options.set_method(method);
-    options.set_mode(RequestMode::SameOrigin);
+    options.set_mode(RequestMode::Cors);
     let encoded_body = body
         .map(serde_json::to_string)
         .transpose()
@@ -1311,6 +1537,7 @@ fn strip_web_credentials(response: &mut Value) {
                 "accessTokenExpiresAt",
                 "refreshTokenExpiresAt",
                 "tokenType",
+                "pollSecret",
             ] {
                 object.remove(key);
             }
@@ -1366,7 +1593,8 @@ fn safe_platform_path(path: &str) -> bool {
     (path.starts_with("/api/") || path.starts_with("/v1/"))
         && !path.contains("..")
         && !path.contains('\\')
-        && !path.contains(['\r', '\n'])
+        && !path.contains('\r')
+        && !path.contains('\n')
 }
 
 fn encode_uri_component(value: &str) -> String {
@@ -1381,16 +1609,168 @@ fn spawn_inference(
     config: WebConfig,
 ) {
     spawn_local(async move {
-        let result = match active_web_access_token(Rc::clone(&state), false).await {
-            Ok(access_token) => fetch_response(&config, input, &access_token).await,
-            Err(_) => Err("Mahayana account login is required".to_string()),
-        };
+        let mut input = input;
+        let result: Result<Option<String>, String> = async {
+            for turn in 0..config.max_model_turns {
+                if !operation_is_active(&state, &operation_id) {
+                    return Ok(None);
+                }
+                let model_step_id = format!("{}:model:{}", operation_id.as_str(), turn + 1);
+                enqueue_agent_activity(
+                    &state,
+                    &operation_id,
+                    model_step_id.clone(),
+                    "model",
+                    format!("Mahayana reasoning turn {}", turn + 1),
+                    Some("正在思考并决定下一步工作".into()),
+                    RuntimeActivityStatus::Running,
+                    Some(json!({"engine": "mahayana-web-wasm", "turn": turn + 1})),
+                );
+                let access_token = active_web_access_token(Rc::clone(&state), false)
+                    .await
+                    .map_err(|error| js_value_message(error, "Mahayana account login is required"))?;
+                let tools = browser_tool_definitions(&state.borrow().plugins);
+                let payload = match fetch_response(&config, input.clone(), &access_token, tools).await {
+                    Ok(payload) => payload,
+                    Err(message) => {
+                        enqueue_agent_activity(
+                            &state,
+                            &operation_id,
+                            model_step_id,
+                            "model",
+                            format!("Mahayana reasoning turn {}", turn + 1),
+                            Some(message.clone()),
+                            RuntimeActivityStatus::Failed,
+                            None,
+                        );
+                        return Err(message);
+                    }
+                };
+                enqueue_usage(&state, &operation_id, &payload);
+                append_model_output(&mut input, &payload);
+                let calls = extract_function_calls(&payload, &operation_id, turn)?;
+                enqueue_agent_activity(
+                    &state,
+                    &operation_id,
+                    model_step_id,
+                    "model",
+                    format!("Mahayana reasoning turn {}", turn + 1),
+                    Some(if calls.is_empty() {
+                        "已生成回复".into()
+                    } else {
+                        format!("已决定执行 {} 个浏览器工具", calls.len())
+                    }),
+                    RuntimeActivityStatus::Completed,
+                    Some(json!({"toolCalls": calls.len()})),
+                );
+
+                if calls.is_empty() {
+                    let text = extract_output_text(&payload).ok_or_else(|| {
+                        "Responses endpoint returned no assistant output text".to_string()
+                    })?;
+                    return Ok(Some(text));
+                }
+
+                for (call_index, call) in calls.into_iter().enumerate() {
+                    if !operation_is_active(&state, &operation_id) {
+                        return Ok(None);
+                    }
+                    let tool_step_id = format!(
+                        "{}:tool:{}:{}",
+                        operation_id.as_str(),
+                        turn + 1,
+                        call_index + 1
+                    );
+                    let plugin = state
+                        .borrow()
+                        .plugins
+                        .values()
+                        .find(|plugin| browser_plugin_has_tool(plugin, &call.name))
+                        .cloned();
+                    let Some(plugin) = plugin else {
+                        let message = format!("浏览器端没有可执行的工具 {}", call.name);
+                        enqueue_agent_activity(
+                            &state,
+                            &operation_id,
+                            tool_step_id,
+                            "tool",
+                            format!("执行工具 {}", call.name),
+                            Some(message.clone()),
+                            RuntimeActivityStatus::Failed,
+                            None,
+                        );
+                        input.push(function_call_output(&call, json!({"error": message})));
+                        continue;
+                    };
+                    enqueue_agent_activity(
+                        &state,
+                        &operation_id,
+                        tool_step_id.clone(),
+                        "tool",
+                        format!("执行 {}", call.name),
+                        Some(plugin.title.clone()),
+                        RuntimeActivityStatus::Running,
+                        Some(json!({"pluginId": plugin.plugin_id.clone(), "tool": call.name.clone()})),
+                    );
+                    let outcome = match require_browser_tool_approval(&plugin, &call.name) {
+                        Ok(()) => call_local_plugin(&plugin.plugin_id, &call.name, &call.arguments)
+                            .await
+                            .map(|outcome| {
+                                let (result, progress) = split_local_plugin_outcome(outcome);
+                                (result, progress, None)
+                            })
+                            .unwrap_or_else(|message| (json!({"error": message}), Vec::new(), Some(message))),
+                        Err(error) => {
+                            let message = js_value_message(error, "浏览器工具需要授权");
+                            (json!({"error": message.clone()}), Vec::new(), Some(message))
+                        }
+                    };
+                    let (tool_result, progress, failure) = outcome;
+                    for update in progress {
+                        let mut state = state.borrow_mut();
+                        state.events.push_back(RuntimeEvent::PluginProgress {
+                            operation_id: operation_id.clone(),
+                            plugin_id: plugin.plugin_id.clone(),
+                            tool: call.name.clone(),
+                            progress: update.get("progress").and_then(Value::as_u64).unwrap_or(0),
+                            total: update.get("total").and_then(Value::as_u64).unwrap_or(0),
+                            message: update
+                                .get("message")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                        });
+                    }
+                    let success = failure.is_none();
+                    enqueue_agent_activity(
+                        &state,
+                        &operation_id,
+                        tool_step_id,
+                        "tool",
+                        format!("执行 {}", call.name),
+                        Some(failure.clone().unwrap_or_else(|| "工具执行完成".into())),
+                        if success {
+                            RuntimeActivityStatus::Completed
+                        } else {
+                            RuntimeActivityStatus::Failed
+                        },
+                        Some(json!({"pluginId": plugin.plugin_id.clone(), "tool": call.name.clone(), "success": success})),
+                    );
+                    input.push(function_call_output(&call, tool_result));
+                }
+            }
+            Err(format!(
+                "Mahayana Web Agent exceeded {} model turns",
+                config.max_model_turns
+            ))
+        }
+        .await;
         let mut state = state.borrow_mut();
         if !state.active_operations.remove(&operation_id) {
             return;
         }
         match result {
-            Ok(text) => {
+            Ok(Some(text)) => {
                 state
                     .model_inputs
                     .entry(conversation_id.clone())
@@ -1431,6 +1811,7 @@ fn spawn_inference(
                     .events
                     .push_back(RuntimeEvent::OperationCompleted { operation_id });
             }
+            Ok(None) => {}
             Err(message) => state.events.push_back(RuntimeEvent::OperationFailed {
                 operation_id,
                 code: "model_inference_failed".into(),
@@ -1444,7 +1825,8 @@ async fn fetch_response(
     config: &WebConfig,
     input: Vec<Value>,
     access_token: &str,
-) -> Result<String, String> {
+    tools: Vec<Value>,
+) -> Result<Value, String> {
     let endpoint = if config.responses_base_url.ends_with("/responses") {
         config.responses_base_url.clone()
     } else {
@@ -1457,6 +1839,10 @@ async fn fetch_response(
         "model": config.model,
         "input": input,
         "stream": false,
+        "tools": tools,
+        "tool_choice": "auto",
+        "parallel_tool_calls": false,
+        "instructions": "You are Mahayana, a product-owned multi-step Agent. Decide and execute browser-local tools when they are useful, then continue reasoning until the user-facing answer is ready. Never claim a tool succeeded unless its result says so.",
     }))
     .map_err(|_| "could not encode Responses request".to_string())?;
     let options = RequestInit::new();
@@ -1500,12 +1886,198 @@ async fn fetch_response(
         .ok_or_else(|| "Responses body could not be decoded".to_string())?;
     let payload: Value = serde_json::from_str(&payload)
         .map_err(|_| "Responses endpoint returned invalid JSON".to_string())?;
-    extract_output_text(&payload)
-        .ok_or_else(|| "Responses endpoint returned no assistant output text".to_string())
+    Ok(payload)
+}
+
+#[derive(Debug, Clone)]
+struct BrowserFunctionCall {
+    call_id: String,
+    name: String,
+    arguments: Value,
+}
+
+fn operation_is_active(state: &Rc<RefCell<WebState>>, operation_id: &OperationId) -> bool {
+    state.borrow().active_operations.contains(operation_id)
+}
+
+fn js_value_message(value: JsValue, fallback: &str) -> String {
+    value.as_string().unwrap_or_else(|| fallback.to_string())
+}
+
+fn enqueue_agent_activity(
+    state: &Rc<RefCell<WebState>>,
+    operation_id: &OperationId,
+    step_id: String,
+    kind: &str,
+    title: String,
+    detail: Option<String>,
+    status: RuntimeActivityStatus,
+    metadata: Option<Value>,
+) {
+    state
+        .borrow_mut()
+        .events
+        .push_back(RuntimeEvent::AgentActivity {
+            operation_id: operation_id.clone(),
+            step_id,
+            kind: kind.to_string(),
+            title,
+            detail,
+            status,
+            metadata,
+        });
+}
+
+fn browser_tool_definitions(plugins: &HashMap<String, BrowserPlugin>) -> Vec<Value> {
+    let mut definitions = Vec::new();
+    let mut names = HashSet::new();
+    for plugin in plugins.values() {
+        for descriptor in &plugin.tools {
+            let Some(name) = descriptor.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            if !names.insert(name.to_string()) {
+                continue;
+            }
+            definitions.push(json!({
+                "type": "function",
+                "name": name,
+                "description": descriptor.get("description").cloned().unwrap_or_else(|| json!(format!("{} 的浏览器工具", plugin.title))),
+                "parameters": descriptor
+                    .get("inputSchema")
+                    .or_else(|| descriptor.get("input_schema"))
+                    .or_else(|| descriptor.get("parameters"))
+                    .cloned()
+                    .unwrap_or_else(|| json!({"type":"object","properties":{}})),
+            }));
+        }
+    }
+    definitions
+}
+
+fn browser_plugin_has_tool(plugin: &BrowserPlugin, name: &str) -> bool {
+    plugin
+        .tools
+        .iter()
+        .any(|descriptor| descriptor.get("name").and_then(Value::as_str) == Some(name))
+}
+
+fn function_call_output(call: &BrowserFunctionCall, output: Value) -> Value {
+    json!({
+        "type": "function_call_output",
+        "call_id": call.call_id.clone(),
+        "output": serde_json::to_string(&output).unwrap_or_else(|_| "null".into()),
+    })
+}
+
+fn extract_function_calls(
+    payload: &Value,
+    operation_id: &OperationId,
+    turn: usize,
+) -> Result<Vec<BrowserFunctionCall>, String> {
+    let mut calls = Vec::new();
+    for (index, item) in payload
+        .get("output")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
+        if !matches!(item_type, "function_call" | "tool_call") {
+            continue;
+        }
+        let name = item
+            .get("name")
+            .or_else(|| item.pointer("/function/name"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Mahayana model returned a tool call without a name".to_string())?;
+        let call_id = item
+            .get("call_id")
+            .or_else(|| item.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                format!("{}:call:{}:{}", operation_id.as_str(), turn + 1, index + 1)
+            });
+        let arguments = match item
+            .get("arguments")
+            .or_else(|| item.pointer("/function/arguments"))
+        {
+            Some(Value::String(arguments)) => serde_json::from_str(arguments)
+                .map_err(|error| format!("invalid tool arguments for {name}: {error}"))?,
+            Some(arguments) => arguments.clone(),
+            None => json!({}),
+        };
+        calls.push(BrowserFunctionCall {
+            call_id,
+            name: name.to_string(),
+            arguments,
+        });
+    }
+    Ok(calls)
+}
+
+fn append_model_output(input: &mut Vec<Value>, payload: &Value) {
+    if let Some(output) = payload.get("output").and_then(Value::as_array) {
+        input.extend(output.iter().cloned());
+    } else if let Some(text) = extract_output_text(payload) {
+        input.push(json!({"role": "assistant", "content": text}));
+    }
+}
+
+fn enqueue_usage(state: &Rc<RefCell<WebState>>, operation_id: &OperationId, payload: &Value) {
+    let Some(usage) = payload.get("usage") else {
+        return;
+    };
+    let input_tokens = usage_value(usage, &["input_tokens", "prompt_tokens", "inputTokens"]);
+    let cached_input_tokens = usage_value(usage, &["cached_input_tokens", "cachedInputTokens"]);
+    let output_tokens = usage_value(
+        usage,
+        &["output_tokens", "completion_tokens", "outputTokens"],
+    );
+    let reasoning_output_tokens =
+        usage_value(usage, &["reasoning_output_tokens", "reasoningOutputTokens"]);
+    let total_tokens = usage_value(usage, &["total_tokens", "totalTokens"])
+        .max(input_tokens.saturating_add(output_tokens));
+    if total_tokens == 0 {
+        return;
+    }
+    let last = ModelTokenUsage {
+        total_tokens,
+        input_tokens,
+        cached_input_tokens,
+        output_tokens,
+        reasoning_output_tokens,
+    };
+    state
+        .borrow_mut()
+        .events
+        .push_back(RuntimeEvent::ModelUsageUpdated {
+            operation_id: operation_id.clone(),
+            usage: ModelTokenUsageSnapshot {
+                total: None,
+                last,
+                model_context_window: None,
+            },
+        });
+}
+
+fn usage_value(value: &Value, keys: &[&str]) -> i64 {
+    keys.iter()
+        .find_map(|key| {
+            value.get(*key).and_then(Value::as_i64).or_else(|| {
+                value
+                    .get(*key)
+                    .and_then(Value::as_u64)
+                    .map(|value| value as i64)
+            })
+        })
+        .unwrap_or(0)
 }
 
 fn browser_conversations(plugins: &HashMap<String, BrowserPlugin>) -> Vec<Conversation> {
-    let mut conversations = vec![Conversation::codex_assistant()];
+    let mut conversations = vec![Conversation::mahayana_assistant()];
     conversations.extend(plugins.values().map(|plugin| Conversation {
         id: ConversationId(format!("miniapp:{}", plugin.plugin_id)),
         title: plugin.title.clone(),
@@ -1523,7 +2095,7 @@ fn ensure_browser_conversation(
     plugins: &HashMap<String, BrowserPlugin>,
     conversation_id: &ConversationId,
 ) -> Result<(), JsValue> {
-    if conversation_id.as_str() == "codex:agent:assistant"
+    if conversation_id.as_str() == MAHAYANA_AI_CONVERSATION_ID
         || conversation_id
             .as_str()
             .strip_prefix("miniapp:")
@@ -1591,7 +2163,7 @@ mod tests {
         )]);
         let conversations = browser_conversations(&plugins);
         assert_eq!(conversations.len(), 2);
-        assert_eq!(conversations[0].id.as_str(), "codex:agent:assistant");
+        assert_eq!(conversations[0].id.as_str(), MAHAYANA_AI_CONVERSATION_ID);
         assert!(
             conversations
                 .iter()
