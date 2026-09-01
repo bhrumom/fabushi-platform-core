@@ -72,11 +72,22 @@ const USAGE_RESERVATION_SECONDS: i64 = 10 * 60;
 const MAX_TOKENS_PER_RESERVATION: i64 = 2_000_000;
 const UNLIMITED_AI_TOKEN_LIMIT: i64 = 9_007_199_254_740_991;
 const BUILTIN_SUPER_ADMIN_ACCOUNT_IDS: &[&str] = &["22"];
+const BUILTIN_UNLIMITED_ACCOUNT_IDS: &[&str] = &["197915874789377"];
+const BUILTIN_UNLIMITED_ACCOUNT_USERNAMES: &[&str] = &["fabushi_mcp_ci_test"];
 const MARKETPLACE_DEPLOYMENT_VERIFY_ATTEMPTS: usize = 6;
 const MARKETPLACE_DEPLOYMENT_VERIFY_DELAY_SECONDS: u64 = 3;
 
 fn is_builtin_super_admin_account_id(user_id: &str) -> bool {
     BUILTIN_SUPER_ADMIN_ACCOUNT_IDS.contains(&user_id.trim())
+}
+
+fn is_builtin_unlimited_account_id(user_id: &str) -> bool {
+    BUILTIN_SUPER_ADMIN_ACCOUNT_IDS.contains(&user_id.trim())
+        || BUILTIN_UNLIMITED_ACCOUNT_IDS.contains(&user_id.trim())
+}
+
+fn is_builtin_unlimited_account_username(username: &str) -> bool {
+    BUILTIN_UNLIMITED_ACCOUNT_USERNAMES.contains(&username.trim())
 }
 
 #[derive(Debug, Deserialize, Serialize)]

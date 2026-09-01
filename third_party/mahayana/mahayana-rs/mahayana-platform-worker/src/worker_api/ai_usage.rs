@@ -509,7 +509,7 @@ fn account_usage_limit(env: &Env, user_id: &str) -> Result<(i64, bool)> {
                 .split(',')
                 .any(|candidate| candidate.trim() == user_id.trim())
         });
-    let unlimited = is_builtin_super_admin_account_id(user_id) || configured;
+    let unlimited = is_builtin_unlimited_account_id(user_id) || configured;
     Ok((
         if unlimited {
             UNLIMITED_AI_TOKEN_LIMIT

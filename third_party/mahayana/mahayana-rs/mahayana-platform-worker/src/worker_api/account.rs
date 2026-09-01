@@ -2079,6 +2079,8 @@ pub(super) fn issue_scoped_account_access_token(
 
 pub(super) fn serialize_account_user(user: &AccountUserRow) -> serde_json::Value {
     let super_admin = is_builtin_super_admin_account_id(&user.id.to_string());
+    let unlimited_usage = is_builtin_unlimited_account_id(&user.id.to_string())
+        || is_builtin_unlimited_account_username(&user.username);
     let avatar = user
         .avatar
         .as_ref()
@@ -2091,7 +2093,7 @@ pub(super) fn serialize_account_user(user: &AccountUserRow) -> serde_json::Value
             "selectedAt": user.main_practice_selected_at,
         })
     });
-    let membership = if super_admin {
+    let membership = if unlimited_usage {
         json!({
             "type": "lifetime",
             "expiresAt": null,
@@ -2125,7 +2127,7 @@ pub(super) fn serialize_account_user(user: &AccountUserRow) -> serde_json::Value
         "emailVerified": user.email_verified == Some(1),
         "isAdmin": super_admin,
         "role": if super_admin { "super_admin" } else { "user" },
-        "unlimitedUsage": super_admin,
+        "unlimitedUsage": unlimited_usage,
         "membership": membership,
     })
 }
