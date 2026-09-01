@@ -14,6 +14,8 @@ pub const REMOTE_COMPUTER_CLIENT_TOKEN_SCHEMA_V14: &str =
     include_str!("../migrations/0014_remote_computer_client_tokens.sql");
 pub const REMOTE_COMPUTER_INVENTORY_SCHEMA_V15: &str =
     include_str!("../migrations/0015_remote_computer_inventory.sql");
+pub const REMOTE_COMPUTER_SESSION_PROVIDER_SCHEMA_V16: &str =
+    include_str!("../migrations/0016_remote_computer_session_provider.sql");
 pub const WORKSPACE_MESSAGING_SCHEMA_V7: &str =
     include_str!("../migrations/0007_workspace_messaging.sql");
 pub const FABUSHI_PAY_SCHEMA_V7: &str = include_str!("../migrations/0007_fabushi_pay.sql");
