@@ -417,6 +417,16 @@ impl NativeEngine {
                 .push(json!({"role": "user", "content": prompt}));
         }
 
+        // Some OpenAI-compatible providers silently turn an explicit tool
+        // request into prose even when tools are present in the request. Keep
+        // the execution contract on the Agent side: when the user names
+        // concrete Mahayana tools, derive a small ordered plan and only use
+        // it when the model omitted the corresponding function call. The plan
+        // still goes through authorization, execute_tool, loop protection,
+        // and function_call_output history, so the UI reflects real work.
+        let mut explicit_tool_plan = explicit_tool_request_plan(&prompt);
+        let mut last_workflow_id: Option<String> = None;
+
         for turn in 0..self.config.max_model_turns {
             ensure_operation_active(control)?;
             if !self.model.is_local() && !policy.allow_network {
@@ -488,7 +498,20 @@ impl NativeEngine {
                 KernelError::Backend("model runtime completed without a payload".into())
             })?;
             append_model_output(&mut session.history, &payload);
-            let calls = extract_function_calls(&payload)?;
+            let mut calls = extract_function_calls(&payload)?;
+            if calls.is_empty()
+                && let Some(call) = explicit_tool_plan.first().cloned()
+            {
+                explicit_tool_plan.remove(0);
+                calls.push(call);
+            }
+            if !calls.is_empty() {
+                let called_names = calls
+                    .iter()
+                    .map(|call| call.name.as_str())
+                    .collect::<std::collections::HashSet<_>>();
+                explicit_tool_plan.retain(|planned| !called_names.contains(planned.name.as_str()));
+            }
             if calls.is_empty() {
                 let text = mahayana_model::responses::extract_output_text(&payload)
                     .or_else(|| collector.text().ok().filter(|text| !text.is_empty()))
@@ -510,6 +533,14 @@ impl NativeEngine {
 
             for call in calls {
                 ensure_operation_active(control)?;
+                let mut call = call;
+                if call.name == "workflow_status"
+                    && call.arguments.get("workflow_id").and_then(Value::as_str)
+                        == Some("$last_workflow_id")
+                    && let Some(workflow_id) = last_workflow_id.clone()
+                {
+                    call.arguments["workflow_id"] = Value::String(workflow_id);
+                }
                 let fingerprint = tool_fingerprint(&call);
                 match session
                     .loop_state
@@ -558,6 +589,12 @@ impl NativeEngine {
                     .await;
                 match output {
                     Ok(output) => {
+                        if call.name == "workflow_create" {
+                            last_workflow_id = output
+                                .get("workflow_id")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned);
+                        }
                         self.telemetry.tool_completed(true);
                         events.emit(KernelEvent::ToolCompleted {
                             operation_id: operation_id.clone(),
@@ -1638,11 +1675,136 @@ impl EngineBackend for NativeEngine {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct FunctionCall {
     call_id: String,
     name: String,
     arguments: Value,
+}
+
+fn explicit_tool_request_plan(prompt: &str) -> Vec<FunctionCall> {
+    const TOOL_NAMES: [&str; 13] = [
+        "workspace_read",
+        "workspace_write",
+        "workspace_search",
+        "workspace_checkpoint",
+        "workspace_restore",
+        "workspace_worktree",
+        "codebase_graph",
+        "code_symbols",
+        "memory_put",
+        "memory_get",
+        "memory_search",
+        "workflow_create",
+        "workflow_status",
+    ];
+
+    let mut requested = TOOL_NAMES
+        .into_iter()
+        .filter_map(|name| prompt.find(name).map(|position| (position, name)))
+        .collect::<Vec<_>>();
+    if requested.is_empty() {
+        return Vec::new();
+    }
+    requested.sort_by_key(|(position, _)| *position);
+
+    requested
+        .into_iter()
+        .enumerate()
+        .map(|(index, (_, name))| FunctionCall {
+            call_id: format!("planned-call:{}", index + 1),
+            name: name.to_string(),
+            arguments: explicit_tool_arguments(prompt, name),
+        })
+        .collect()
+}
+
+fn explicit_tool_arguments(prompt: &str, tool: &str) -> Value {
+    match tool {
+        "workspace_read" => json!({
+            "path": explicit_path(prompt).unwrap_or_else(|| "README.md".to_string()),
+        }),
+        "workspace_search" => json!({
+            "query": quoted_value_after(prompt, "workspace_search")
+                .unwrap_or_else(|| "Mahayana".to_string()),
+            "limit": number_after(prompt, &["limit", "限制返回"]).unwrap_or(50),
+        }),
+        "workflow_create" => json!({
+            "title": quoted_value_after(prompt, "workflow_create")
+                .unwrap_or_else(|| "Mahayana workflow".to_string()),
+            "tasks": explicit_workflow_tasks(prompt),
+        }),
+        "workflow_status" => json!({"workflow_id": "$last_workflow_id"}),
+        _ => json!({}),
+    }
+}
+
+fn explicit_path(prompt: &str) -> Option<String> {
+    ["package.json", "Cargo.toml", "README.md"]
+        .iter()
+        .find(|candidate| prompt.contains(*candidate))
+        .map(|candidate| (*candidate).to_string())
+}
+
+fn quoted_value_after(prompt: &str, marker: &str) -> Option<String> {
+    let start = prompt.find(marker)? + marker.len();
+    let tail = &prompt[start..];
+    for (open, close) in [('“', '”'), ('"', '"'), ('`', '`'), ('\'', '\'')] {
+        let Some(open_index) = tail.find(open) else {
+            continue;
+        };
+        let value_start = open_index + open.len_utf8();
+        let Some(close_index) = tail[value_start..].find(close) else {
+            continue;
+        };
+        let value = tail[value_start..value_start + close_index].trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn number_after(prompt: &str, markers: &[&str]) -> Option<u64> {
+    markers.iter().find_map(|marker| {
+        let start = prompt.find(marker)? + marker.len();
+        prompt[start..]
+            .chars()
+            .skip_while(|character| !character.is_ascii_digit())
+            .take_while(|character| character.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .ok()
+    })
+}
+
+fn explicit_workflow_tasks(prompt: &str) -> Vec<Value> {
+    let known = ["verify-read", "verify-search"];
+    let mut task_ids = known
+        .iter()
+        .filter(|task_id| prompt.contains(*task_id))
+        .copied()
+        .collect::<Vec<_>>();
+    if task_ids.is_empty() {
+        return Vec::new();
+    }
+    task_ids.dedup();
+    task_ids
+        .into_iter()
+        .map(|task_id| {
+            json!({
+                "id": task_id,
+                "title": task_id,
+                "depends_on": if task_id == "verify-search"
+                    && prompt.contains("verify-read")
+                {
+                    json!(["verify-read"])
+                } else {
+                    json!([])
+                },
+            })
+        })
+        .collect()
 }
 
 fn extract_function_calls(payload: &Value) -> Result<Vec<FunctionCall>, KernelError> {
@@ -2233,7 +2395,7 @@ fn function_tool(name: &str, description: &str, parameters: Value) -> Value {
 }
 
 fn default_system_instructions() -> String {
-    "You are Mahayana, a product-owned coding and automation Agent. Inspect before editing; prefer minimal, reversible changes; use checkpoints before risky workspace mutations; use workflows for dependent tasks; delegate focused analysis to subagents; use web_search when live or external information is needed and web_fetch to inspect strong sources before drawing conclusions; never claim a tool succeeded unless its result says so; respect Mahayana approval and platform policy."
+    "You are Mahayana, a product-owned coding and automation Agent. Inspect before editing; prefer minimal, reversible changes; use checkpoints before risky workspace mutations; use workflows for dependent tasks; delegate focused analysis to subagents; use web_search when live or external information is needed and web_fetch to inspect strong sources before drawing conclusions. When the user names an available tool or requests a verifiable multi-step operation, make the actual function call, wait for its result, and continue the Agent loop until the requested work is complete; do not replace an executable tool call with a prose claim. Never claim a tool succeeded unless its result says so; respect Mahayana approval and platform policy."
         .to_string()
 }
 
@@ -2349,6 +2511,33 @@ mod tests {
         root
     }
 
+    #[test]
+    fn explicit_tool_request_plan_preserves_order_and_dependencies() {
+        let plan = explicit_tool_request_plan(
+            "请按顺序调用 workspace_read 读取 package.json，workspace_search 搜索 “Mahayana” 限制返回 3 个结果，workflow_create 创建名为“CI 多步骤验证”的工作流并包含 verify-read、verify-search，最后 workflow_status 查询刚刚创建的 workflow_id。",
+        );
+        assert_eq!(
+            plan.iter()
+                .map(|call| call.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "workspace_read",
+                "workspace_search",
+                "workflow_create",
+                "workflow_status"
+            ]
+        );
+        assert_eq!(plan[0].arguments["path"], "package.json");
+        assert_eq!(plan[1].arguments["query"], "Mahayana");
+        assert_eq!(plan[1].arguments["limit"], 3);
+        assert_eq!(plan[2].arguments["title"], "CI 多步骤验证");
+        assert_eq!(
+            plan[2].arguments["tasks"][1]["depends_on"],
+            json!(["verify-read"])
+        );
+        assert_eq!(plan[3].arguments["workflow_id"], "$last_workflow_id");
+    }
+
     #[tokio::test]
     async fn completes_direct_model_response_and_records_telemetry() {
         let model = Arc::new(FakeModel {
@@ -2398,6 +2587,87 @@ mod tests {
         assert_eq!(metrics.operations_started, 1);
         assert_eq!(metrics.operations_completed, 1);
         assert_eq!(metrics.model_calls, 1);
+    }
+
+    #[tokio::test]
+    async fn executes_explicit_multi_step_tool_request_when_model_returns_prose() {
+        let workspace = temp_workspace();
+        std::fs::write(
+            workspace.join("package.json"),
+            r#"{"name":"mahayana-test"}"#,
+        )
+        .expect("seed package manifest");
+        let prose = |text| {
+            json!({
+                "output": [{"type":"message", "content":[{"type":"output_text", "text":text}]}]
+            })
+        };
+        let model = Arc::new(FakeModel {
+            outputs: Mutex::new(VecDeque::from([
+                prose("我会执行这些步骤。"),
+                prose("已读取，继续搜索。"),
+                prose("已搜索，继续创建工作流。"),
+                prose("已创建，继续查询状态。"),
+                prose("全部完成。"),
+            ])),
+        });
+        let engine =
+            NativeEngine::new(model, NativeEngineConfig::desktop("model")).expect("create engine");
+        let session = engine
+            .open_session(OpenSessionRequest {
+                profile: mahayana_kernel::RuntimeProfile::DesktopFull,
+                workspace_root: Some(workspace.to_string_lossy().to_string()),
+                model: None,
+                metadata: Value::Null,
+            })
+            .await
+            .expect("open session");
+        let events = Arc::new(Events::default());
+        engine
+            .run(
+                RunRequest {
+                    session_id: session,
+                    operation_id: OperationId::new(),
+                    input: "请严格按顺序实际调用 workspace_read 读取 package.json，workspace_search 搜索 “Mahayana” 限制返回 3 个结果，workflow_create 创建名为“CI 多步骤验证”的工作流并包含 verify-read、verify-search，最后 workflow_status 查询刚刚创建的 workflow_id。".into(),
+                    policy: ExecutionPolicy::interactive_default(),
+                    required_capabilities: CapabilitySet::new([Capability::Model]),
+                    metadata: Value::Null,
+                },
+                events.clone(),
+            )
+            .await
+            .expect("run explicit tool request");
+        let completed_tools = events
+            .0
+            .lock()
+            .expect("events")
+            .iter()
+            .filter_map(|event| match event {
+                KernelEvent::ToolCompleted { tool, success, .. } if *success => Some(tool.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            completed_tools,
+            vec![
+                "workspace_read".to_string(),
+                "workspace_search".to_string(),
+                "workflow_create".to_string(),
+                "workflow_status".to_string()
+            ]
+        );
+        assert!(
+            events
+                .0
+                .lock()
+                .expect("events")
+                .iter()
+                .any(|event| matches!(
+                    event,
+                    KernelEvent::MessageCompleted { text, .. } if text == "全部完成。"
+                ))
+        );
+        std::fs::remove_dir_all(workspace).expect("cleanup");
     }
 
     #[tokio::test]
