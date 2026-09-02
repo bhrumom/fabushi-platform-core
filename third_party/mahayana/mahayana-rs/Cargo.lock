@@ -9005,12 +9005,14 @@ dependencies = [
  "mahayana-ffi",
  "mahayana-host",
  "mahayana-host-protocol",
+ "mahayana-mcp-runtime",
  "mahayana-miniapp-protocol",
  "mahayana-platform-client",
  "mahayana-platform-core",
  "mahayana-plugin-archive-compat",
  "mahayana-plugin-host",
  "mahayana-plugin-runtime",
+ "mahayana-test-driver-protocol",
  "mahayana-tui-compat",
  "ratatui",
  "rpassword",
@@ -9481,6 +9483,16 @@ dependencies = [
  "mahayana-platform-client",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "mahayana-test-driver-protocol"
+version = "0.1.0"
+dependencies = [
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

@@ -41,6 +41,7 @@ members = [
     "mahayana-secrets",
     "mahayana-social",
     "mahayana-telegram",
+    "mahayana-test-driver-protocol",
     "mahayana-tool-host",
     "mahayana-unified-app-host",
     "mahayana-web",
@@ -121,6 +122,7 @@ mahayana-runtime = { path = "mahayana-runtime" }
 mahayana-secrets = { path = "mahayana-secrets" }
 mahayana-social = { path = "mahayana-social" }
 mahayana-telegram = { path = "mahayana-telegram" }
+mahayana-test-driver-protocol = { path = "mahayana-test-driver-protocol" }
 mahayana-tool-host = { path = "mahayana-tool-host" }
 mahayana-workspace-engine = { path = "mahayana-workspace-engine" }
 mahayana-unified-app-host = { path = "mahayana-unified-app-host" }
