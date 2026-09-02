@@ -676,7 +676,7 @@ impl FeatureHostController {
                     .runtime()?
                     .product_execute(
                         "mahayana.auth.browser.start",
-                        &json!({"platform": "desktop"}),
+                        &json!({"platform": browser_login_platform(self.info.platform)}),
                     )
                     .map_err(FeatureHostError::from);
                 #[cfg(not(feature = "production"))]
@@ -11250,6 +11250,14 @@ fn stable_identity_component(value: Option<&Value>) -> Option<String> {
     }
 }
 
+fn browser_login_platform(platform: SurfacePlatform) -> &'static str {
+    match platform {
+        SurfacePlatform::Ios | SurfacePlatform::Android => "mobile",
+        SurfacePlatform::Wasm => "web",
+        SurfacePlatform::Mock | SurfacePlatform::Electron => "desktop",
+    }
+}
+
 fn stable_authenticated_account_id(auth: &Value) -> Option<String> {
     const ID_KEYS: [&str; 8] = [
         "principalId",
@@ -11317,6 +11325,14 @@ mod tests {
             events.push(event);
         }
         events
+    }
+
+    #[test]
+    fn browser_login_platform_maps_native_surfaces_to_mobile() {
+        assert_eq!(browser_login_platform(SurfacePlatform::Ios), "mobile");
+        assert_eq!(browser_login_platform(SurfacePlatform::Android), "mobile");
+        assert_eq!(browser_login_platform(SurfacePlatform::Wasm), "web");
+        assert_eq!(browser_login_platform(SurfacePlatform::Electron), "desktop");
     }
 
     #[test]

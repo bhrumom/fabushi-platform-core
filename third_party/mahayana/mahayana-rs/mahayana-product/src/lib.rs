@@ -2415,10 +2415,21 @@ impl MahayanaProductClient {
             return load_ci_account_session_file(Path::new(&path), now_seconds()).map(Some);
         }
         let name = account_session_secret_name()?;
-        let stored = self
-            .secrets_manager
-            .get(&SecretScope::Global, &name)
-            .map_err(secrets_error)?;
+        let stored = match self.secrets_manager.get(&SecretScope::Global, &name) {
+            Ok(stored) => stored,
+            Err(error) if unreadable_auth_store_error(&error) => {
+                // A mobile app update can preserve the encrypted auth file while
+                // the OS keyring entry is rotated or becomes unavailable. The
+                // old session is unrecoverable in that state, so quarantine only
+                // the auth namespace and continue as signed out. Managed/requested
+                // secrets use an independent namespace and are left untouched.
+                self.secrets_manager
+                    .quarantine_unreadable_store()
+                    .map_err(secrets_error)?;
+                None
+            }
+            Err(error) => return Err(secrets_error(error)),
+        };
         if let Some(raw) = stored {
             return serde_json::from_str(&raw)
                 .map(Some)
@@ -2959,6 +2970,14 @@ fn validate_surface_draft(draft: &MessageDraft) -> Result<(), ProductError> {
         }
     }
     Ok(())
+}
+
+fn unreadable_auth_store_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let message = cause.to_string();
+        message.contains("failed to decrypt secrets file")
+            || message.contains("failed to decode secrets file at")
+    })
 }
 
 fn secrets_error(error: anyhow::Error) -> ProductError {

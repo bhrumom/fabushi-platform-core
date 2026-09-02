@@ -208,6 +208,16 @@ impl SecretsManager {
     pub fn list(&self, scope_filter: Option<&SecretScope>) -> Result<Vec<SecretListEntry>> {
         self.backend.list(scope_filter)
     }
+
+    /// Quarantine an unreadable encrypted namespace so callers can recover from
+    /// a stale OS-keyring/file pairing without deleting unrelated namespaces.
+    ///
+    /// This is intentionally explicit rather than automatic: product auth may
+    /// safely fall back to signed-out state when its session key is lost, while
+    /// managed/requested secrets must never be discarded as a side effect.
+    pub fn quarantine_unreadable_store(&self) -> Result<bool> {
+        self.backend.quarantine_unreadable_store()
+    }
 }
 
 #[derive(Debug)]
@@ -363,6 +373,50 @@ impl LocalSecretsBackend {
         self.credential_store
             .save(self.keyring_service(), &account, generated.expose_secret())?;
         Ok(generated)
+    }
+
+    fn quarantine_unreadable_store(&self) -> Result<bool> {
+        let path = self.secrets_path();
+        if !path.exists() {
+            return Ok(false);
+        }
+
+        match self.load_file() {
+            Ok(_) => Ok(false),
+            Err(error) => {
+                let recoverable = error.chain().any(|cause| {
+                    let message = cause.to_string();
+                    message.contains("failed to decrypt secrets file")
+                        || message.contains("failed to decode secrets file at")
+                });
+                if !recoverable {
+                    return Err(error);
+                }
+
+                let directory = self.secrets_dir();
+                fs::create_dir_all(&directory).with_context(|| {
+                    format!("failed to create secrets dir {}", directory.display())
+                })?;
+                harden_directory_permissions(&directory)?;
+                let file_name = path
+                    .file_name()
+                    .with_context(|| format!("missing filename for {}", path.display()))?
+                    .to_string_lossy();
+                let nonce = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |duration| duration.as_nanos());
+                let quarantine = directory.join(format!("{file_name}.unreadable-{nonce}"));
+                fs::rename(&path, &quarantine).with_context(|| {
+                    format!(
+                        "failed to quarantine unreadable secrets file {} as {}",
+                        path.display(),
+                        quarantine.display()
+                    )
+                })?;
+                harden_file_permissions(&quarantine)?;
+                Ok(true)
+            }
+        }
     }
 }
 
@@ -586,6 +640,49 @@ mod tests {
         );
         let ciphertext = fs::read(backend.secrets_path())?;
         assert!(!String::from_utf8_lossy(&ciphertext).contains("high-value-secret"));
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn auth_store_can_quarantine_an_undecryptable_stale_file() -> Result<()> {
+        let root = temporary_root("unreadable-auth");
+        let store = Arc::new(MockCredentialStore::default());
+        let backend = backend(&root, LocalSecretsNamespace::MahayanaAuth, store.clone());
+        fs::create_dir_all(backend.secrets_dir())?;
+
+        let account = compute_keyring_account(&root);
+        let active_passphrase = "active-auth-passphrase";
+        store.insert(MAHAYANA_AUTH_KEYRING_SERVICE, &account, active_passphrase);
+        let stale_passphrase = SecretString::from("stale-auth-passphrase".to_owned());
+        let name = SecretName::new("MAHAYANA_ACCOUNT_SESSION")?;
+        let mut secrets = SecretsFile::empty();
+        secrets.secrets.insert(
+            SecretScope::Global.canonical_key(&name),
+            "stale-session".to_owned(),
+        );
+        let plaintext = serde_json::to_vec(&secrets)?;
+        fs::write(
+            backend.secrets_path(),
+            encrypt_with_passphrase(&plaintext, &stale_passphrase)?,
+        )?;
+
+        assert!(backend.get(&SecretScope::Global, &name).is_err());
+        assert!(backend.quarantine_unreadable_store()?);
+        assert!(!backend.secrets_path().exists());
+        assert_eq!(
+            fs::read_dir(backend.secrets_dir())?
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".unreadable-"))
+                .count(),
+            1
+        );
+
+        backend.set(&SecretScope::Global, &name, "fresh-session")?;
+        assert_eq!(
+            backend.get(&SecretScope::Global, &name)?,
+            Some("fresh-session".to_owned())
+        );
         fs::remove_dir_all(root)?;
         Ok(())
     }
