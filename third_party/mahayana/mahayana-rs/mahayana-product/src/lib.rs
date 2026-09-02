@@ -3004,6 +3004,7 @@ fn typed_session(
     );
     output.insert("provider".to_string(), Value::String(provider.to_string()));
     output.insert("sessionStored".to_string(), Value::Bool(session_stored));
+    output.insert("loggedIn".to_string(), Value::Bool(session_stored));
     strip_credentials(&mut output);
     Ok(Value::Object(output))
 }
@@ -3551,6 +3552,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(session["sessionStored"], true);
+        assert_eq!(session["loggedIn"], true);
         assert_eq!(session["user"]["username"], "tester");
         assert!(session.get("token").is_none());
         assert!(session.get("accessToken").is_none());
