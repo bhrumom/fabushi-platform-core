@@ -27,6 +27,8 @@ use mahayana_mcp_runtime::NativeMcpRegistry;
 use mahayana_miniapp::EntitlementChecker;
 use mahayana_miniapp::MiniAppConversationProvider;
 use mahayana_miniapp::MiniAppDefinition;
+use mahayana_model::ModelCredentialResolver;
+use mahayana_model::ModelError;
 use mahayana_model::ResponsesModelConfig;
 use mahayana_model::ResponsesModelRuntime;
 use mahayana_native_agent::NativeAgentBackend;
@@ -36,6 +38,7 @@ use mahayana_native_engine::NativeEngineConfig;
 use mahayana_native_engine::ProcessExecution;
 use mahayana_platform_core::HostPlatform;
 use mahayana_product::MahayanaProductClient;
+use mahayana_product::ProductError;
 use mahayana_product::default_mahayana_home;
 use mahayana_product::default_product_surface_state_path;
 use mahayana_runtime_core::MahayanaRuntime;
@@ -187,7 +190,9 @@ impl MahayanaHost {
     /// Revoke and remove the Rust-owned product session without exposing any
     /// bearer or refresh credential to the host UI.
     pub fn clear_session(&self) -> Result<serde_json::Value, HostError> {
-        self.product_execute("mahayana.auth.logout", &serde_json::json!({}))
+        let response = self.product_execute("mahayana.auth.logout", &serde_json::json!({}))?;
+        self.runtime.reset_session().map_err(HostError::from)?;
+        Ok(response)
     }
 }
 
@@ -356,6 +361,21 @@ fn build_runtime(
             .base_url
             .clone()
             .ok_or_else(|| HostError::new("Mahayana model base URL is required"))?;
+        let configured_model_token = create.model_bearer_token.clone();
+        let model_provider = runtime_config.model.provider;
+        let credential_client = product_client.clone();
+        let credential_resolver: ModelCredentialResolver = Arc::new(move || {
+            if matches!(model_provider, ModelProviderMode::UserConfiguredRemote) {
+                return Ok(configured_model_token.clone());
+            }
+            match credential_client.session_token() {
+                Ok(token) => Ok(Some(token)),
+                Err(ProductError::NotLoggedIn | ProductError::SessionExpired) => Ok(None),
+                Err(error) => Err(ModelError::Inference(format!(
+                    "unable to resolve Mahayana model credential: {error}"
+                ))),
+            }
+        });
         let model_runtime = Arc::new(
             ResponsesModelRuntime::new(ResponsesModelConfig {
                 base_url,
@@ -371,7 +391,8 @@ fn build_runtime(
                 provider_mode: runtime_config.model.provider,
                 wire_api: create.model_wire_api,
             })
-            .map_err(|error| HostError::new(error.to_string()))?,
+            .map_err(|error| HostError::new(error.to_string()))?
+            .with_credential_resolver(credential_resolver),
         );
         let mut engine_config = match runtime_config.build_profile {
             BuildProfile::DesktopFull => {

@@ -183,6 +183,16 @@ impl ConversationProvider for KernelConversationProvider {
             .map_err(kernel_error)
     }
 
+    async fn reset_session(&self) -> Result<(), ConversationError> {
+        self.backend.reset_session().map_err(kernel_error)?;
+        *self.session_id.lock().await = None;
+        self.history
+            .lock()
+            .map_err(|_| ConversationError::Provider("kernel history mutex poisoned".into()))?
+            .clear();
+        persist_history(&self.history, self.history_path.as_deref()).map_err(kernel_error)
+    }
+
     async fn resolve_approval(
         &self,
         request: ResolveApprovalRequest,

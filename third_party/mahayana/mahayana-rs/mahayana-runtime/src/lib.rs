@@ -234,6 +234,24 @@ impl MahayanaRuntime {
         }
     }
 
+    /// Reset local conversation/Agent state when the authenticated product
+    /// account changes. This also drains queued events so a previous account's
+    /// reply cannot appear after the new account is ready.
+    pub fn reset_session(&self) -> Result<(), RuntimeError> {
+        if let Some(backend) = self.agent_backend.as_ref() {
+            backend
+                .reset_session()
+                .map_err(|error| RuntimeError::AgentBackend(error.to_string()))?;
+        }
+        for provider in self.providers.providers() {
+            self.async_runtime.block_on(provider.reset_session())?;
+        }
+        lock(&self.operations)?.clear();
+        lock(&self.approvals)?.clear();
+        while self.event_rx.try_recv().is_ok() {}
+        Ok(())
+    }
+
     pub fn execute(&self, command: RuntimeCommand) -> Result<RuntimeResponse, RuntimeError> {
         match command {
             RuntimeCommand::Status => Ok(RuntimeResponse::Status(self.status())),

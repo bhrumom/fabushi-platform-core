@@ -346,6 +346,12 @@ pub trait EngineBackend: Send + Sync {
 
     async fn resolve_approval(&self, resolution: ApprovalResolution) -> Result<(), KernelError>;
 
+    /// Drop account-bound runtime state before a product session changes.
+    /// Backends without local state may keep the default no-op behavior.
+    fn reset_session(&self) -> Result<(), KernelError> {
+        Ok(())
+    }
+
     async fn snapshot_session(
         &self,
         _session_id: &SessionId,

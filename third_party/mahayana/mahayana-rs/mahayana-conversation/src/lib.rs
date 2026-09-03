@@ -11,6 +11,7 @@ use mahayana_core::PluginCommandDescriptor;
 use mahayana_core::RuntimeEvent;
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 pub const MAHAYANA_AI_PROVIDER_KEY: &str = "mahayana-ai";
@@ -73,6 +74,19 @@ pub trait ConversationProvider: Send + Sync {
         &self,
         request: ResolveApprovalRequest,
     ) -> Result<(), ConversationError>;
+
+    /// Drops local transcript/session state when the authenticated product
+    /// account changes. Remote providers may keep the default no-op.
+    async fn reset_session(&self) -> Result<(), ConversationError> {
+        Ok(())
+    }
+
+    /// Switch the local transcript file used by a long-lived provider. The
+    /// default is a no-op for providers whose history is remote or owned by a
+    /// separate account boundary.
+    async fn set_history_path(&self, _path: Option<PathBuf>) -> Result<(), ConversationError> {
+        Ok(())
+    }
 }
 
 #[derive(Default)]

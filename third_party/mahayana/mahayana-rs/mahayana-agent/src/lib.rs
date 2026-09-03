@@ -132,6 +132,13 @@ pub trait AgentBackend: Send + Sync {
 
     async fn resolve_approval(&self, resolution: ApprovalResolution) -> Result<(), AgentError>;
 
+    /// Drops account-bound in-memory threads and cancels pending work before
+    /// the product session changes. Backends that do not keep local state may
+    /// retain the no-op default.
+    fn reset_session(&self) -> Result<(), AgentError> {
+        Ok(())
+    }
+
     /// Returns the live MCP server inventory owned by the agent runtime. The
     /// values intentionally stay wire-shaped so product hosts can project
     /// Codex auth/tool metadata without duplicating the upstream protocol.

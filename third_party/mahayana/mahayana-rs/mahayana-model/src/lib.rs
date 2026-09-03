@@ -20,6 +20,7 @@ pub use context::estimate_history_tokens;
 pub use context::estimate_json_tokens;
 pub use context::plan_compaction;
 pub use context::prepare_compaction;
+pub use responses::ModelCredentialResolver;
 pub use responses::ResponsesModelConfig;
 pub use responses::ResponsesModelRuntime;
 

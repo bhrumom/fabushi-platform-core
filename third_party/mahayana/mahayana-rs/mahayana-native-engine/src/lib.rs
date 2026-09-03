@@ -239,6 +239,60 @@ impl NativeEngine {
         self.telemetry.snapshot()
     }
 
+    /// Clears all account-bound native Agent state. The active operation flags
+    /// are set before the registries are cleared so in-flight work exits at
+    /// its next cancellation checkpoint instead of crossing an account
+    /// boundary.
+    pub fn reset_session(&self) -> Result<(), KernelError> {
+        {
+            let operations = self
+                .active_operations
+                .lock()
+                .map_err(|_| KernelError::Backend("native operation registry poisoned".into()))?;
+            for control in operations.values() {
+                control.interrupted.store(true, Ordering::SeqCst);
+            }
+        }
+        self.active_operations
+            .lock()
+            .map_err(|_| KernelError::Backend("native operation registry poisoned".into()))?
+            .clear();
+        self.approvals
+            .lock()
+            .map_err(|_| KernelError::Backend("approval registry poisoned".into()))?
+            .clear();
+        self.sessions
+            .lock()
+            .map_err(|_| KernelError::Backend("native session registry poisoned".into()))?
+            .clear();
+        self.persisted_sessions
+            .lock()
+            .map_err(|_| KernelError::Backend("persisted session registry poisoned".into()))?
+            .clear();
+        *self
+            .memory
+            .lock()
+            .map_err(|_| KernelError::Backend("memory store poisoned".into()))? =
+            MemoryStore::default();
+        self.workflows
+            .lock()
+            .map_err(|_| KernelError::Backend("workflow store poisoned".into()))?
+            .clear();
+        *self
+            .subagents
+            .lock()
+            .map_err(|_| KernelError::Backend("subagent scheduler poisoned".into()))? =
+            SubagentScheduler::default();
+        if let Some(path) = self.config.session_state_path.as_deref() {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(KernelError::Backend(error.to_string())),
+            }
+        }
+        Ok(())
+    }
+
     pub fn register_hook(
         &self,
         point: HookPoint,
@@ -450,7 +504,10 @@ impl NativeEngine {
                 metadata: json!({"engine": "mahayana-native"}),
             })?;
 
-            let collector = Arc::new(ModelCollector::default());
+            let collector = Arc::new(ModelCollector::streaming(
+                Arc::clone(&events),
+                operation_id.clone(),
+            ));
             let sink: SharedModelEventSink = collector.clone();
             let started = Instant::now();
             let inference = self
@@ -665,6 +722,23 @@ impl NativeEngine {
             ensure_operation_active(control)?;
 
             match call.name.as_str() {
+                "send_message" => {
+                    let message = string_arg(&call.arguments, "message")?.trim();
+                    if message.is_empty() {
+                        return Err(KernelError::Backend(
+                            "send_message requires a non-empty message".into(),
+                        ));
+                    }
+                    events.emit(KernelEvent::MessageDelta {
+                        operation_id: operation_id.clone(),
+                        delta: message.to_string(),
+                    })?;
+                    events.emit(KernelEvent::MessageCompleted {
+                        operation_id: operation_id.clone(),
+                        text: message.to_string(),
+                    })?;
+                    Ok(json!({"delivered": true, "characters": message.chars().count()}))
+                }
                 "workspace_read" => {
                     let root = workspace_root(session)?;
                     let path = string_arg(&call.arguments, "path")?;
@@ -1342,6 +1416,10 @@ impl EngineBackend for NativeEngine {
         }
     }
 
+    fn reset_session(&self) -> Result<(), KernelError> {
+        NativeEngine::reset_session(self)
+    }
+
     async fn open_session(&self, request: OpenSessionRequest) -> Result<SessionId, KernelError> {
         let persisted_path = request
             .metadata
@@ -1862,9 +1940,17 @@ struct ModelCollector {
     output: Mutex<Option<Value>>,
     text: Mutex<String>,
     usage: Mutex<Option<ModelUsage>>,
+    streaming_events: Option<(SharedKernelEventSink, OperationId)>,
 }
 
 impl ModelCollector {
+    fn streaming(events: SharedKernelEventSink, operation_id: OperationId) -> Self {
+        Self {
+            streaming_events: Some((events, operation_id)),
+            ..Self::default()
+        }
+    }
+
     fn output(&self) -> Result<Option<Value>, KernelError> {
         self.output
             .lock()
@@ -1890,11 +1976,20 @@ impl ModelCollector {
 impl ModelEventSink for ModelCollector {
     fn emit(&self, event: ModelEvent) -> Result<(), ModelError> {
         match event {
-            ModelEvent::OutputTextDelta(delta) => self
-                .text
-                .lock()
-                .map_err(|_| ModelError::EventConsumerClosed)?
-                .push_str(&delta),
+            ModelEvent::OutputTextDelta(delta) => {
+                if let Some((events, operation_id)) = self.streaming_events.as_ref() {
+                    events
+                        .emit(KernelEvent::MessageDelta {
+                            operation_id: operation_id.clone(),
+                            delta: delta.clone(),
+                        })
+                        .map_err(|error| ModelError::Inference(error.to_string()))?;
+                }
+                self.text
+                    .lock()
+                    .map_err(|_| ModelError::EventConsumerClosed)?
+                    .push_str(&delta);
+            }
             ModelEvent::Usage(usage) => {
                 *self
                     .usage
@@ -2279,6 +2374,11 @@ fn model_error(error: ModelError) -> KernelError {
 fn tool_definitions(enable_process_tools: bool, enable_web_research: bool) -> Vec<Value> {
     let mut tools = vec![
         function_tool(
+            "send_message",
+            "Send a concise user-visible progress update or answer as a separate message bubble. Use this for meaningful milestones, confirmations, and the final answer in a multi-step task. Do not invent progress; only report work that has happened or is about to happen.",
+            json!({"type":"object","properties":{"message":{"type":"string","description":"The concise message to show the user."}},"required":["message"],"additionalProperties":false}),
+        ),
+        function_tool(
             "workspace_read",
             "Read a UTF-8 text file inside the active workspace.",
             json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}),
@@ -2395,7 +2495,7 @@ fn function_tool(name: &str, description: &str, parameters: Value) -> Value {
 }
 
 fn default_system_instructions() -> String {
-    "You are Mahayana, a product-owned coding and automation Agent. Inspect before editing; prefer minimal, reversible changes; use checkpoints before risky workspace mutations; use workflows for dependent tasks; delegate focused analysis to subagents; use web_search when live or external information is needed and web_fetch to inspect strong sources before drawing conclusions. When the user names an available tool or requests a verifiable multi-step operation, make the actual function call, wait for its result, and continue the Agent loop until the requested work is complete; do not replace an executable tool call with a prose claim. Never claim a tool succeeded unless its result says so; respect Mahayana approval and platform policy."
+    "You are Mahayana, a product-owned coding and automation Agent. Inspect before editing; prefer minimal, reversible changes; use checkpoints before risky workspace mutations; use workflows for dependent tasks; delegate focused analysis to subagents; use web_search when live or external information is needed and web_fetch to inspect strong sources before drawing conclusions. When the user names an available tool or requests a verifiable multi-step operation, make the actual function call, wait for its result, and continue the Agent loop until the requested work is complete; do not replace an executable tool call with a prose claim. For a multi-step task, use send_message to publish short, human-readable milestone updates and the final answer as separate user-visible messages; keep internal reasoning private, never fabricate progress, and do not merge all milestones into one long response. Never claim a tool succeeded unless its result says so; respect Mahayana approval and platform policy."
         .to_string()
 }
 

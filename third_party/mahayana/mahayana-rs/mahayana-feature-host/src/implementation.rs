@@ -303,6 +303,10 @@ pub struct FeatureHostController {
     memory_root_path: Option<PathBuf>,
     workflow_root_path: Option<PathBuf>,
     teach_recording: Mutex<Option<TeachCaptureProcess>>,
+    /// The authenticated account currently owning in-memory feature state.
+    /// This is deliberately not a credential; it is only an identity marker
+    /// used to prevent transcript/state reuse across account boundaries.
+    active_account_id: Mutex<Option<String>>,
     state: Mutex<FeatureState>,
 }
 
@@ -370,6 +374,7 @@ impl FeatureHostController {
             memory_root_path,
             workflow_root_path,
             teach_recording: Mutex::new(None),
+            active_account_id: Mutex::new(None),
             state: Mutex::new(state),
         }
     }
@@ -438,20 +443,6 @@ impl FeatureHostController {
             platform,
         };
         let mut state = FeatureState::default();
-        if let Some(path) = automation_path.as_deref() {
-            state.automations = load_automations(path);
-        }
-        if let Some(path) = bot_state_path.as_deref() {
-            for (id, bot) in load_bots(path) {
-                state.bots.insert(id, bot);
-            }
-        }
-        if let Some(path) = group_state_path.as_deref() {
-            state.groups = load_groups(path);
-        }
-        if let Some(path) = peer_messages_path.as_deref() {
-            state.peer_messages = load_peer_messages(path);
-        }
         if let Some(path) = settings_path.as_deref() {
             state.settings = load_product_host_settings(path);
             // The bundled Computer Use MCP independently rereads this canonical
@@ -468,7 +459,7 @@ impl FeatureHostController {
             timestamp: timestamp(),
             info: info.clone(),
         });
-        Ok(Self {
+        let controller = Self {
             config,
             info,
             runtime: Some(runtime),
@@ -482,8 +473,15 @@ impl FeatureHostController {
             memory_root_path,
             workflow_root_path,
             teach_recording: Mutex::new(None),
+            active_account_id: Mutex::new(None),
             state: Mutex::new(state),
-        })
+        };
+        controller.ensure_account_boundary(&controller.auth_status()?)?;
+        controller.state()?.events.push_back(HostEvent::HostReady {
+            timestamp: timestamp(),
+            info: controller.info.clone(),
+        });
+        Ok(controller)
     }
 
     pub fn info(&self) -> HostInfo {
@@ -517,15 +515,18 @@ impl FeatureHostController {
                     // account from the Rust-owned session is immediate and
                     // lets an offline macOS launch remain signed in. Network
                     // operations still validate the token at their boundary.
-                    if let Ok(session) = self
+                    let session = if let Ok(session) = self
                         .runtime()?
                         .product_execute("mahayana.auth.session.restore", &json!({}))
                     {
-                        return Ok(session);
-                    }
-                    self.runtime()?
-                        .product_execute("mahayana.auth.status", &json!({}))
-                        .map_err(FeatureHostError::from)
+                        session
+                    } else {
+                        self.runtime()?
+                            .product_execute("mahayana.auth.status", &json!({}))
+                            .map_err(FeatureHostError::from)?
+                    };
+                    self.ensure_account_boundary(&session)?;
+                    Ok(session)
                 }
                 #[cfg(not(feature = "production"))]
                 Err(FeatureHostError::ProductionUnavailable)
@@ -649,13 +650,17 @@ impl FeatureHostController {
             }
             HostMode::Production => {
                 #[cfg(feature = "production")]
-                return self
-                    .runtime()?
-                    .product_execute(
-                        "mahayana.auth.password.login",
-                        &json!({"username": username, "password": password}),
-                    )
-                    .map_err(FeatureHostError::from);
+                {
+                    let response = self
+                        .runtime()?
+                        .product_execute(
+                            "mahayana.auth.password.login",
+                            &json!({"username": username, "password": password}),
+                        )
+                        .map_err(FeatureHostError::from)?;
+                    self.ensure_account_boundary(&response)?;
+                    return Ok(response);
+                }
                 #[cfg(not(feature = "production"))]
                 return Err(FeatureHostError::ProductionUnavailable);
             }
@@ -756,13 +761,23 @@ impl FeatureHostController {
             }
             HostMode::Production => {
                 #[cfg(feature = "production")]
-                return self
-                    .runtime()?
-                    .product_execute(
-                        "mahayana.auth.browser.poll",
-                        &json!({"attemptId": attempt_id}),
-                    )
-                    .map_err(FeatureHostError::from);
+                {
+                    let response = self
+                        .runtime()?
+                        .product_execute(
+                            "mahayana.auth.browser.poll",
+                            &json!({"attemptId": attempt_id}),
+                        )
+                        .map_err(FeatureHostError::from)?;
+                    if auth_payload(&response)
+                        .get("loggedIn")
+                        .and_then(Value::as_bool)
+                        == Some(true)
+                    {
+                        self.ensure_account_boundary(&response)?;
+                    }
+                    return Ok(response);
+                }
                 #[cfg(not(feature = "production"))]
                 return Err(FeatureHostError::ProductionUnavailable);
             }
@@ -837,13 +852,23 @@ impl FeatureHostController {
             }
             HostMode::Production => {
                 #[cfg(feature = "production")]
-                return self
-                    .runtime()?
-                    .product_execute(
-                        "mahayana.auth.oauth.poll",
-                        &json!({"attemptId": attempt_id}),
-                    )
-                    .map_err(FeatureHostError::from);
+                {
+                    let response = self
+                        .runtime()?
+                        .product_execute(
+                            "mahayana.auth.oauth.poll",
+                            &json!({"attemptId": attempt_id}),
+                        )
+                        .map_err(FeatureHostError::from)?;
+                    if auth_payload(&response)
+                        .get("loggedIn")
+                        .and_then(Value::as_bool)
+                        == Some(true)
+                    {
+                        self.ensure_account_boundary(&response)?;
+                    }
+                    return Ok(response);
+                }
                 #[cfg(not(feature = "production"))]
                 return Err(FeatureHostError::ProductionUnavailable);
             }
@@ -865,10 +890,11 @@ impl FeatureHostController {
             }
             HostMode::Production => {
                 #[cfg(feature = "production")]
-                return self
-                    .runtime()?
-                    .clear_session()
-                    .map_err(FeatureHostError::from);
+                {
+                    let response = self.runtime()?.clear_session()?;
+                    self.ensure_account_boundary(&response)?;
+                    return Ok(response);
+                }
                 #[cfg(not(feature = "production"))]
                 return Err(FeatureHostError::ProductionUnavailable);
             }
@@ -1060,14 +1086,11 @@ impl FeatureHostController {
             .get_or_init(|| Mutex::new(()))
             .lock()
             .map_err(|_| FeatureHostError::Contract("messaging storage lock is poisoned".into()))?;
-        let root = self
-            .memory_root_path
-            .as_deref()
-            .ok_or_else(|| FeatureHostError::Contract("messaging storage is unavailable".into()))?;
         let client_envelope: MessagingClientEnvelope =
             serde_json::from_value(envelope).map_err(|error| {
                 FeatureHostError::Contract(format!("invalid messaging envelope: {error}"))
             })?;
+        let root = self.messaging_root_for(&client_envelope)?;
         let messaging_root = root.join("_messaging");
         let store = JsonFileStateStore::new(messaging_root.join("snapshot.json"));
         let mut service = MessagingService::load_with_blob_store(
@@ -1103,8 +1126,7 @@ impl FeatureHostController {
         length: u64,
     ) -> Result<(fabushi_messaging_core::BlobMetadata, Vec<u8>), FeatureHostError> {
         let root = self
-            .memory_root_path
-            .as_deref()
+            .active_account_root(self.memory_root_path.as_deref())
             .ok_or_else(|| FeatureHostError::Contract("messaging storage is unavailable".into()))?;
         let blob_id = BlobId::new(blob_id.to_string())
             .map_err(|error| FeatureHostError::Contract(error.to_string()))?;
@@ -1775,9 +1797,11 @@ impl FeatureHostController {
                     )));
                 }
 
-                let root = self.memory_root_path.as_deref().ok_or_else(|| {
-                    FeatureHostError::Contract("teach recording storage is unavailable".into())
-                })?;
+                let root = self
+                    .active_account_root(self.memory_root_path.as_deref())
+                    .ok_or_else(|| {
+                        FeatureHostError::Contract("teach recording storage is unavailable".into())
+                    })?;
                 let started_at_ms = now_millis();
                 let session_dir = root
                     .join(&agent_id)
@@ -2067,8 +2091,8 @@ impl FeatureHostController {
             helper_scripts: Vec::new(),
             file_path: file_path.to_string_lossy().to_string(),
         };
-        if let Some(agent_root) = self.memory_root_path.as_deref() {
-            let _ = set_workflow_enabled(agent_root, agent_id, &workflow.id, true);
+        if let Some(agent_root) = self.active_account_root(self.memory_root_path.as_deref()) {
+            let _ = set_workflow_enabled(&agent_root, agent_id, &workflow.id, true);
         }
         Ok(workflow)
     }
@@ -3551,9 +3575,11 @@ impl FeatureHostController {
         command: FeatureCommand,
     ) -> Result<CommandAccepted, FeatureHostError> {
         let request_id = command.request_id().to_string();
-        let agent_root = self.memory_root_path.as_deref().ok_or_else(|| {
-            FeatureHostError::Contract("attachment storage is unavailable".into())
-        })?;
+        let agent_root = self
+            .active_account_root(self.memory_root_path.as_deref())
+            .ok_or_else(|| {
+                FeatureHostError::Contract("attachment storage is unavailable".into())
+            })?;
         match command {
             FeatureCommand::AttachmentUpload {
                 agent_id,
@@ -3815,7 +3841,8 @@ impl FeatureHostController {
                 let limit = limit.clamp(1, AGENT_CONTENT_SEARCH_MAX_RESULTS);
                 let bots = self.state()?.bots.values().cloned().collect::<Vec<_>>();
                 let mut matches = Vec::new();
-                if let Some(agent_root) = self.memory_root_path.as_deref() {
+                if let Some(agent_root) = self.active_account_root(self.memory_root_path.as_deref())
+                {
                     for bot in bots {
                         collect_agent_media_matches(
                             &agent_root.join(&bot.id).join("attachments"),
@@ -4175,7 +4202,7 @@ impl FeatureHostController {
         if !is_safe_memory_agent_id(agent_id) {
             return Ok(());
         }
-        let Some(root) = self.memory_root_path.as_deref() else {
+        let Some(root) = self.active_account_root(self.memory_root_path.as_deref()) else {
             return Ok(());
         };
         let path = root.join(agent_id).join("audit.jsonl");
@@ -5508,44 +5535,187 @@ impl FeatureHostController {
         &self,
         automations: &BTreeMap<String, AutomationSummary>,
     ) -> Result<(), FeatureHostError> {
-        let Some(path) = self.automation_path.as_deref() else {
+        let Some(path) = self.active_account_root(self.automation_path.as_deref()) else {
             return Ok(());
         };
-        persist_automations(path, automations)
+        persist_automations(&path, automations)
     }
 
     fn persist_bots(&self, bots: &BTreeMap<String, BotSummary>) -> Result<(), FeatureHostError> {
-        let Some(path) = self.bot_state_path.as_deref() else {
+        let Some(path) = self.active_account_root(self.bot_state_path.as_deref()) else {
             return Ok(());
         };
-        persist_bots(path, bots)
+        persist_bots(&path, bots)
     }
 
     fn persist_groups(
         &self,
         groups: &BTreeMap<String, GroupSummary>,
     ) -> Result<(), FeatureHostError> {
-        let Some(path) = self.group_state_path.as_deref() else {
+        let Some(path) = self.active_account_root(self.group_state_path.as_deref()) else {
             return Ok(());
         };
-        persist_groups(path, groups)
+        persist_groups(&path, groups)
     }
 
     fn persist_peer_messages(&self, messages: &[AgentPeerMessage]) -> Result<(), FeatureHostError> {
-        let Some(path) = self.peer_messages_path.as_deref() else {
+        let Some(path) = self.active_account_root(self.peer_messages_path.as_deref()) else {
             return Ok(());
         };
-        persist_peer_messages(path, messages)
+        persist_peer_messages(&path, messages)
+    }
+
+    fn active_account_root(&self, base: Option<&Path>) -> Option<PathBuf> {
+        let base = base?;
+        #[cfg(feature = "production")]
+        {
+            let account_id = self
+                .active_account_id
+                .lock()
+                .ok()
+                .and_then(|account| account.clone())?;
+            return Some(account_scoped_path(base, &account_id));
+        }
+        #[cfg(not(feature = "production"))]
+        {
+            Some(base.to_path_buf())
+        }
+    }
+
+    #[cfg(feature = "production")]
+    fn messaging_root_for(
+        &self,
+        envelope: &MessagingClientEnvelope,
+    ) -> Result<PathBuf, FeatureHostError> {
+        let auth = auth_payload(&self.auth_status()?);
+        if auth.get("loggedIn").and_then(Value::as_bool) != Some(true) {
+            return Err(FeatureHostError::Contract(
+                "messaging commands require an authenticated Fabushi account session".into(),
+            ));
+        }
+        let account_id = auth_account_id(auth).ok_or_else(|| {
+            FeatureHostError::Contract("authenticated account has no stable user id".into())
+        })?;
+        let expected_actor = actor_id_for_account_id(&account_id);
+        if envelope.context.actor_id != expected_actor {
+            return Err(FeatureHostError::Contract(
+                "messaging actor does not match the authenticated Fabushi account".into(),
+            ));
+        }
+        let base = self
+            .memory_root_path
+            .as_deref()
+            .ok_or_else(|| FeatureHostError::Contract("messaging storage is unavailable".into()))?;
+        Ok(account_scoped_path(base, &account_id))
+    }
+
+    #[cfg(not(feature = "production"))]
+    fn messaging_root_for(
+        &self,
+        _envelope: &MessagingClientEnvelope,
+    ) -> Result<PathBuf, FeatureHostError> {
+        self.memory_root_path
+            .clone()
+            .ok_or_else(|| FeatureHostError::Contract("messaging storage is unavailable".into()))
+    }
+
+    #[cfg(feature = "production")]
+    fn ensure_account_boundary(&self, response: &Value) -> Result<(), FeatureHostError> {
+        let auth = auth_payload(response);
+        let logged_in = auth.get("loggedIn").and_then(Value::as_bool) == Some(true);
+        let next_account_id = logged_in.then(|| auth_account_id(auth)).flatten();
+        let changed = {
+            let active = self
+                .active_account_id
+                .lock()
+                .map_err(|_| FeatureHostError::StatePoisoned)?;
+            *active != next_account_id
+        };
+        if changed {
+            self.runtime()?.reset_session()?;
+            let account_id = next_account_id.as_deref();
+            let automations = self
+                .automation_path
+                .as_deref()
+                .map(|path| {
+                    account_id
+                        .map(|id| load_automations(&account_scoped_path(path, id)))
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            let mut bots = default_bots();
+            if let (Some(path), Some(account_id)) = (self.bot_state_path.as_deref(), account_id) {
+                bots.extend(load_bots(&account_scoped_path(path, account_id)));
+            }
+            let groups = self
+                .group_state_path
+                .as_deref()
+                .map(|path| {
+                    account_id
+                        .map(|id| load_groups(&account_scoped_path(path, id)))
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            let peer_messages = self
+                .peer_messages_path
+                .as_deref()
+                .map(|path| {
+                    account_id
+                        .map(|id| load_peer_messages(&account_scoped_path(path, id)))
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            let remote_device_secrets = self
+                .remote_device_state_path
+                .as_deref()
+                .map(|path| {
+                    account_id
+                        .map(|id| {
+                            load_remote_computer_device_secrets(&account_scoped_path(path, id))
+                        })
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            let mut state = self.state()?;
+            state.events.clear();
+            state.pending_approvals.clear();
+            state.operations.clear();
+            state.operation_agents.clear();
+            state.background_operations.clear();
+            state.automations = automations;
+            state.bots = bots;
+            state.peer_messages = peer_messages;
+            state.groups.clear();
+            state.groups = groups;
+            state.group_runs.clear();
+            state.group_operations.clear();
+            state.remote_computer_device_secrets = remote_device_secrets;
+            state.auth_user = None;
+            state.session_active = logged_in;
+            drop(state);
+            *self
+                .active_account_id
+                .lock()
+                .map_err(|_| FeatureHostError::StatePoisoned)? = next_account_id.clone();
+        }
+        let mut state = self.state()?;
+        state.session_active = logged_in;
+        state.auth_user = if logged_in {
+            auth.get("user").cloned()
+        } else {
+            None
+        };
+        Ok(())
     }
 
     fn persist_remote_device_secrets(
         &self,
         secrets: &BTreeMap<String, String>,
     ) -> Result<(), FeatureHostError> {
-        let Some(path) = self.remote_device_state_path.as_deref() else {
+        let Some(path) = self.active_account_root(self.remote_device_state_path.as_deref()) else {
             return Ok(());
         };
-        persist_remote_computer_device_secrets(path, secrets)
+        persist_remote_computer_device_secrets(&path, secrets)
     }
 
     fn remote_device_secret(
@@ -5683,6 +5853,22 @@ impl FeatureHostController {
             .ok_or(FeatureHostError::ProductionUnavailable)
     }
 
+    #[cfg(feature = "production")]
+    fn require_authenticated_account(&self) -> Result<(), FeatureHostError> {
+        let auth = auth_payload(&self.auth_status()?);
+        if auth.get("loggedIn").and_then(Value::as_bool) != Some(true) {
+            return Err(FeatureHostError::Contract(
+                "this operation requires an authenticated Fabushi account session".into(),
+            ));
+        }
+        if auth_account_id(auth).is_none() {
+            return Err(FeatureHostError::Contract(
+                "authenticated account has no stable user id".into(),
+            ));
+        }
+        Ok(())
+    }
+
     #[cfg(not(feature = "production"))]
     fn execute_production(
         &self,
@@ -5730,14 +5916,16 @@ impl FeatureHostController {
             let new_messages = group_messages_since_member_last_spoke(&group.messages, &member.id);
             let system_prompt = build_group_member_system_prompt(&member, &group, &peers);
             let turn_prompt = build_group_turn_prompt(&member, &group, &peers, new_messages);
-            let memory_prompt = self
-                .memory_root_path
+            let account_memory_root = self.active_account_root(self.memory_root_path.as_deref());
+            let account_workflow_root =
+                self.active_account_root(self.workflow_root_path.as_deref());
+            let memory_prompt = account_memory_root
                 .as_deref()
                 .map(|root| render_memory_system_prompt(&root.join(&member.id).join("memory")))
                 .unwrap_or_default();
             let workflow_catalog = match (
-                self.workflow_root_path.as_deref(),
-                self.memory_root_path.as_deref(),
+                account_workflow_root.as_deref(),
+                account_memory_root.as_deref(),
             ) {
                 (Some(workflow_root), Some(agent_root)) => {
                     render_workflow_catalog(workflow_root, agent_root, &member.id)
@@ -6692,6 +6880,7 @@ impl FeatureHostController {
         model: Option<String>,
         attachments: Vec<AttachmentContext>,
     ) -> Result<CommandAccepted, FeatureHostError> {
+        self.require_authenticated_account()?;
         let text = required(text, "chat text")?;
         let bot_conversation_id = if let Some(agent_id) = agent_id.as_deref() {
             self.state()?
@@ -6771,7 +6960,7 @@ impl FeatureHostController {
         }
         let memory_agent_id = agent_id.as_deref().unwrap_or("mahayana-assistant");
         if is_safe_memory_agent_id(memory_agent_id) {
-            if let Some(root) = self.memory_root_path.as_deref() {
+            if let Some(root) = self.active_account_root(self.memory_root_path.as_deref()) {
                 let memory_dir = root.join(memory_agent_id).join("memory");
                 let memory_prompt = render_memory_system_prompt(&memory_dir);
                 if !memory_prompt.is_empty() {
@@ -6780,9 +6969,12 @@ impl FeatureHostController {
                     );
                 }
             }
+            let account_workflow_root =
+                self.active_account_root(self.workflow_root_path.as_deref());
+            let account_memory_root = self.active_account_root(self.memory_root_path.as_deref());
             if let (Some(workflow_root), Some(agent_root)) = (
-                self.workflow_root_path.as_deref(),
-                self.memory_root_path.as_deref(),
+                account_workflow_root.as_deref(),
+                account_memory_root.as_deref(),
             ) {
                 let workflow_catalog =
                     render_workflow_catalog(workflow_root, agent_root, memory_agent_id);
@@ -6856,6 +7048,7 @@ impl FeatureHostController {
         request_id: String,
         query: Option<String>,
     ) -> Result<CommandAccepted, FeatureHostError> {
+        self.require_authenticated_account()?;
         let conversations = match self.runtime()?.execute(RuntimeCommand::ListConversations)? {
             RuntimeResponse::Conversations { data } => data,
             other => return Err(unexpected_response("conversation.list", other)),
@@ -6896,6 +7089,7 @@ impl FeatureHostController {
         request_id: String,
         conversation_id: String,
     ) -> Result<CommandAccepted, FeatureHostError> {
+        self.require_authenticated_account()?;
         let conversation_id = required(conversation_id, "conversationId")?;
         let messages = match self
             .runtime()?
@@ -11282,6 +11476,44 @@ fn stable_authenticated_account_id(auth: &Value) -> Option<String> {
                 .iter()
                 .find_map(|key| stable_identity_component(auth.get(*key)))
         })
+}
+
+#[cfg(feature = "production")]
+fn auth_payload(response: &Value) -> &Value {
+    response
+        .get("auth")
+        .filter(|value| value.is_object())
+        .unwrap_or(response)
+}
+
+#[cfg(feature = "production")]
+fn auth_account_id(auth: &Value) -> Option<String> {
+    stable_authenticated_account_id(auth)
+}
+
+#[cfg(feature = "production")]
+fn account_fingerprint(account_id: &str) -> String {
+    Sha256::digest(account_id.as_bytes())[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[cfg(feature = "production")]
+fn account_scoped_path(base: &Path, account_id: &str) -> PathBuf {
+    base.parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("accounts")
+        .join(account_fingerprint(account_id))
+        .join(
+            base.file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new("state.json")),
+        )
+}
+
+#[cfg(feature = "production")]
+fn actor_id_for_account_id(account_id: &str) -> ActorId {
+    ActorId::new(format!("human:account:{}", account_fingerprint(account_id)))
 }
 
 #[cfg(test)]

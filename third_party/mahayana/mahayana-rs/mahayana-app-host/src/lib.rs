@@ -862,6 +862,7 @@ fn create_feature_host(
             "claude-code" => mahayana_model::responses::ResponsesWireApi::AnthropicMessages,
             _ => mahayana_model::responses::ResponsesWireApi::Responses,
         },
+        inherit_installed_plugins: Some(false),
         process_execution: if std::env::var("MAHAYANA_SANDBOX_RUNTIME").as_deref()
             == Ok("local-docker")
         {
