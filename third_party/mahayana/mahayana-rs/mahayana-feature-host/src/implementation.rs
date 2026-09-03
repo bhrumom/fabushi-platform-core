@@ -659,7 +659,7 @@ impl FeatureHostController {
                         )
                         .map_err(FeatureHostError::from)?;
                     self.ensure_account_boundary(&response)?;
-                    return Ok(response);
+                    Ok(response)
                 }
                 #[cfg(not(feature = "production"))]
                 return Err(FeatureHostError::ProductionUnavailable);
@@ -776,7 +776,7 @@ impl FeatureHostController {
                     {
                         self.ensure_account_boundary(&response)?;
                     }
-                    return Ok(response);
+                    Ok(response)
                 }
                 #[cfg(not(feature = "production"))]
                 return Err(FeatureHostError::ProductionUnavailable);
@@ -867,7 +867,7 @@ impl FeatureHostController {
                     {
                         self.ensure_account_boundary(&response)?;
                     }
-                    return Ok(response);
+                    Ok(response)
                 }
                 #[cfg(not(feature = "production"))]
                 return Err(FeatureHostError::ProductionUnavailable);
@@ -893,7 +893,7 @@ impl FeatureHostController {
                 {
                     let response = self.runtime()?.clear_session()?;
                     self.ensure_account_boundary(&response)?;
-                    return Ok(response);
+                    Ok(response)
                 }
                 #[cfg(not(feature = "production"))]
                 return Err(FeatureHostError::ProductionUnavailable);
@@ -5575,14 +5575,15 @@ impl FeatureHostController {
             // isolated temporary root; real production hosts use the
             // account-scoped branch below.
             if self.config.mode == HostMode::Test {
-                return Some(base.to_path_buf());
+                Some(base.to_path_buf())
+            } else {
+                let account_id = self
+                    .active_account_id
+                    .lock()
+                    .ok()
+                    .and_then(|account| account.clone())?;
+                Some(account_scoped_path(base, &account_id))
             }
-            let account_id = self
-                .active_account_id
-                .lock()
-                .ok()
-                .and_then(|account| account.clone())?;
-            return Some(account_scoped_path(base, &account_id));
         }
         #[cfg(not(feature = "production"))]
         {
