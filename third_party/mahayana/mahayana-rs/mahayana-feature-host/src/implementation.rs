@@ -5569,6 +5569,14 @@ impl FeatureHostController {
         let base = base?;
         #[cfg(feature = "production")]
         {
+            // The production feature is also enabled by the cross-platform
+            // test harness, while HostMode::Test deliberately has no live
+            // MahayanaHost or product account. Keep that harness on its
+            // isolated temporary root; real production hosts use the
+            // account-scoped branch below.
+            if self.config.mode == HostMode::Test {
+                return Some(base.to_path_buf());
+            }
             let account_id = self
                 .active_account_id
                 .lock()
