@@ -107,10 +107,8 @@ impl ModelRuntime for ResponsesModelRuntime {
 
         // SSE deltas have already reached the Agent event sink. Only emit the
         // final text for JSON/fallback endpoints to avoid duplicating replies.
-        if !streamed_text {
-            if let Some(text) = extract_output_text(&payload) {
-                events.emit(ModelEvent::OutputTextDelta(text))?;
-            }
+        if !streamed_text && let Some(text) = extract_output_text(&payload) {
+            events.emit(ModelEvent::OutputTextDelta(text))?;
         }
         if let Some(usage) = extract_usage(&payload) {
             events.emit(ModelEvent::Usage(usage))?;

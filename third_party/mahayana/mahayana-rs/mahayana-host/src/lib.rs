@@ -194,6 +194,11 @@ impl MahayanaHost {
         self.runtime.reset_session().map_err(HostError::from)?;
         Ok(response)
     }
+
+    /// Drop all account-bound runtime state when the product session changes.
+    pub fn reset_session(&self) -> Result<(), HostError> {
+        self.runtime.reset_session().map_err(HostError::from)
+    }
 }
 
 /// Canonical Rust-owned account session shared by the Mahayana CLI and native

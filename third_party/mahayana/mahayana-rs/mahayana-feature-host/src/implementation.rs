@@ -3654,7 +3654,7 @@ impl FeatureHostController {
                 });
             }
             FeatureCommand::AttachmentReadText { agent_id, path, .. } => {
-                let resolved = resolve_agent_attachment_path(agent_root, &agent_id, &path)?;
+                let resolved = resolve_agent_attachment_path(&agent_root, &agent_id, &path)?;
                 let metadata = std::fs::metadata(&resolved).map_err(|error| {
                     FeatureHostError::Contract(format!("read attachment metadata: {error}"))
                 })?;
@@ -3682,7 +3682,7 @@ impl FeatureHostController {
                 length,
                 ..
             } => {
-                let resolved = resolve_agent_attachment_path(agent_root, &agent_id, &path)?;
+                let resolved = resolve_agent_attachment_path(&agent_root, &agent_id, &path)?;
                 let metadata = std::fs::metadata(&resolved).map_err(|error| {
                     FeatureHostError::Contract(format!("read attachment metadata: {error}"))
                 })?;
@@ -3706,7 +3706,7 @@ impl FeatureHostController {
                     });
             }
             FeatureCommand::AttachmentReadImage { agent_id, path, .. } => {
-                let resolved = resolve_agent_attachment_path(agent_root, &agent_id, &path)?;
+                let resolved = resolve_agent_attachment_path(&agent_root, &agent_id, &path)?;
                 let mime = media_mime_type(resolved.to_string_lossy().as_ref())
                     .filter(|mime| mime.starts_with("image/"))
                     .ok_or_else(|| {
@@ -5587,7 +5587,8 @@ impl FeatureHostController {
         &self,
         envelope: &MessagingClientEnvelope,
     ) -> Result<PathBuf, FeatureHostError> {
-        let auth = auth_payload(&self.auth_status()?);
+        let auth_status = self.auth_status()?;
+        let auth = auth_payload(&auth_status);
         if auth.get("loggedIn").and_then(Value::as_bool) != Some(true) {
             return Err(FeatureHostError::Contract(
                 "messaging commands require an authenticated Fabushi account session".into(),
@@ -5855,7 +5856,8 @@ impl FeatureHostController {
 
     #[cfg(feature = "production")]
     fn require_authenticated_account(&self) -> Result<(), FeatureHostError> {
-        let auth = auth_payload(&self.auth_status()?);
+        let auth_status = self.auth_status()?;
+        let auth = auth_payload(&auth_status);
         if auth.get("loggedIn").and_then(Value::as_bool) != Some(true) {
             return Err(FeatureHostError::Contract(
                 "this operation requires an authenticated Fabushi account session".into(),
