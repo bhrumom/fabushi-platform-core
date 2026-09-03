@@ -6,7 +6,7 @@ use crate::engine::{Command, EngineError, Event, MessagingEngine};
 use crate::message::{ClientMessageId, DeliveryState, Message, MessageContent, MessageId};
 use crate::payment::Money;
 use crate::protocol::{
-    ClientCommand, ClientEnvelope, FABUSHI_MESSAGING_PROTOCOL_VERSION, ServerEnvelope, ServerEvent,
+    ClientCommand, ClientEnvelope, ServerEnvelope, ServerEvent, FABUSHI_MESSAGING_PROTOCOL_VERSION,
 };
 use crate::search::{SearchIndex, SearchQuery};
 use crate::settlement::{SettlementError, SettlementVerifier, SignedSettlement};

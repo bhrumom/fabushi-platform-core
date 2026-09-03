@@ -215,7 +215,9 @@ impl fmt::Debug for McpTransport {
                 .debug_struct("Http")
                 .field(
                     "url_host",
-                    &Url::parse(url).ok().and_then(|parsed| parsed.host_str()),
+                    &Url::parse(url)
+                        .ok()
+                        .and_then(|parsed| parsed.host_str().map(str::to_owned)),
                 )
                 .field("header_names", &headers.keys().collect::<Vec<_>>())
                 .finish(),
