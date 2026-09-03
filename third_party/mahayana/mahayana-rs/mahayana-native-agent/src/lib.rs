@@ -211,9 +211,7 @@ impl KernelEventSink for NativeEventBridge {
                     metadata: Some(metadata),
                 },
             },
-            KernelEvent::ToolStarted {
-                tool, arguments, ..
-            } if tool == "send_message" => return Ok(()),
+            KernelEvent::ToolStarted { tool, .. } if tool == "send_message" => return Ok(()),
             KernelEvent::ToolStarted {
                 tool, arguments, ..
             } => AgentEvent::Activity {
@@ -226,12 +224,7 @@ impl KernelEventSink for NativeEventBridge {
                     metadata: Some(json!({"tool":tool,"arguments":arguments})),
                 },
             },
-            KernelEvent::ToolCompleted {
-                tool,
-                output,
-                success,
-                ..
-            } if tool == "send_message" => return Ok(()),
+            KernelEvent::ToolCompleted { tool, .. } if tool == "send_message" => return Ok(()),
             KernelEvent::ToolCompleted {
                 tool,
                 output,
