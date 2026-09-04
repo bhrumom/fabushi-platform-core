@@ -1,7 +1,11 @@
 use crate::actor::{ActorId, ActorKind};
 use crate::blob_store::{BlobStoreError, FileBlobStore};
 use crate::bot::BotInvocation;
-use crate::conversation::{Conversation, ConversationDraft, ConversationId, ConversationKind};
+use crate::community::{CommunityState, MemberStatus};
+use crate::conversation::{
+    Conversation, ConversationDraft, ConversationId, ConversationKind, Topic, TopicDraft,
+};
+use crate::engine::topic_id_from_root;
 use crate::engine::{Command, EngineError, Event, MessagingEngine};
 use crate::message::{ClientMessageId, DeliveryState, Message, MessageContent, MessageId};
 use crate::payment::Money;
@@ -179,6 +183,28 @@ impl<S: MessagingStateStore> MessagingService<S> {
             ClientCommand::Search { query } => {
                 Ok(vec![self.search_envelope(&actor_id, query, server_time_ms)])
             }
+            ClientCommand::ListCommunityMembers {
+                conversation_id,
+                cursor,
+                limit,
+            } => Ok(vec![self.community_members_page(
+                &actor_id,
+                conversation_id,
+                cursor.as_deref(),
+                limit,
+                server_time_ms,
+            )?]),
+            ClientCommand::ListCommunityAuditLog {
+                conversation_id,
+                cursor,
+                limit,
+            } => Ok(vec![self.community_audit_page(
+                &actor_id,
+                conversation_id,
+                cursor.as_deref(),
+                limit,
+                server_time_ms,
+            )?]),
             ClientCommand::StartTyping {
                 conversation_id,
                 action,
@@ -223,7 +249,7 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 self.cursor = self.cursor.saturating_add(events.len() as u64);
                 let mut responses = events
                     .into_iter()
-                    .filter_map(|event| self.project_event(event, server_time_ms))
+                    .filter_map(|event| self.project_event(&actor_id, event, server_time_ms))
                     .collect::<Vec<_>>();
                 responses.extend(
                     bot_invocations
@@ -253,11 +279,7 @@ impl<S: MessagingStateStore> MessagingService<S> {
             .conversations
             .values()
             .filter(|conversation| {
-                conversation.owner_id.as_ref() == Some(actor_id)
-                    || conversation
-                        .participants
-                        .iter()
-                        .any(|participant| &participant.actor_id == actor_id)
+                self.actor_can_see_conversation(actor_id, conversation)
                     || state
                         .communities
                         .get(&conversation.id)
@@ -294,6 +316,93 @@ impl<S: MessagingStateStore> MessagingService<S> {
             server_time_ms,
             event: ServerEvent::SearchResults { query, results },
         }
+    }
+
+    fn community_members_page(
+        &self,
+        actor_id: &ActorId,
+        conversation_id: ConversationId,
+        cursor: Option<&str>,
+        limit: u32,
+        server_time_ms: i64,
+    ) -> Result<ServerEnvelope, MessagingServiceError> {
+        let community = self.authorized_community(actor_id, &conversation_id)?;
+        let (members, next_cursor) = community.member_page(cursor, limit as usize);
+        Ok(ServerEnvelope {
+            protocol_version: FABUSHI_MESSAGING_PROTOCOL_VERSION,
+            cursor: Some(self.cursor.to_string()),
+            server_time_ms,
+            event: ServerEvent::CommunityMembersPage {
+                conversation_id,
+                members,
+                next_cursor,
+            },
+        })
+    }
+
+    fn community_audit_page(
+        &self,
+        actor_id: &ActorId,
+        conversation_id: ConversationId,
+        cursor: Option<&str>,
+        limit: u32,
+        server_time_ms: i64,
+    ) -> Result<ServerEnvelope, MessagingServiceError> {
+        let community = self.authorized_community(actor_id, &conversation_id)?;
+        let is_admin = community.members.get(actor_id).is_some_and(|member| {
+            matches!(
+                member.status,
+                MemberStatus::Owner | MemberStatus::Administrator
+            )
+        });
+        if !is_admin {
+            return Err(MessagingServiceError::UnauthorizedCommand(
+                "community audit log requires owner/admin access".into(),
+            ));
+        }
+        let (entries, next_cursor) = community.audit_page(cursor, limit as usize);
+        Ok(ServerEnvelope {
+            protocol_version: FABUSHI_MESSAGING_PROTOCOL_VERSION,
+            cursor: Some(self.cursor.to_string()),
+            server_time_ms,
+            event: ServerEvent::CommunityAuditLogPage {
+                conversation_id,
+                entries,
+                next_cursor,
+            },
+        })
+    }
+
+    fn authorized_community(
+        &self,
+        actor_id: &ActorId,
+        conversation_id: &ConversationId,
+    ) -> Result<&CommunityState, MessagingServiceError> {
+        let denied = || {
+            MessagingServiceError::UnauthorizedCommand(
+                "community operation requires membership or channel subscription".into(),
+            )
+        };
+        let community = self
+            .engine
+            .state()
+            .communities
+            .get(conversation_id)
+            .ok_or_else(denied)?;
+        let has_access = community.members.get(actor_id).is_some_and(|member| {
+            !matches!(member.status, MemberStatus::Left | MemberStatus::Banned)
+        }) || community.is_subscriber(actor_id)
+            || self
+                .engine
+                .state()
+                .conversations
+                .get(conversation_id)
+                .and_then(|conversation| conversation.owner_id.as_ref())
+                .is_some_and(|owner_id| owner_id == actor_id);
+        if !has_access {
+            return Err(denied());
+        }
+        Ok(community)
     }
 
     fn typing_event(
@@ -505,10 +614,30 @@ impl<S: MessagingStateStore> MessagingService<S> {
                     .participants
                     .iter()
                     .any(|participant| &participant.actor_id == actor_id)
-                    || existing.owner_id.as_ref() == Some(actor_id);
+                    || existing.owner_id.as_ref() == Some(actor_id)
+                    || self
+                        .engine
+                        .state()
+                        .communities
+                        .get(conversation_id)
+                        .is_some_and(|community| community.is_subscriber(actor_id));
                 if !caller_is_member {
                     return Err(denied("conversation state update requires membership"));
                 }
+            }
+            ClientCommand::MarkTopicRead {
+                conversation_id, ..
+            }
+            | ClientCommand::SetTopicDraft {
+                conversation_id, ..
+            }
+            | ClientCommand::ListCommunityMembers {
+                conversation_id, ..
+            }
+            | ClientCommand::ListCommunityAuditLog {
+                conversation_id, ..
+            } => {
+                self.authorized_community(actor_id, conversation_id)?;
             }
             ClientCommand::UpdateConversationInfo {
                 conversation_id, ..
@@ -519,6 +648,55 @@ impl<S: MessagingStateStore> MessagingService<S> {
             | ClientCommand::RemoveConversationParticipant {
                 conversation_id, ..
             } => {
+                if let Some(community) = self.engine.state().communities.get(conversation_id) {
+                    let caller = community
+                        .members
+                        .get(actor_id)
+                        .ok_or_else(|| denied("community management requires membership"))?;
+                    let caller_is_owner = matches!(caller.status, MemberStatus::Owner);
+                    let caller_can_manage = caller_is_owner
+                        || (matches!(caller.status, MemberStatus::Administrator)
+                            && caller.admin_rights.add_admins);
+                    if !caller_can_manage {
+                        return Err(denied("community management requires admin rights"));
+                    }
+                    match command {
+                        ClientCommand::SetConversationParticipant { participant, .. } => {
+                            let target = community.members.get(&participant.actor_id);
+                            if target
+                                .is_some_and(|member| matches!(member.status, MemberStatus::Owner))
+                                || matches!(participant.role, crate::actor::ParticipantRole::Owner)
+                            {
+                                return Err(denied("community owner cannot be changed"));
+                            }
+                            if !caller_is_owner
+                                && target.is_some_and(|member| {
+                                    matches!(member.status, MemberStatus::Administrator)
+                                })
+                            {
+                                return Err(denied("admins cannot manage other administrators"));
+                            }
+                        }
+                        ClientCommand::RemoveConversationParticipant {
+                            actor_id: target_actor_id,
+                            ..
+                        } if community
+                            .members
+                            .get(target_actor_id)
+                            .is_some_and(|member| {
+                                matches!(
+                                    member.status,
+                                    MemberStatus::Owner | MemberStatus::Administrator
+                                )
+                            })
+                            && !caller_is_owner =>
+                        {
+                            return Err(denied("admins cannot remove owner/admin members"));
+                        }
+                        _ => {}
+                    }
+                    return Ok(());
+                }
                 let existing = self
                     .engine
                     .state()
@@ -592,6 +770,19 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 }
             }
             ClientCommand::UpdateConversation { conversation } => {
+                if let Some(community) = self.engine.state().communities.get(&conversation.id) {
+                    let member = community
+                        .members
+                        .get(actor_id)
+                        .ok_or_else(|| denied("community update requires membership"))?;
+                    if !matches!(member.status, MemberStatus::Owner)
+                        && !(matches!(member.status, MemberStatus::Administrator)
+                            && member.admin_rights.change_info)
+                    {
+                        return Err(denied("community update requires change_info permission"));
+                    }
+                    return Ok(());
+                }
                 let existing = self
                     .engine
                     .state()
@@ -771,7 +962,9 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 } => *expires_at_ms > server_time_ms,
                 _ => true,
             })
-            .map(|entry| entry.envelope)
+            .map(|entry| {
+                self.project_journal_envelope_for_actor(actor_id, &entry.envelope, server_time_ms)
+            })
             .collect::<Vec<_>>();
         responses.push(self.sync_checkpoint_envelope(slice.checkpoint_cursor, server_time_ms));
         Ok(responses)
@@ -788,6 +981,7 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 messages: Vec::new(),
                 folders: Vec::new(),
                 drafts: Vec::new(),
+                topic_drafts: Vec::new(),
                 invoices: Vec::new(),
                 orders: Vec::new(),
                 stories: Vec::new(),
@@ -853,6 +1047,119 @@ impl<S: MessagingStateStore> MessagingService<S> {
             .marked_unread_by_actor
             .get(&conversation.id)
             .is_some_and(|actors| actors.contains(actor_id));
+        if let Some(community) = state.communities.get(&conversation.id) {
+            projected.topics = community
+                .topics
+                .values()
+                .map(|topic| Topic {
+                    id: topic.id.clone(),
+                    title: topic.title.clone(),
+                    icon: topic.icon.clone(),
+                    created_by: topic.creator_id.clone(),
+                    closed: topic.closed,
+                    hidden: topic.hidden,
+                    unread_count: 0,
+                })
+                .collect();
+            for topic in &mut projected.topics {
+                topic.unread_count =
+                    self.topic_unread_count(actor_id, &conversation.id, &topic.id, server_time_ms);
+            }
+        }
+        projected
+    }
+
+    fn topic_unread_count(
+        &self,
+        actor_id: &ActorId,
+        conversation_id: &ConversationId,
+        topic_id: &str,
+        server_time_ms: i64,
+    ) -> u32 {
+        let state = self.engine.state();
+        let cursor = state
+            .topic_read_cursors
+            .get(conversation_id)
+            .and_then(|by_actor| by_actor.get(actor_id))
+            .and_then(|by_topic| by_topic.get(topic_id));
+        let mut messages = state
+            .messages
+            .get(conversation_id)
+            .into_iter()
+            .flat_map(|messages| messages.values())
+            .collect::<Vec<_>>();
+        messages.sort_by(|left, right| {
+            left.created_at_ms
+                .cmp(&right.created_at_ms)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let read_index = cursor.and_then(|message_id| {
+            messages
+                .iter()
+                .position(|message| &message.id == message_id)
+        });
+        let unread = messages
+            .iter()
+            .enumerate()
+            .filter(|(index, message)| {
+                let after_read = match read_index {
+                    Some(read_index) => *index > read_index,
+                    None => true,
+                };
+                after_read
+                    && message
+                        .thread_root_message_id
+                        .as_ref()
+                        .is_some_and(|root| topic_id_from_root(root) == Some(topic_id))
+                    && message
+                        .scheduled_at_ms
+                        .is_none_or(|scheduled| scheduled <= server_time_ms)
+                    && !message.deleted
+                    && &message.sender_id != actor_id
+            })
+            .count();
+        u32::try_from(unread).unwrap_or(u32::MAX)
+    }
+
+    fn project_community_for_actor(
+        &self,
+        actor_id: &ActorId,
+        community: &CommunityState,
+        server_time_ms: i64,
+    ) -> CommunityState {
+        let mut projected = community.clone();
+        let member = community.members.get(actor_id);
+        let is_admin = member.is_some_and(|member| {
+            matches!(
+                member.status,
+                MemberStatus::Owner | MemberStatus::Administrator
+            )
+        });
+        let can_invite = member.is_some_and(|member| {
+            matches!(member.status, MemberStatus::Owner)
+                || (matches!(member.status, MemberStatus::Administrator)
+                    && member.admin_rights.invite_members)
+        });
+        if !is_admin {
+            projected.pending_join_requests.clear();
+            projected.admin_log.clear();
+        }
+        if !can_invite {
+            projected.pending_join_requests.clear();
+            for invite in projected.invite_links.values_mut() {
+                // Invite tokens are bearer credentials and must never be included in a
+                // regular member/subscriber sync payload.
+                invite.token.clear();
+            }
+        }
+        for topic in projected.topics.values_mut() {
+            topic.unread_count = self.topic_unread_count(
+                actor_id,
+                &community.conversation_id,
+                &topic.id,
+                server_time_ms,
+            );
+        }
         projected
     }
 
@@ -873,19 +1180,29 @@ impl<S: MessagingStateStore> MessagingService<S> {
         projected
     }
 
+    fn actor_can_see_conversation(&self, actor_id: &ActorId, conversation: &Conversation) -> bool {
+        if let Some(community) = self.engine.state().communities.get(&conversation.id) {
+            return conversation.owner_id.as_ref() == Some(actor_id)
+                || community.members.get(actor_id).is_some_and(|member| {
+                    !matches!(member.status, MemberStatus::Left | MemberStatus::Banned)
+                })
+                || (matches!(conversation.kind, ConversationKind::Channel)
+                    && community.is_subscriber(actor_id));
+        }
+        conversation.owner_id.as_ref() == Some(actor_id)
+            || conversation
+                .participants
+                .iter()
+                .any(|participant| &participant.actor_id == actor_id)
+    }
+
     fn sync_envelope(&self, actor_id: &ActorId, limit: u32, server_time_ms: i64) -> ServerEnvelope {
         let state = self.engine.state();
         let max_items = usize::try_from(limit.max(1)).unwrap_or(usize::MAX);
         let visible_conversation_ids = state
             .conversations
             .values()
-            .filter(|conversation| {
-                conversation
-                    .participants
-                    .iter()
-                    .any(|participant| &participant.actor_id == actor_id)
-                    || conversation.owner_id.as_ref() == Some(actor_id)
-            })
+            .filter(|conversation| self.actor_can_see_conversation(actor_id, conversation))
             .map(|conversation| conversation.id.clone())
             .collect::<BTreeSet<_>>();
         let visible_actor_ids = visible_conversation_ids
@@ -895,7 +1212,29 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 conversation
                     .participants
                     .iter()
+                    .filter(|participant| {
+                        self.actor_can_see_conversation(&participant.actor_id, conversation)
+                    })
                     .map(|participant| participant.actor_id.clone())
+                    .chain(
+                        state
+                            .communities
+                            .get(&conversation.id)
+                            .into_iter()
+                            .flat_map(|community| {
+                                community
+                                    .members
+                                    .values()
+                                    .filter(|member| {
+                                        !matches!(
+                                            member.status,
+                                            MemberStatus::Left | MemberStatus::Banned
+                                        )
+                                    })
+                                    .map(|member| member.actor_id.clone())
+                                    .chain(community.subscribers.keys().cloned())
+                            }),
+                    )
             })
             .chain(std::iter::once(actor_id.clone()))
             .collect::<BTreeSet<_>>();
@@ -946,6 +1285,13 @@ impl<S: MessagingStateStore> MessagingService<S> {
                     .filter_map(|by_actor| by_actor.get(actor_id))
                     .cloned()
                     .collect(),
+                topic_drafts: visible_conversation_ids
+                    .iter()
+                    .filter_map(|conversation_id| state.topic_drafts.get(conversation_id))
+                    .filter_map(|by_actor| by_actor.get(actor_id))
+                    .flat_map(|by_topic| by_topic.values())
+                    .cloned()
+                    .collect(),
                 invoices: state
                     .invoices
                     .values()
@@ -980,7 +1326,9 @@ impl<S: MessagingStateStore> MessagingService<S> {
                     .iter()
                     .filter_map(|id| state.communities.get(id))
                     .take(max_items)
-                    .cloned()
+                    .map(|community| {
+                        self.project_community_for_actor(actor_id, community, server_time_ms)
+                    })
                     .collect(),
                 bots: state
                     .bots
@@ -1055,7 +1403,7 @@ impl<S: MessagingStateStore> MessagingService<S> {
         self.cursor = self.cursor.saturating_add(events.len() as u64);
         let responses = events
             .into_iter()
-            .filter_map(|event| self.project_event(event, server_time_ms))
+            .filter_map(|event| self.project_event(actor_id, event, server_time_ms))
             .collect::<Vec<_>>();
         let journal = self.journal_entries(actor_id, &responses);
         self.persist_with_events(server_time_ms, &journal)?;
@@ -1075,9 +1423,24 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 actor_id: actor_id.clone(),
                 presence,
             }],
-            ClientCommand::CreateConversation { conversation }
-            | ClientCommand::UpdateConversation { conversation } => {
+            ClientCommand::CreateConversation { conversation } => {
                 vec![Command::UpsertConversation { conversation }]
+            }
+            ClientCommand::UpdateConversation { conversation } => {
+                let is_community_backed = self
+                    .engine
+                    .state()
+                    .communities
+                    .contains_key(&conversation.id);
+                if is_community_backed {
+                    vec![Command::UpdateConversationInfo {
+                        conversation_id: conversation.id,
+                        title: conversation.title,
+                        description: conversation.description,
+                    }]
+                } else {
+                    vec![Command::UpsertConversation { conversation }]
+                }
             }
             ClientCommand::UpdateConversationInfo {
                 conversation_id,
@@ -1247,6 +1610,31 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 }
                 commands
             }
+            ClientCommand::MarkTopicRead {
+                conversation_id,
+                topic_id,
+                message_id,
+            } => vec![Command::MarkTopicRead {
+                conversation_id,
+                topic_id,
+                actor_id: actor_id.clone(),
+                message_id,
+            }],
+            ClientCommand::SetTopicDraft {
+                conversation_id,
+                topic_id,
+                text,
+                reply_to_message_id,
+            } => vec![Command::SetTopicDraft {
+                draft: TopicDraft {
+                    conversation_id,
+                    topic_id,
+                    actor_id: actor_id.clone(),
+                    text,
+                    reply_to_message_id: reply_to_message_id.map(|id| id.0),
+                    updated_at_ms: now_ms,
+                },
+            }],
             ClientCommand::SetReaction {
                 conversation_id,
                 message_id,
@@ -1276,6 +1664,8 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 option_ids,
             }],
             ClientCommand::Search { .. }
+            | ClientCommand::ListCommunityMembers { .. }
+            | ClientCommand::ListCommunityAuditLog { .. }
             | ClientCommand::StartTyping { .. }
             | ClientCommand::StopTyping { .. } => Vec::new(),
             ClientCommand::CreateInvoice { invoice } => vec![Command::CreateInvoice { invoice }],
@@ -1322,6 +1712,40 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 actor_id: actor_id.clone(),
                 community,
             }],
+            ClientCommand::SubscribeChannel { conversation_id } => {
+                vec![Command::SubscribeChannel {
+                    actor_id: actor_id.clone(),
+                    conversation_id,
+                    subscribed_at_ms: now_ms,
+                }]
+            }
+            ClientCommand::UnsubscribeChannel { conversation_id } => {
+                vec![Command::UnsubscribeChannel {
+                    actor_id: actor_id.clone(),
+                    conversation_id,
+                    unsubscribed_at_ms: now_ms,
+                }]
+            }
+            ClientCommand::SetCommunitySlowMode {
+                conversation_id,
+                seconds,
+            } => vec![Command::SetCommunitySlowMode {
+                actor_id: actor_id.clone(),
+                conversation_id,
+                seconds,
+                changed_at_ms: now_ms,
+            }],
+            ClientCommand::ModerateCommunityMember {
+                conversation_id,
+                member,
+                reason,
+            } => vec![Command::ModerateCommunityMember {
+                actor_id: actor_id.clone(),
+                conversation_id,
+                member,
+                reason,
+                decided_at_ms: now_ms,
+            }],
             ClientCommand::SetCommunityMember {
                 conversation_id,
                 member,
@@ -1341,6 +1765,7 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 actor_id: actor_id.clone(),
                 conversation_id,
                 invite_id,
+                revoked_at_ms: now_ms,
             }],
             ClientCommand::RequestCommunityJoin { request } => {
                 vec![Command::RequestCommunityJoin {
@@ -1412,15 +1837,24 @@ impl<S: MessagingStateStore> MessagingService<S> {
         }
     }
 
-    fn project_event(&self, event: Event, server_time_ms: i64) -> Option<ServerEnvelope> {
+    fn project_event(
+        &self,
+        actor_id: &ActorId,
+        event: Event,
+        server_time_ms: i64,
+    ) -> Option<ServerEnvelope> {
         let server_event = match event {
             Event::ActorUpserted { actor } => ServerEvent::ActorChanged { actor },
             Event::PresenceUpdated { actor_id, presence } => {
                 ServerEvent::PresenceChanged { actor_id, presence }
             }
-            Event::ConversationUpserted { conversation } => {
-                ServerEvent::ConversationChanged { conversation }
-            }
+            Event::ConversationUpserted { conversation } => ServerEvent::ConversationChanged {
+                conversation: self.project_conversation_for_actor(
+                    actor_id,
+                    &conversation,
+                    server_time_ms,
+                ),
+            },
             Event::ConversationInfoUpdated {
                 conversation_id, ..
             } => self
@@ -1429,7 +1863,13 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 .conversations
                 .get(&conversation_id)
                 .cloned()
-                .map(|conversation| ServerEvent::ConversationChanged { conversation })?,
+                .map(|conversation| ServerEvent::ConversationChanged {
+                    conversation: self.project_conversation_for_actor(
+                        actor_id,
+                        &conversation,
+                        server_time_ms,
+                    ),
+                })?,
             Event::ConversationParticipantUpserted {
                 conversation_id, ..
             } => self
@@ -1439,12 +1879,16 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 .get(&conversation_id)
                 .cloned()
                 .map(|conversation| ServerEvent::ConversationParticipantChanged {
-                    conversation,
+                    conversation: self.project_conversation_for_actor(
+                        actor_id,
+                        &conversation,
+                        server_time_ms,
+                    ),
                     removed_actor_id: None,
                 })?,
             Event::ConversationParticipantRemoved {
                 conversation_id,
-                actor_id,
+                actor_id: removed_actor_id,
             } => self
                 .engine
                 .state()
@@ -1452,8 +1896,12 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 .get(&conversation_id)
                 .cloned()
                 .map(|conversation| ServerEvent::ConversationParticipantChanged {
-                    conversation,
-                    removed_actor_id: Some(actor_id),
+                    conversation: self.project_conversation_for_actor(
+                        actor_id,
+                        &conversation,
+                        server_time_ms,
+                    ),
+                    removed_actor_id: Some(removed_actor_id),
                 })?,
             Event::ConversationArchived {
                 conversation_id, ..
@@ -1469,7 +1917,13 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 .conversations
                 .get(&conversation_id)
                 .cloned()
-                .map(|conversation| ServerEvent::ConversationChanged { conversation })?,
+                .map(|conversation| ServerEvent::ConversationChanged {
+                    conversation: self.project_conversation_for_actor(
+                        actor_id,
+                        &conversation,
+                        server_time_ms,
+                    ),
+                })?,
             Event::ConversationMarkedUnread {
                 conversation_id,
                 actor_id,
@@ -1536,12 +1990,26 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 actor_id,
                 message_id,
             },
+            Event::TopicReadChanged {
+                conversation_id,
+                topic_id,
+                actor_id,
+                message_id,
+            } => ServerEvent::TopicReadChanged {
+                conversation_id,
+                topic_id,
+                actor_id,
+                message_id,
+            },
+            Event::TopicDraftChanged { draft } => ServerEvent::TopicDraftChanged { draft },
             Event::InvoiceCreated { invoice } => ServerEvent::InvoiceChanged { invoice },
             Event::OrderUpserted { order } => ServerEvent::OrderChanged { order },
             Event::WalletChanged { .. } => return None,
             Event::StoryChanged { story } => ServerEvent::StoryChanged { story },
             Event::StoryDeleted { story_id } => ServerEvent::StoryDeleted { story_id },
-            Event::CommunityChanged { community } => ServerEvent::CommunityChanged { community },
+            Event::CommunityChanged { community } => ServerEvent::CommunityChanged {
+                community: self.project_community_for_actor(actor_id, &community, server_time_ms),
+            },
             Event::BotRegistryChanged {
                 profile, execution, ..
             } => ServerEvent::BotChanged { profile, execution },
@@ -1575,10 +2043,70 @@ impl<S: MessagingStateStore> MessagingService<S> {
             .iter()
             .filter(|response| !matches!(&response.event, ServerEvent::SyncBatch { .. }))
             .map(|response| JournalEntry {
-                envelope: response.clone(),
+                envelope: match &response.event {
+                    ServerEvent::CommunityChanged { community } => {
+                        let canonical = self
+                            .engine
+                            .state()
+                            .communities
+                            .get(&community.conversation_id)
+                            .cloned()
+                            .unwrap_or_else(|| community.clone());
+                        self.public_journal_envelope(&ServerEnvelope {
+                            protocol_version: response.protocol_version,
+                            cursor: response.cursor.clone(),
+                            server_time_ms: response.server_time_ms,
+                            event: ServerEvent::CommunityChanged {
+                                community: canonical,
+                            },
+                        })
+                    }
+                    _ => self.public_journal_envelope(response),
+                },
                 audience: self.event_audience(initiator, &response.event),
             })
             .collect()
+    }
+
+    fn public_journal_envelope(&self, response: &ServerEnvelope) -> ServerEnvelope {
+        let mut envelope = response.clone();
+        if let ServerEvent::CommunityChanged { community } = &mut envelope.event {
+            // Journal entries are shared by every audience member. Keep bearer invite
+            // tokens and private moderation history out of the replayable copy; the direct
+            // response and actor-scoped snapshot remain available to authorized admins.
+            community.admin_log.clear();
+            community.pending_join_requests.clear();
+            for topic in community.topics.values_mut() {
+                topic.unread_count = 0;
+            }
+            for invite in community.invite_links.values_mut() {
+                invite.token.clear();
+            }
+        }
+        envelope
+    }
+
+    fn project_journal_envelope_for_actor(
+        &self,
+        actor_id: &ActorId,
+        envelope: &ServerEnvelope,
+        server_time_ms: i64,
+    ) -> ServerEnvelope {
+        if let ServerEvent::CommunityChanged { community } = &envelope.event {
+            return ServerEnvelope {
+                protocol_version: envelope.protocol_version,
+                cursor: envelope.cursor.clone(),
+                server_time_ms: envelope.server_time_ms,
+                event: ServerEvent::CommunityChanged {
+                    community: self.project_community_for_actor(
+                        actor_id,
+                        community,
+                        server_time_ms,
+                    ),
+                },
+            };
+        }
+        self.public_journal_envelope(envelope)
     }
 
     fn event_audience(&self, initiator: &ActorId, event: &ServerEvent) -> Vec<ActorId> {
@@ -1638,6 +2166,10 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 audience.clear();
                 audience.insert(draft.actor_id.clone());
             }
+            ServerEvent::TopicDraftChanged { draft } => {
+                audience.clear();
+                audience.insert(draft.actor_id.clone());
+            }
             ServerEvent::MessageAdded { message } | ServerEvent::MessageChanged { message } => {
                 self.extend_conversation_id_audience(&mut audience, &message.conversation_id);
             }
@@ -1651,6 +2183,10 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 conversation_id, ..
             } => {
                 self.extend_conversation_id_audience(&mut audience, conversation_id);
+            }
+            ServerEvent::TopicReadChanged { actor_id, .. } => {
+                audience.clear();
+                audience.insert(actor_id.clone());
             }
             ServerEvent::InvoiceChanged { invoice } => {
                 self.extend_conversation_id_audience(&mut audience, &invoice.conversation_id);
@@ -1698,6 +2234,8 @@ impl<S: MessagingStateStore> MessagingService<S> {
             | ServerEvent::WalletStatus { .. }
             | ServerEvent::StoryDeleted { .. }
             | ServerEvent::MiniAppChanged { .. }
+            | ServerEvent::CommunityMembersPage { .. }
+            | ServerEvent::CommunityAuditLogPage { .. }
             | ServerEvent::Error { .. } => {}
         }
         audience.into_iter().collect()
@@ -1709,7 +2247,44 @@ impl<S: MessagingStateStore> MessagingService<S> {
         conversation_id: &ConversationId,
     ) {
         if let Some(conversation) = self.engine.state().conversations.get(conversation_id) {
-            Self::extend_conversation_audience(audience, conversation);
+            if let Some(community) = self.engine.state().communities.get(conversation_id) {
+                audience.extend(
+                    conversation
+                        .participants
+                        .iter()
+                        .filter(|participant| {
+                            conversation.owner_id.as_ref() == Some(&participant.actor_id)
+                                || community.members.get(&participant.actor_id).is_some_and(
+                                    |member| {
+                                        !matches!(
+                                            member.status,
+                                            MemberStatus::Left | MemberStatus::Banned
+                                        )
+                                    },
+                                )
+                                || (matches!(conversation.kind, ConversationKind::Channel)
+                                    && community.is_subscriber(&participant.actor_id))
+                        })
+                        .map(|participant| participant.actor_id.clone()),
+                );
+                audience.extend(
+                    community
+                        .members
+                        .values()
+                        .filter(|member| {
+                            !matches!(member.status, MemberStatus::Left | MemberStatus::Banned)
+                        })
+                        .map(|member| member.actor_id.clone()),
+                );
+                if matches!(conversation.kind, ConversationKind::Channel) {
+                    audience.extend(community.subscribers.keys().cloned());
+                }
+                if let Some(owner_id) = &conversation.owner_id {
+                    audience.insert(owner_id.clone());
+                }
+            } else {
+                Self::extend_conversation_audience(audience, conversation);
+            }
         }
     }
 

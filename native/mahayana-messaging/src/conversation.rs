@@ -88,6 +88,8 @@ pub struct Topic {
     pub created_by: ActorId,
     pub closed: bool,
     pub hidden: bool,
+    #[serde(default)]
+    pub unread_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,6 +157,17 @@ impl Conversation {
 #[serde(rename_all = "camelCase")]
 pub struct ConversationDraft {
     pub conversation_id: ConversationId,
+    pub actor_id: ActorId,
+    pub text: String,
+    pub reply_to_message_id: Option<String>,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicDraft {
+    pub conversation_id: ConversationId,
+    pub topic_id: String,
     pub actor_id: ActorId,
     pub text: String,
     pub reply_to_message_id: Option<String>,

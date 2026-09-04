@@ -1,9 +1,12 @@
 use crate::actor::{Actor, ActorId, Participant, Presence};
 use crate::blob_store::{BlobId, BlobMetadata, BlobUploadStatus};
 use crate::bot::{BotExecution, BotInvocation, BotProfile};
-use crate::community::{CommunityMember, CommunityState, ForumTopicState, InviteLink, JoinRequest};
+use crate::community::{
+    CommunityAuditEntry, CommunityMember, CommunityState, ForumTopicState, InviteLink, JoinRequest,
+};
 use crate::conversation::{
     Conversation, ConversationDraft, ConversationFolder, ConversationId, NotificationSettings,
+    TopicDraft,
 };
 use crate::message::{ClientMessageId, Message, MessageContent, MessageId, ReactionSummary};
 use crate::miniapp::{
@@ -155,6 +158,17 @@ pub enum ClientCommand {
         conversation_id: ConversationId,
         message_id: MessageId,
     },
+    MarkTopicRead {
+        conversation_id: ConversationId,
+        topic_id: String,
+        message_id: MessageId,
+    },
+    SetTopicDraft {
+        conversation_id: ConversationId,
+        topic_id: String,
+        text: String,
+        reply_to_message_id: Option<MessageId>,
+    },
     SetReaction {
         conversation_id: ConversationId,
         message_id: MessageId,
@@ -205,6 +219,31 @@ pub enum ClientCommand {
     },
     UpdateCommunity {
         community: CommunityState,
+    },
+    SubscribeChannel {
+        conversation_id: ConversationId,
+    },
+    UnsubscribeChannel {
+        conversation_id: ConversationId,
+    },
+    ListCommunityMembers {
+        conversation_id: ConversationId,
+        cursor: Option<String>,
+        limit: u32,
+    },
+    ListCommunityAuditLog {
+        conversation_id: ConversationId,
+        cursor: Option<String>,
+        limit: u32,
+    },
+    SetCommunitySlowMode {
+        conversation_id: ConversationId,
+        seconds: Option<u32>,
+    },
+    ModerateCommunityMember {
+        conversation_id: ConversationId,
+        member: CommunityMember,
+        reason: Option<String>,
     },
     SetCommunityMember {
         conversation_id: ConversationId,
@@ -281,6 +320,8 @@ pub enum ServerEvent {
         messages: Vec<Message>,
         folders: Vec<ConversationFolder>,
         drafts: Vec<ConversationDraft>,
+        #[serde(default)]
+        topic_drafts: Vec<TopicDraft>,
         invoices: Vec<Invoice>,
         orders: Vec<PaymentOrder>,
         stories: Vec<Story>,
@@ -316,6 +357,9 @@ pub enum ServerEvent {
     DraftChanged {
         draft: ConversationDraft,
     },
+    TopicDraftChanged {
+        draft: TopicDraft,
+    },
     FolderChanged {
         folder: ConversationFolder,
     },
@@ -346,6 +390,12 @@ pub enum ServerEvent {
         actor_id: ActorId,
         message_id: MessageId,
     },
+    TopicReadChanged {
+        conversation_id: ConversationId,
+        topic_id: String,
+        actor_id: ActorId,
+        message_id: MessageId,
+    },
     TypingChanged {
         conversation_id: ConversationId,
         actor_id: ActorId,
@@ -370,6 +420,16 @@ pub enum ServerEvent {
     },
     CommunityChanged {
         community: CommunityState,
+    },
+    CommunityMembersPage {
+        conversation_id: ConversationId,
+        members: Vec<CommunityMember>,
+        next_cursor: Option<String>,
+    },
+    CommunityAuditLogPage {
+        conversation_id: ConversationId,
+        entries: Vec<CommunityAuditEntry>,
+        next_cursor: Option<String>,
     },
     BotChanged {
         profile: Option<BotProfile>,

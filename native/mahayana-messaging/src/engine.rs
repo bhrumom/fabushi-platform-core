@@ -1,11 +1,12 @@
 use crate::actor::{Actor, ActorId, ActorKind, Participant, ParticipantRole, Presence};
 use crate::bot::{BotExecution, BotInvocation, BotProfile, BotRegistry};
 use crate::community::{
-    CommunityError, CommunityMember, CommunityState, ForumTopicState, InviteLink, JoinRequest,
-    MemberStatus,
+    AdminRights, CommunityAuditAction, CommunityAuditEntry, CommunityError, CommunityMember,
+    CommunityState, ForumTopicState, InviteLink, JoinRequest, MemberStatus,
 };
 use crate::conversation::{
-    Conversation, ConversationDraft, ConversationFolder, ConversationId, NotificationSettings,
+    Conversation, ConversationDraft, ConversationFolder, ConversationId, ConversationKind,
+    NotificationSettings, TopicDraft,
 };
 use crate::message::{
     ClientMessageId, DeliveryState, Message, MessageContent, MessageId, ReactionSummary,
@@ -125,6 +126,15 @@ pub enum Command {
         actor_id: ActorId,
         message_id: MessageId,
     },
+    MarkTopicRead {
+        conversation_id: ConversationId,
+        topic_id: String,
+        actor_id: ActorId,
+        message_id: MessageId,
+    },
+    SetTopicDraft {
+        draft: TopicDraft,
+    },
     SetReaction {
         conversation_id: ConversationId,
         message_id: MessageId,
@@ -189,6 +199,29 @@ pub enum Command {
         actor_id: ActorId,
         community: CommunityState,
     },
+    SubscribeChannel {
+        actor_id: ActorId,
+        conversation_id: ConversationId,
+        subscribed_at_ms: i64,
+    },
+    UnsubscribeChannel {
+        actor_id: ActorId,
+        conversation_id: ConversationId,
+        unsubscribed_at_ms: i64,
+    },
+    SetCommunitySlowMode {
+        actor_id: ActorId,
+        conversation_id: ConversationId,
+        seconds: Option<u32>,
+        changed_at_ms: i64,
+    },
+    ModerateCommunityMember {
+        actor_id: ActorId,
+        conversation_id: ConversationId,
+        member: CommunityMember,
+        reason: Option<String>,
+        decided_at_ms: i64,
+    },
     SetCommunityMember {
         actor_id: ActorId,
         conversation_id: ConversationId,
@@ -202,6 +235,7 @@ pub enum Command {
         actor_id: ActorId,
         conversation_id: ConversationId,
         invite_id: String,
+        revoked_at_ms: i64,
     },
     RequestCommunityJoin {
         actor_id: ActorId,
@@ -340,6 +374,15 @@ pub enum Event {
         actor_id: ActorId,
         message_id: MessageId,
     },
+    TopicReadChanged {
+        conversation_id: ConversationId,
+        topic_id: String,
+        actor_id: ActorId,
+        message_id: MessageId,
+    },
+    TopicDraftChanged {
+        draft: TopicDraft,
+    },
     ReactionUpdated {
         conversation_id: ConversationId,
         message_id: MessageId,
@@ -404,10 +447,13 @@ pub struct MessagingState {
     pub folders: BTreeMap<String, ConversationFolder>,
     pub messages: BTreeMap<ConversationId, BTreeMap<MessageId, Message>>,
     pub read_cursors: BTreeMap<ConversationId, BTreeMap<ActorId, MessageId>>,
+    pub topic_read_cursors:
+        BTreeMap<ConversationId, BTreeMap<ActorId, BTreeMap<String, MessageId>>>,
     pub poll_votes:
         BTreeMap<ConversationId, BTreeMap<MessageId, BTreeMap<ActorId, BTreeSet<String>>>>,
     pub marked_unread_by_actor: BTreeMap<ConversationId, BTreeSet<ActorId>>,
     pub drafts: BTreeMap<ConversationId, BTreeMap<ActorId, ConversationDraft>>,
+    pub topic_drafts: BTreeMap<ConversationId, BTreeMap<ActorId, BTreeMap<String, TopicDraft>>>,
     pub invoices: BTreeMap<String, Invoice>,
     pub orders: BTreeMap<String, PaymentOrder>,
     pub wallet: WalletLedger,
@@ -486,6 +532,28 @@ pub enum EngineError {
     CommunityMediaRestricted(ConversationId),
     #[error("community {0:?} member is not allowed to send polls")]
     CommunityPollRestricted(ConversationId),
+    #[error("actor {actor_id:?} does not have access to community {conversation_id:?}")]
+    CommunityAccessDenied {
+        conversation_id: ConversationId,
+        actor_id: ActorId,
+    },
+    #[error("community {conversation_id:?} slow mode is active until {retry_at_ms}")]
+    SlowModeActive {
+        conversation_id: ConversationId,
+        retry_at_ms: i64,
+    },
+    #[error("forum topic {topic_id:?} does not exist in community {conversation_id:?}")]
+    ForumTopicNotFound {
+        conversation_id: ConversationId,
+        topic_id: String,
+    },
+    #[error("forum topic {topic_id:?} is closed in community {conversation_id:?}")]
+    ForumTopicClosed {
+        conversation_id: ConversationId,
+        topic_id: String,
+    },
+    #[error("message does not belong to forum topic {topic_id:?}")]
+    TopicMessageMismatch { topic_id: String },
     #[error(transparent)]
     Community(#[from] CommunityError),
     #[error("bot operation permission denied")]
@@ -566,6 +634,45 @@ fn require_community_admin(
     }
 }
 
+pub(crate) fn topic_id_from_root(root: &MessageId) -> Option<&str> {
+    root.0.strip_prefix("topic:").filter(|id| !id.is_empty())
+}
+
+fn community_has_access(community: &CommunityState, actor_id: &ActorId) -> bool {
+    community
+        .members
+        .get(actor_id)
+        .is_some_and(|member| !matches!(member.status, MemberStatus::Left | MemberStatus::Banned))
+        || community.is_subscriber(actor_id)
+}
+
+fn append_community_audit(
+    community: &mut CommunityState,
+    actor_id: &ActorId,
+    action: CommunityAuditAction,
+    target_actor_id: Option<ActorId>,
+    target_id: Option<String>,
+    reason: Option<String>,
+    created_at_ms: i64,
+) {
+    let id = format!(
+        "audit:{}:{}:{}:{}",
+        actor_id.0,
+        created_at_ms,
+        community.admin_log.len(),
+        target_id.as_deref().unwrap_or("community")
+    );
+    community.append_audit(CommunityAuditEntry {
+        id,
+        actor_id: actor_id.clone(),
+        action,
+        target_actor_id,
+        target_id,
+        reason,
+        created_at_ms,
+    });
+}
+
 fn message_content_uses_media(content: &MessageContent) -> bool {
     matches!(
         content,
@@ -594,6 +701,22 @@ fn ensure_wallet_account(
         return Ok(());
     }
     wallet.create_account(account_id.clone(), owner_id.clone(), now_ms)
+}
+
+fn participant_for_community_member(member: &CommunityMember) -> Option<Participant> {
+    let role = match member.status {
+        MemberStatus::Owner => ParticipantRole::Owner,
+        MemberStatus::Administrator => ParticipantRole::Admin,
+        MemberStatus::Member => ParticipantRole::Member,
+        MemberStatus::Restricted => ParticipantRole::Restricted,
+        MemberStatus::Left | MemberStatus::Banned => return None,
+    };
+    Some(Participant {
+        actor_id: member.actor_id.clone(),
+        role,
+        joined_at_ms: member.joined_at_ms,
+        muted_until_ms: member.restrictions.until_ms,
+    })
 }
 
 impl MessagingEngine {
@@ -633,6 +756,17 @@ impl MessagingEngine {
             Command::UpsertConversation { conversation } => {
                 if !conversation.id.is_valid() || conversation.title.trim().is_empty() {
                     return Err(EngineError::InvalidConversation);
+                }
+                if let Some(existing) = self.state.conversations.get(&conversation.id) {
+                    if matches!(
+                        existing.kind,
+                        ConversationKind::Group | ConversationKind::Channel
+                    ) && (conversation.owner_id != existing.owner_id
+                        || conversation.participants != existing.participants
+                        || conversation.topics != existing.topics)
+                    {
+                        return Err(EngineError::InvalidConversationParticipant);
+                    }
                 }
                 for participant in &conversation.participants {
                     self.require_actor(&participant.actor_id)?;
@@ -674,10 +808,53 @@ impl MessagingEngine {
                 {
                     return Err(EngineError::InvalidConversationParticipant);
                 }
-                Ok(vec![Event::ConversationParticipantUpserted {
-                    conversation_id,
-                    participant,
-                }])
+                if matches!(
+                    conversation.kind,
+                    ConversationKind::Group | ConversationKind::Channel
+                ) {
+                    let mut community = self
+                        .state
+                        .communities
+                        .get(&conversation_id)
+                        .cloned()
+                        .ok_or_else(|| EngineError::CommunityNotFound(conversation_id.clone()))?;
+                    let status = match participant.role {
+                        ParticipantRole::Owner => MemberStatus::Owner,
+                        ParticipantRole::Admin => MemberStatus::Administrator,
+                        ParticipantRole::Member => MemberStatus::Member,
+                        ParticipantRole::Restricted => MemberStatus::Restricted,
+                    };
+                    let mut member = community
+                        .members
+                        .get(&participant.actor_id)
+                        .cloned()
+                        .unwrap_or_else(|| CommunityMember {
+                            actor_id: participant.actor_id.clone(),
+                            status: MemberStatus::Member,
+                            admin_title: None,
+                            admin_rights: AdminRights::default(),
+                            restrictions: Default::default(),
+                            joined_at_ms: participant.joined_at_ms,
+                            invited_by: None,
+                        });
+                    member.status = status;
+                    member.joined_at_ms = participant.joined_at_ms;
+                    community
+                        .members
+                        .insert(participant.actor_id.clone(), member);
+                    Ok(vec![
+                        Event::CommunityChanged { community },
+                        Event::ConversationParticipantUpserted {
+                            conversation_id,
+                            participant,
+                        },
+                    ])
+                } else {
+                    Ok(vec![Event::ConversationParticipantUpserted {
+                        conversation_id,
+                        participant,
+                    }])
+                }
             }
             Command::RemoveConversationParticipant {
                 conversation_id,
@@ -687,10 +864,33 @@ impl MessagingEngine {
                 if conversation.owner_id.as_ref() == Some(&actor_id) {
                     return Err(EngineError::InvalidConversationParticipant);
                 }
-                Ok(vec![Event::ConversationParticipantRemoved {
-                    conversation_id,
-                    actor_id,
-                }])
+                if matches!(
+                    conversation.kind,
+                    ConversationKind::Group | ConversationKind::Channel
+                ) {
+                    let mut community = self
+                        .state
+                        .communities
+                        .get(&conversation_id)
+                        .cloned()
+                        .ok_or_else(|| EngineError::CommunityNotFound(conversation_id.clone()))?;
+                    if let Some(member) = community.members.get_mut(&actor_id) {
+                        member.status = MemberStatus::Left;
+                    }
+                    community.subscribers.remove(&actor_id);
+                    Ok(vec![
+                        Event::CommunityChanged { community },
+                        Event::ConversationParticipantRemoved {
+                            conversation_id,
+                            actor_id,
+                        },
+                    ])
+                } else {
+                    Ok(vec![Event::ConversationParticipantRemoved {
+                        conversation_id,
+                        actor_id,
+                    }])
+                }
             }
             Command::ArchiveConversation {
                 conversation_id,
@@ -815,6 +1015,78 @@ impl MessagingEngine {
                         return Err(EngineError::CommunityPollRestricted(
                             conversation_id.clone(),
                         ));
+                    }
+                }
+                if matches!(conversation.kind, ConversationKind::Channel) {
+                    let can_post =
+                        conversation.owner_id.as_ref() == Some(&sender_id)
+                            || conversation.participants.iter().any(|participant| {
+                                participant.actor_id == sender_id
+                                    && matches!(
+                                        participant.role,
+                                        ParticipantRole::Owner | ParticipantRole::Admin
+                                    )
+                            })
+                            || self.state.communities.get(&conversation_id).is_some_and(
+                                |community| {
+                                    community.members.get(&sender_id).is_some_and(|member| {
+                                        matches!(member.status, MemberStatus::Administrator)
+                                            && member.admin_rights.post_messages
+                                    })
+                                },
+                            );
+                    if !can_post {
+                        return Err(EngineError::CommunitySendRestricted(
+                            conversation_id.clone(),
+                        ));
+                    }
+                }
+                if let Some(community) = self.state.communities.get(&conversation_id) {
+                    if let Some(thread_root) = &thread_root_message_id {
+                        if let Some(topic_id) = topic_id_from_root(thread_root) {
+                            let topic = community.topics.get(topic_id).ok_or_else(|| {
+                                EngineError::ForumTopicNotFound {
+                                    conversation_id: conversation_id.clone(),
+                                    topic_id: topic_id.to_string(),
+                                }
+                            })?;
+                            if topic.closed || topic.hidden {
+                                return Err(EngineError::ForumTopicClosed {
+                                    conversation_id: conversation_id.clone(),
+                                    topic_id: topic_id.to_string(),
+                                });
+                            }
+                        }
+                    }
+                    if let Some(seconds) = community.slow_mode_seconds {
+                        let bypass = community.can_moderate(&sender_id);
+                        if !bypass {
+                            let latest_sender_message = self
+                                .state
+                                .messages
+                                .get(&conversation_id)
+                                .into_iter()
+                                .flat_map(|messages| messages.values())
+                                .filter(|message| {
+                                    message.sender_id == sender_id
+                                        && !message.deleted
+                                        && message
+                                            .scheduled_at_ms
+                                            .is_none_or(|scheduled| scheduled <= created_at_ms)
+                                })
+                                .max_by_key(|message| (message.created_at_ms, message.id.clone()));
+                            if let Some(message) = latest_sender_message {
+                                let retry_at = message
+                                    .created_at_ms
+                                    .saturating_add(i64::from(seconds).saturating_mul(1_000));
+                                if created_at_ms < retry_at {
+                                    return Err(EngineError::SlowModeActive {
+                                        conversation_id: conversation_id.clone(),
+                                        retry_at_ms: retry_at,
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
                 let is_secret_conversation = matches!(
@@ -1015,12 +1287,111 @@ impl MessagingEngine {
                 message_id,
             } => {
                 self.require_actor(&actor_id)?;
+                let conversation = self.require_conversation(&conversation_id)?;
+                let has_access = self
+                    .state
+                    .communities
+                    .get(&conversation_id)
+                    .map(|community| {
+                        community_has_access(community, &actor_id)
+                            || conversation.owner_id.as_ref() == Some(&actor_id)
+                    })
+                    .unwrap_or_else(|| {
+                        conversation.owner_id.as_ref() == Some(&actor_id)
+                            || conversation
+                                .participants
+                                .iter()
+                                .any(|participant| participant.actor_id == actor_id)
+                    });
+                if !has_access {
+                    return Err(EngineError::CommunityAccessDenied {
+                        conversation_id,
+                        actor_id,
+                    });
+                }
                 self.require_message(&conversation_id, &message_id)?;
                 Ok(vec![Event::ConversationRead {
                     conversation_id,
                     actor_id,
                     message_id,
                 }])
+            }
+            Command::MarkTopicRead {
+                conversation_id,
+                topic_id,
+                actor_id,
+                message_id,
+            } => {
+                self.require_actor(&actor_id)?;
+                let community = self
+                    .state
+                    .communities
+                    .get(&conversation_id)
+                    .ok_or_else(|| EngineError::CommunityNotFound(conversation_id.clone()))?;
+                if !community_has_access(community, &actor_id)
+                    && self
+                        .state
+                        .conversations
+                        .get(&conversation_id)
+                        .and_then(|conversation| conversation.owner_id.as_ref())
+                        != Some(&actor_id)
+                {
+                    return Err(EngineError::CommunityAccessDenied {
+                        conversation_id,
+                        actor_id,
+                    });
+                }
+                let topic = community.topics.get(&topic_id).ok_or_else(|| {
+                    EngineError::ForumTopicNotFound {
+                        conversation_id: conversation_id.clone(),
+                        topic_id: topic_id.clone(),
+                    }
+                })?;
+                let message = self.require_message(&conversation_id, &message_id)?;
+                let belongs_to_topic = message
+                    .thread_root_message_id
+                    .as_ref()
+                    .is_some_and(|root| topic_id_from_root(root) == Some(topic_id.as_str()))
+                    || topic.last_message_id.as_deref() == Some(message_id.0.as_str());
+                if !belongs_to_topic {
+                    return Err(EngineError::TopicMessageMismatch { topic_id });
+                }
+                Ok(vec![Event::TopicReadChanged {
+                    conversation_id,
+                    topic_id,
+                    actor_id,
+                    message_id,
+                }])
+            }
+            Command::SetTopicDraft { draft } => {
+                self.require_actor(&draft.actor_id)?;
+                let community = self
+                    .state
+                    .communities
+                    .get(&draft.conversation_id)
+                    .ok_or_else(|| EngineError::CommunityNotFound(draft.conversation_id.clone()))?;
+                if !community_has_access(community, &draft.actor_id)
+                    && self
+                        .state
+                        .conversations
+                        .get(&draft.conversation_id)
+                        .and_then(|conversation| conversation.owner_id.as_ref())
+                        != Some(&draft.actor_id)
+                {
+                    return Err(EngineError::CommunityAccessDenied {
+                        conversation_id: draft.conversation_id,
+                        actor_id: draft.actor_id,
+                    });
+                }
+                if draft.topic_id.trim().is_empty()
+                    || !community.topics.contains_key(&draft.topic_id)
+                {
+                    return Err(EngineError::ForumTopicNotFound {
+                        conversation_id: draft.conversation_id,
+                        topic_id: draft.topic_id,
+                    });
+                }
+                Ok(vec![Event::TopicDraftChanged { draft }])
             }
             Command::SetReaction {
                 conversation_id,
@@ -1283,7 +1654,7 @@ impl MessagingEngine {
             }
             Command::UpdateCommunity {
                 actor_id,
-                community,
+                mut community,
             } => {
                 let conversation = self.require_conversation(&community.conversation_id)?;
                 if !matches!(
@@ -1303,7 +1674,272 @@ impl MessagingEngine {
                 {
                     return Err(EngineError::CommunityPermissionDenied);
                 }
+                if let Some(existing) = self.state.communities.get(&community.conversation_id) {
+                    // Membership, moderation, invites, topics and policy are server-owned.
+                    // Only the community metadata above is client-editable through this command.
+                    community.members = existing.members.clone();
+                    community.invite_links = existing.invite_links.clone();
+                    community.pending_join_requests = existing.pending_join_requests.clone();
+                    community.topics = existing.topics.clone();
+                    community.banned_words = existing.banned_words.clone();
+                    community.slow_mode_seconds = existing.slow_mode_seconds;
+                    community.subscribers = existing.subscribers.clone();
+                    community.admin_log = existing.admin_log.clone();
+                } else {
+                    // Only the conversation owner may create the first community state.
+                    // Seed that owner as the sole owner so a non-owner cannot squat the state.
+                    community.subscribers.clear();
+                    community.admin_log.clear();
+                    let requested_members = std::mem::take(&mut community.members);
+                    community.invite_links.clear();
+                    community.pending_join_requests.clear();
+                    community.topics.clear();
+                    community.banned_words.clear();
+                    community.members = conversation
+                        .participants
+                        .iter()
+                        .map(|participant| {
+                            let requested = requested_members.get(&participant.actor_id);
+                            let (status, admin_rights) = match participant.role {
+                                ParticipantRole::Owner => (
+                                    MemberStatus::Owner,
+                                    AdminRights {
+                                        change_info: true,
+                                        post_messages: true,
+                                        edit_messages: true,
+                                        delete_messages: true,
+                                        ban_members: true,
+                                        invite_members: true,
+                                        pin_messages: true,
+                                        manage_topics: true,
+                                        manage_calls: true,
+                                        add_admins: true,
+                                        remain_anonymous: true,
+                                    },
+                                ),
+                                ParticipantRole::Admin => (
+                                    MemberStatus::Administrator,
+                                    requested
+                                        .map(|member| member.admin_rights.clone())
+                                        .unwrap_or_default(),
+                                ),
+                                ParticipantRole::Restricted => (
+                                    MemberStatus::Restricted,
+                                    requested
+                                        .map(|member| member.admin_rights.clone())
+                                        .unwrap_or_default(),
+                                ),
+                                ParticipantRole::Member => {
+                                    (MemberStatus::Member, AdminRights::default())
+                                }
+                            };
+                            (
+                                participant.actor_id.clone(),
+                                CommunityMember {
+                                    actor_id: participant.actor_id.clone(),
+                                    status,
+                                    admin_title: requested
+                                        .and_then(|member| member.admin_title.clone()),
+                                    admin_rights,
+                                    restrictions: requested
+                                        .map(|member| member.restrictions.clone())
+                                        .unwrap_or_default(),
+                                    joined_at_ms: participant.joined_at_ms,
+                                    invited_by: requested
+                                        .and_then(|member| member.invited_by.clone()),
+                                },
+                            )
+                        })
+                        .collect();
+                }
                 Ok(vec![Event::CommunityChanged { community }])
+            }
+            Command::SubscribeChannel {
+                actor_id,
+                conversation_id,
+                subscribed_at_ms,
+            } => {
+                self.require_actor(&actor_id)?;
+                let conversation = self.require_conversation(&conversation_id)?;
+                if !matches!(conversation.kind, ConversationKind::Channel) {
+                    return Err(EngineError::CommunityPermissionDenied);
+                }
+                let mut community = self
+                    .state
+                    .communities
+                    .get(&conversation_id)
+                    .cloned()
+                    .ok_or_else(|| EngineError::CommunityNotFound(conversation_id.clone()))?;
+                if !community
+                    .public_username
+                    .as_deref()
+                    .is_some_and(|username| !username.trim().is_empty())
+                    && !community.is_subscriber(&actor_id)
+                    && !community.members.contains_key(&actor_id)
+                {
+                    return Err(EngineError::CommunityPermissionDenied);
+                }
+                let was_subscriber = community.is_subscriber(&actor_id);
+                community.subscribe_channel(actor_id.clone(), subscribed_at_ms)?;
+                if !was_subscriber {
+                    append_community_audit(
+                        &mut community,
+                        &actor_id,
+                        CommunityAuditAction::SubscriptionAdded,
+                        Some(actor_id.clone()),
+                        None,
+                        None,
+                        subscribed_at_ms,
+                    );
+                }
+                Ok(vec![Event::CommunityChanged { community }])
+            }
+            Command::UnsubscribeChannel {
+                actor_id,
+                conversation_id,
+                unsubscribed_at_ms,
+            } => {
+                self.require_actor(&actor_id)?;
+                let conversation = self.require_conversation(&conversation_id)?;
+                if !matches!(conversation.kind, ConversationKind::Channel) {
+                    return Err(EngineError::CommunityPermissionDenied);
+                }
+                if conversation.owner_id.as_ref() == Some(&actor_id) {
+                    return Err(EngineError::Community(
+                        CommunityError::OwnerCannotUnsubscribe,
+                    ));
+                }
+                let mut community = self
+                    .state
+                    .communities
+                    .get(&conversation_id)
+                    .cloned()
+                    .ok_or_else(|| EngineError::CommunityNotFound(conversation_id.clone()))?;
+                let was_subscriber = community.is_subscriber(&actor_id);
+                community.unsubscribe_channel(&actor_id)?;
+                if was_subscriber {
+                    append_community_audit(
+                        &mut community,
+                        &actor_id,
+                        CommunityAuditAction::SubscriptionRemoved,
+                        Some(actor_id.clone()),
+                        None,
+                        None,
+                        unsubscribed_at_ms,
+                    );
+                }
+                Ok(vec![Event::CommunityChanged { community }])
+            }
+            Command::SetCommunitySlowMode {
+                actor_id,
+                conversation_id,
+                seconds,
+                changed_at_ms,
+            } => {
+                let conversation = self.require_conversation(&conversation_id)?;
+                if !matches!(
+                    conversation.kind,
+                    ConversationKind::Group | ConversationKind::Channel
+                ) {
+                    return Err(EngineError::CommunityPermissionDenied);
+                }
+                if seconds.is_some_and(|seconds| seconds > 86_400) {
+                    return Err(EngineError::CommunityPermissionDenied);
+                }
+                let mut community = self
+                    .state
+                    .communities
+                    .get(&conversation_id)
+                    .cloned()
+                    .ok_or_else(|| EngineError::CommunityNotFound(conversation_id.clone()))?;
+                require_community_admin(&community, &actor_id, CommunityAdminAction::ChangeInfo)?;
+                community.slow_mode_seconds = seconds;
+                append_community_audit(
+                    &mut community,
+                    &actor_id,
+                    CommunityAuditAction::SlowModeChanged,
+                    None,
+                    Some("slowMode".into()),
+                    None,
+                    changed_at_ms,
+                );
+                Ok(vec![Event::CommunityChanged { community }])
+            }
+            Command::ModerateCommunityMember {
+                actor_id,
+                conversation_id,
+                member,
+                reason,
+                decided_at_ms,
+            } => {
+                self.require_actor(&member.actor_id)?;
+                let mut community = self
+                    .state
+                    .communities
+                    .get(&conversation_id)
+                    .cloned()
+                    .ok_or_else(|| EngineError::CommunityNotFound(conversation_id.clone()))?;
+                require_community_admin(&community, &actor_id, CommunityAdminAction::BanMembers)?;
+                if member.actor_id == actor_id
+                    || community
+                        .members
+                        .get(&member.actor_id)
+                        .is_some_and(|existing| matches!(existing.status, MemberStatus::Owner))
+                    || matches!(member.status, MemberStatus::Owner)
+                    || matches!(member.status, MemberStatus::Administrator)
+                    || community
+                        .members
+                        .get(&member.actor_id)
+                        .is_some_and(|existing| {
+                            matches!(existing.status, MemberStatus::Administrator)
+                        })
+                {
+                    return Err(EngineError::CommunityPermissionDenied);
+                }
+                let target_actor_id = member.actor_id.clone();
+                let target_id = format!("member:{}", target_actor_id.0);
+                community.upsert_member(member.clone());
+                if matches!(member.status, MemberStatus::Left | MemberStatus::Banned) {
+                    community.subscribers.remove(&target_actor_id);
+                }
+                append_community_audit(
+                    &mut community,
+                    &actor_id,
+                    CommunityAuditAction::MemberChanged,
+                    Some(target_actor_id),
+                    Some(target_id),
+                    reason,
+                    decided_at_ms,
+                );
+                let participant_event = self
+                    .state
+                    .conversations
+                    .get(&conversation_id)
+                    .is_some_and(|conversation| {
+                        matches!(
+                            conversation.kind,
+                            ConversationKind::Group | ConversationKind::Channel
+                        )
+                    })
+                    .then(|| {
+                        community
+                            .members
+                            .get(&member.actor_id)
+                            .and_then(participant_for_community_member)
+                            .map(|participant| Event::ConversationParticipantUpserted {
+                                conversation_id: conversation_id.clone(),
+                                participant,
+                            })
+                            .unwrap_or_else(|| Event::ConversationParticipantRemoved {
+                                conversation_id: conversation_id.clone(),
+                                actor_id: member.actor_id.clone(),
+                            })
+                    });
+                let mut events = vec![Event::CommunityChanged { community }];
+                if let Some(event) = participant_event {
+                    events.push(event);
+                }
+                Ok(events)
             }
             Command::SetCommunityMember {
                 actor_id,
@@ -1322,23 +1958,79 @@ impl MessagingEngine {
                     .members
                     .get(&member.actor_id)
                     .is_some_and(|existing| matches!(existing.status, MemberStatus::Owner));
+                let target_is_administrator = community
+                    .members
+                    .get(&member.actor_id)
+                    .is_some_and(|existing| matches!(existing.status, MemberStatus::Administrator));
                 if (target_is_owner || matches!(member.status, MemberStatus::Owner))
                     && !caller_is_owner
                 {
                     return Err(EngineError::CommunityPermissionDenied);
                 }
-                let action = match member.status {
-                    MemberStatus::Owner | MemberStatus::Administrator => {
-                        CommunityAdminAction::AddAdmins
+                let action = if target_is_owner || target_is_administrator {
+                    CommunityAdminAction::AddAdmins
+                } else {
+                    match member.status {
+                        MemberStatus::Owner | MemberStatus::Administrator => {
+                            CommunityAdminAction::AddAdmins
+                        }
+                        MemberStatus::Restricted | MemberStatus::Left | MemberStatus::Banned => {
+                            CommunityAdminAction::BanMembers
+                        }
+                        MemberStatus::Member => CommunityAdminAction::InviteMembers,
                     }
-                    MemberStatus::Restricted | MemberStatus::Left | MemberStatus::Banned => {
-                        CommunityAdminAction::BanMembers
-                    }
-                    MemberStatus::Member => CommunityAdminAction::InviteMembers,
                 };
                 require_community_admin(&community, &actor_id, action)?;
+                let target_actor_id = member.actor_id.clone();
+                let joined_at_ms = member.joined_at_ms;
                 community.upsert_member(member);
-                Ok(vec![Event::CommunityChanged { community }])
+                if matches!(
+                    community
+                        .members
+                        .get(&target_actor_id)
+                        .map(|member| member.status),
+                    Some(MemberStatus::Left | MemberStatus::Banned)
+                ) {
+                    community.subscribers.remove(&target_actor_id);
+                }
+                append_community_audit(
+                    &mut community,
+                    &actor_id,
+                    CommunityAuditAction::MemberChanged,
+                    Some(target_actor_id.clone()),
+                    Some(format!("member:{}", target_actor_id.0)),
+                    None,
+                    joined_at_ms,
+                );
+                let participant_event = self
+                    .state
+                    .conversations
+                    .get(&conversation_id)
+                    .is_some_and(|conversation| {
+                        matches!(
+                            conversation.kind,
+                            ConversationKind::Group | ConversationKind::Channel
+                        )
+                    })
+                    .then(|| {
+                        community
+                            .members
+                            .get(&target_actor_id)
+                            .and_then(participant_for_community_member)
+                            .map(|participant| Event::ConversationParticipantUpserted {
+                                conversation_id: conversation_id.clone(),
+                                participant,
+                            })
+                            .unwrap_or_else(|| Event::ConversationParticipantRemoved {
+                                conversation_id: conversation_id.clone(),
+                                actor_id: target_actor_id.clone(),
+                            })
+                    });
+                let mut events = vec![Event::CommunityChanged { community }];
+                if let Some(event) = participant_event {
+                    events.push(event);
+                }
+                Ok(events)
             }
             Command::CreateInviteLink { actor_id, invite } => {
                 let mut community = self
@@ -1361,13 +2053,25 @@ impl MessagingEngine {
                 {
                     return Err(EngineError::CommunityPermissionDenied);
                 }
-                community.invite_links.insert(invite.id.clone(), invite);
+                let created_at_ms = invite.created_at_ms;
+                let invite_id = invite.id.clone();
+                community.invite_links.insert(invite_id.clone(), invite);
+                append_community_audit(
+                    &mut community,
+                    &actor_id,
+                    CommunityAuditAction::InviteCreated,
+                    None,
+                    Some(format!("invite:{}", invite_id)),
+                    None,
+                    created_at_ms,
+                );
                 Ok(vec![Event::CommunityChanged { community }])
             }
             Command::RevokeInviteLink {
                 actor_id,
                 conversation_id,
                 invite_id,
+                revoked_at_ms,
             } => {
                 let mut community = self
                     .state
@@ -1381,6 +2085,15 @@ impl MessagingEngine {
                     CommunityAdminAction::InviteMembers,
                 )?;
                 community.revoke_invite(&invite_id)?;
+                append_community_audit(
+                    &mut community,
+                    &actor_id,
+                    CommunityAuditAction::InviteRevoked,
+                    None,
+                    Some(format!("invite:{invite_id}")),
+                    None,
+                    revoked_at_ms,
+                );
                 Ok(vec![Event::CommunityChanged { community }])
             }
             Command::RequestCommunityJoin { actor_id, request } => {
@@ -1388,14 +2101,47 @@ impl MessagingEngine {
                     return Err(EngineError::CommunityPermissionDenied);
                 }
                 self.require_actor(&actor_id)?;
-                self.require_conversation(&request.conversation_id)?;
+                let conversation = self.require_conversation(&request.conversation_id)?;
+                if !matches!(
+                    conversation.kind,
+                    ConversationKind::Group | ConversationKind::Channel
+                ) {
+                    return Err(EngineError::CommunityPermissionDenied);
+                }
+                let requested_actor_id = request.actor_id.clone();
+                let requested_at_ms = request.requested_at_ms;
                 let mut community = self
                     .state
                     .communities
                     .get(&request.conversation_id)
                     .cloned()
-                    .unwrap_or_else(|| CommunityState::new(request.conversation_id.clone()));
+                    .ok_or_else(|| {
+                        EngineError::CommunityNotFound(request.conversation_id.clone())
+                    })?;
+                if community
+                    .members
+                    .get(&actor_id)
+                    .is_some_and(|member| matches!(member.status, MemberStatus::Banned))
+                {
+                    return Err(EngineError::CommunityPermissionDenied);
+                }
+                if community
+                    .public_username
+                    .as_deref()
+                    .is_none_or(|username| username.trim().is_empty())
+                {
+                    return Err(EngineError::CommunityPermissionDenied);
+                }
                 community.request_join(request);
+                append_community_audit(
+                    &mut community,
+                    &actor_id,
+                    CommunityAuditAction::MemberChanged,
+                    Some(requested_actor_id),
+                    Some("join-request".into()),
+                    None,
+                    requested_at_ms,
+                );
                 Ok(vec![Event::CommunityChanged { community }])
             }
             Command::RespondCommunityJoin {
@@ -1418,13 +2164,57 @@ impl MessagingEngine {
                 )?;
                 if approved {
                     community.approve_join(&requester_id, &actor_id, decided_at_ms)?;
+                    append_community_audit(
+                        &mut community,
+                        &actor_id,
+                        CommunityAuditAction::JoinApproved,
+                        Some(requester_id.clone()),
+                        None,
+                        None,
+                        decided_at_ms,
+                    );
                 } else {
                     community
                         .pending_join_requests
                         .remove(&requester_id)
                         .ok_or_else(|| CommunityError::JoinRequestNotFound(requester_id.clone()))?;
+                    append_community_audit(
+                        &mut community,
+                        &actor_id,
+                        CommunityAuditAction::JoinRejected,
+                        Some(requester_id.clone()),
+                        None,
+                        None,
+                        decided_at_ms,
+                    );
                 }
-                Ok(vec![Event::CommunityChanged { community }])
+                let participant_event = if approved
+                    && self
+                        .state
+                        .conversations
+                        .get(&conversation_id)
+                        .is_some_and(|conversation| {
+                            matches!(
+                                conversation.kind,
+                                ConversationKind::Group | ConversationKind::Channel
+                            )
+                        }) {
+                    community
+                        .members
+                        .get(&requester_id)
+                        .and_then(participant_for_community_member)
+                        .map(|participant| Event::ConversationParticipantUpserted {
+                            conversation_id: conversation_id.clone(),
+                            participant,
+                        })
+                } else {
+                    None
+                };
+                let mut events = vec![Event::CommunityChanged { community }];
+                if let Some(event) = participant_event {
+                    events.push(event);
+                }
+                Ok(events)
             }
             Command::UpsertForumTopic { actor_id, topic } => {
                 let mut community = self
@@ -1434,10 +2224,25 @@ impl MessagingEngine {
                     .cloned()
                     .ok_or_else(|| EngineError::CommunityNotFound(topic.conversation_id.clone()))?;
                 require_community_admin(&community, &actor_id, CommunityAdminAction::ManageTopics)?;
-                if topic.id.trim().is_empty() {
+                if topic.id.trim().is_empty()
+                    || topic.title.trim().is_empty()
+                    || topic.title.trim().len() > 128
+                    || topic.conversation_id != community.conversation_id
+                {
                     return Err(EngineError::CommunityPermissionDenied);
                 }
-                community.topics.insert(topic.id.clone(), topic);
+                let topic_id = topic.id.clone();
+                let created_at_ms = topic.created_at_ms;
+                community.topics.insert(topic_id.clone(), topic);
+                append_community_audit(
+                    &mut community,
+                    &actor_id,
+                    CommunityAuditAction::TopicUpserted,
+                    None,
+                    Some(format!("topic:{}", topic_id)),
+                    None,
+                    created_at_ms,
+                );
                 Ok(vec![Event::CommunityChanged { community }])
             }
             Command::DeleteForumTopic {
@@ -1453,6 +2258,15 @@ impl MessagingEngine {
                     .ok_or_else(|| EngineError::CommunityNotFound(conversation_id.clone()))?;
                 require_community_admin(&community, &actor_id, CommunityAdminAction::ManageTopics)?;
                 community.topics.remove(&topic_id);
+                append_community_audit(
+                    &mut community,
+                    &actor_id,
+                    CommunityAuditAction::TopicDeleted,
+                    None,
+                    Some(format!("topic:{}", topic_id)),
+                    None,
+                    0,
+                );
                 Ok(vec![Event::CommunityChanged { community }])
             }
             Command::RegisterBot { actor_id, profile } => {
@@ -1645,6 +2459,13 @@ impl MessagingEngine {
                 if let Some(drafts) = self.state.drafts.get_mut(&conversation_id) {
                     drafts.remove(&actor_id);
                 }
+                if let Some(topic_cursors) = self.state.topic_read_cursors.get_mut(&conversation_id)
+                {
+                    topic_cursors.remove(&actor_id);
+                }
+                if let Some(topic_drafts) = self.state.topic_drafts.get_mut(&conversation_id) {
+                    topic_drafts.remove(&actor_id);
+                }
                 if let Some(marked) = self.state.marked_unread_by_actor.get_mut(&conversation_id) {
                     marked.remove(&actor_id);
                 }
@@ -1731,7 +2552,19 @@ impl MessagingEngine {
                     .messages
                     .entry(message.conversation_id.clone())
                     .or_default()
-                    .insert(message.id.clone(), message);
+                    .insert(message.id.clone(), message.clone());
+                if let Some(thread_root) = &message.thread_root_message_id {
+                    if let Some(topic_id) = topic_id_from_root(thread_root) {
+                        if let Some(topic) = self
+                            .state
+                            .communities
+                            .get_mut(&message.conversation_id)
+                            .and_then(|community| community.topics.get_mut(topic_id))
+                        {
+                            topic.last_message_id = Some(message.id.0);
+                        }
+                    }
+                }
             }
             Event::MessageAcknowledged {
                 conversation_id,
@@ -1818,6 +2651,44 @@ impl MessagingEngine {
                     conversation.last_read_message_id = Some(message_id.0);
                     conversation.unread_count = 0;
                     conversation.marked_unread = false;
+                }
+            }
+            Event::TopicReadChanged {
+                conversation_id,
+                topic_id,
+                actor_id,
+                message_id,
+            } => {
+                self.state
+                    .topic_read_cursors
+                    .entry(conversation_id)
+                    .or_default()
+                    .entry(actor_id)
+                    .or_default()
+                    .insert(topic_id, message_id);
+            }
+            Event::TopicDraftChanged { draft } => {
+                if draft.text.trim().is_empty() && draft.reply_to_message_id.is_none() {
+                    if let Some(by_actor) = self.state.topic_drafts.get_mut(&draft.conversation_id)
+                    {
+                        if let Some(by_topic) = by_actor.get_mut(&draft.actor_id) {
+                            by_topic.remove(&draft.topic_id);
+                            if by_topic.is_empty() {
+                                by_actor.remove(&draft.actor_id);
+                            }
+                        }
+                        if by_actor.is_empty() {
+                            self.state.topic_drafts.remove(&draft.conversation_id);
+                        }
+                    }
+                } else {
+                    self.state
+                        .topic_drafts
+                        .entry(draft.conversation_id.clone())
+                        .or_default()
+                        .entry(draft.actor_id.clone())
+                        .or_default()
+                        .insert(draft.topic_id.clone(), draft);
                 }
             }
             Event::ReactionUpdated {

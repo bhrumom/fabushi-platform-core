@@ -567,6 +567,27 @@ fn conversation_management_enforces_owner_admin_boundaries_and_removal() {
         2,
     );
 
+    let mut community = CommunityState::new(ConversationId::new(conversation_id));
+    community.upsert_member(CommunityMember {
+        actor_id: ActorId::new("human:admin"),
+        status: MemberStatus::Administrator,
+        admin_title: None,
+        admin_rights: AdminRights {
+            add_admins: true,
+            ..AdminRights::default()
+        },
+        restrictions: MemberRestrictions::default(),
+        joined_at_ms: 2,
+        invited_by: Some(ActorId::new("human:owner")),
+    });
+    handle(
+        &mut service,
+        "human:owner",
+        "create-community",
+        ClientCommand::UpdateCommunity { community },
+        2,
+    );
+
     handle(
         &mut service,
         "human:admin",
