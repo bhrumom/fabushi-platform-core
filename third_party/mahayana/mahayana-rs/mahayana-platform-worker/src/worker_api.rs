@@ -425,6 +425,7 @@ mod listener_relay;
 mod marketplace;
 mod remote_computer;
 mod security;
+mod user_payment_proxy;
 
 use account::*;
 use ai_usage::*;
@@ -435,6 +436,7 @@ use listener_relay::*;
 use marketplace::*;
 use remote_computer::*;
 use security::constant_time_eq;
+use user_payment_proxy::*;
 
 #[event(fetch, respond_with_errors)]
 pub async fn main(request: Request, env: Env, _context: Context) -> Result<Response> {
@@ -573,6 +575,9 @@ pub async fn main(request: Request, env: Env, _context: Context) -> Result<Respo
             "/v1/pay/intents/:payment_id/apple/advanced-commerce",
             developer_commerce_proxy,
         )
+        .post_async("/v1/miniapps/:mini_app_id/pay/intents", user_payment_proxy)
+        .get_async("/v1/pay/intents/:payment_id", user_payment_proxy)
+        .post_async("/v1/pay/intents/:payment_id/checkout", user_payment_proxy)
         .post_async("/v1/plugins/:plugin_id/commerce/quote", commerce_quote)
         .post_async(
             "/v1/plugins/:plugin_id/commerce/purchase",

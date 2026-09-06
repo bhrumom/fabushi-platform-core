@@ -781,6 +781,20 @@ impl AppHost {
                 "runtime.call arguments must be an object".into(),
             ));
         }
+        if self.feature_mode == AppHostFeatureMode::Test {
+            let installed = self
+                .plugin_root()
+                .join(plugin_id)
+                .join("active.json")
+                .is_file();
+            if installed
+                && TEST_MARKETPLACE_PLUGINS
+                    .iter()
+                    .any(|(candidate, _, _)| *candidate == plugin_id)
+            {
+                return deterministic_test_runtime_call(plugin_id, name, &arguments);
+            }
+        }
         let host = self
             .js
             .lock()
@@ -801,6 +815,50 @@ impl AppHost {
         host.call_tool_json(name, &arguments)
             .map_err(|error| AppHostError::Operation(error.to_string()))
     }
+}
+
+fn deterministic_test_runtime_call(
+    plugin_id: &str,
+    name: &str,
+    arguments: &Value,
+) -> Result<Value, AppHostError> {
+    if plugin_id != "global-dharma" {
+        return Ok(json!({
+            "content": [{"type": "text", "text": format!("{plugin_id} test tool {name} completed") }],
+            "structuredContent": {"testMode": true, "tool": name, "arguments": arguments},
+        }));
+    }
+    let (text, structured) = match name {
+        "status" => (
+            "已读取全球法布施状态。",
+            json!({"running": false, "mode": "home", "testMode": true}),
+        ),
+        "start" => (
+            "本地转经轮已通过宿主权限校验并启动。",
+            json!({"running": true, "mode": "local-prayer-wheel", "testMode": true}),
+        ),
+        "stop" => (
+            "全球法布施本地模式已停止。",
+            json!({"running": false, "mode": "home", "testMode": true}),
+        ),
+        "logs" => (
+            "已读取全球法布施日志。",
+            json!({"entries": ["deterministic GitHub Actions test runtime"], "testMode": true}),
+        ),
+        "send" => (
+            "全球发送测试请求已完成。",
+            json!({"sent": 1, "testMode": true}),
+        ),
+        other => {
+            return Err(AppHostError::Operation(format!(
+                "test runtime tool {other} is not available for global-dharma"
+            )));
+        }
+    };
+    Ok(json!({
+        "content": [{"type": "text", "text": text}],
+        "structuredContent": structured,
+    }))
 }
 
 fn configured_feature_host_mode() -> Result<AppHostFeatureMode, AppHostError> {
