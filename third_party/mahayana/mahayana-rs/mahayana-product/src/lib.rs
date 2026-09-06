@@ -2828,7 +2828,9 @@ fn validate_ci_account_session(value: Value, now: i64) -> Result<Value, ProductE
         && token_is_safe
         && session_id.starts_with("ci-runner:")
         && device_id.starts_with("gha-")
-        && (device_id.ends_with("-interactive") || device_id.ends_with("-macos-app"))
+        && (device_id.ends_with("-interactive")
+            || device_id.ends_with("-macos-app")
+            || device_id.ends_with("-windows-app"))
         && !username.is_empty()
         && username.chars().count() <= 320
         && user_id.is_some()
