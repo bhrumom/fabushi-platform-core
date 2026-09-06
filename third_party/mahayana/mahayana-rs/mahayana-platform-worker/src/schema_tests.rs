@@ -49,6 +49,28 @@ fn remote_computer_migration_keeps_control_plane_separate_from_desktop_data() {
 }
 
 #[test]
+fn marketplace_account_install_migration_is_account_scoped_and_manifest_projected() {
+    assert_eq!(
+        validate_marketplace_account_install_schema(MARKETPLACE_ACCOUNT_INSTALL_SCHEMA_V18),
+        Ok(())
+    );
+    for required in [
+        "PRIMARY KEY (account_user_id, plugin_id)",
+        "REFERENCES marketplace_plugins(plugin_id) ON DELETE RESTRICT",
+        "global-dharma-bot",
+        "open-miniapp",
+        "miniapp:global-dharma",
+    ] {
+        assert!(
+            MARKETPLACE_ACCOUNT_INSTALL_SCHEMA_V18.contains(required),
+            "missing {required}"
+        );
+    }
+    assert!(!MARKETPLACE_ACCOUNT_INSTALL_SCHEMA_V18.contains("access_token"));
+    assert!(!MARKETPLACE_ACCOUNT_INSTALL_SCHEMA_V18.contains("refresh_token"));
+}
+
+#[test]
 fn remote_computer_inventory_migration_is_additive_and_secret_free() {
     for required in [
         "provider TEXT NOT NULL DEFAULT 'fabushi-webrtc'",
@@ -198,6 +220,8 @@ fn worker_router_rejects_duplicate_developer_commerce_regressions() {
     let source = include_str!("worker_api.rs");
     let compact = source.split_whitespace().collect::<String>();
     for (method, route) in [
+        ("get", "/v1/marketplace/added"),
+        ("post", "/v1/marketplace/plugins/:plugin_id/add"),
         ("get", "/v1/developer/commerce/profile"),
         ("post", "/v1/developer/commerce/profile"),
         ("get", "/v1/developer/commerce/miniapps"),

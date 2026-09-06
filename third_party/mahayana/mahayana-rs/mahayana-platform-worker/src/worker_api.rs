@@ -108,6 +108,15 @@ struct MarketplacePluginRow {
 }
 
 #[derive(Debug, Deserialize)]
+struct MarketplaceInstalledPluginRow {
+    plugin_id: String,
+    display_name: String,
+    description: String,
+    latest_version: Option<String>,
+    projection_json: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct MarketplacePluginOwnerRow {
     publisher_user_id: String,
 }
@@ -520,6 +529,11 @@ pub async fn main(request: Request, env: Env, _context: Context) -> Result<Respo
             remote_computer_signal_drain,
         )
         .get_async("/v1/marketplace/plugins", marketplace_plugins)
+        .get_async("/v1/marketplace/added", marketplace_added)
+        .post_async(
+            "/v1/marketplace/plugins/:plugin_id/add",
+            marketplace_plugin_add,
+        )
         .post_async("/v1/marketplace/releases", marketplace_release_publish)
         .post_async(
             "/v1/marketplace/external-releases",

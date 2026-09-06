@@ -18,6 +18,8 @@ pub const REMOTE_COMPUTER_SESSION_PROVIDER_SCHEMA_V16: &str =
     include_str!("../migrations/0016_remote_computer_session_provider.sql");
 pub const REMOTE_COMPUTER_TRANSPORT_CONTRACT_SCHEMA_V17: &str =
     include_str!("../migrations/0017_remote_computer_transport_contract.sql");
+pub const MARKETPLACE_ACCOUNT_INSTALL_SCHEMA_V18: &str =
+    include_str!("../migrations/0018_marketplace_account_installs.sql");
 pub const WORKSPACE_MESSAGING_SCHEMA_V7: &str =
     include_str!("../migrations/0007_workspace_messaging.sql");
 pub const FABUSHI_PAY_SCHEMA_V7: &str = include_str!("../migrations/0007_fabushi_pay.sql");
@@ -129,6 +131,16 @@ pub fn validate_remote_computer_schema(schema: &str) -> Result<(), SchemaError> 
             "remote_computer_clients",
             "remote_computer_sessions",
             "remote_computer_signals",
+        ],
+    )
+}
+
+pub fn validate_marketplace_account_install_schema(schema: &str) -> Result<(), SchemaError> {
+    require_tables(
+        schema,
+        &[
+            "marketplace_plugin_projections",
+            "account_marketplace_installs",
         ],
     )
 }

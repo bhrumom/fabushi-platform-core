@@ -75,6 +75,157 @@ pub(super) async fn marketplace_plugins(
     Response::from_json(&json!({"plugins": plugins}))
 }
 
+fn marketplace_installed_projection(row: &MarketplaceInstalledPluginRow) -> Value {
+    let mut projection = row
+        .projection_json
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<Value>(value).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| {
+            json!({
+                "id": row.plugin_id,
+                "title": row.display_name,
+                "description": row.description,
+            })
+        });
+    if let Some(object) = projection.as_object_mut() {
+        object.insert("id".into(), Value::String(row.plugin_id.clone()));
+        object.insert("pluginId".into(), Value::String(row.plugin_id.clone()));
+        object.insert("title".into(), Value::String(row.display_name.clone()));
+        object.insert("description".into(), Value::String(row.description.clone()));
+        if let Some(version) = row.latest_version.as_ref() {
+            object.insert("version".into(), Value::String(version.clone()));
+        }
+    }
+    projection
+}
+
+pub(super) async fn marketplace_added(
+    request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_account(&request, &context.env) {
+        Ok(account) => account,
+        Err(_) => {
+            return error_response(
+                401,
+                "unauthorized",
+                "A valid Mahayana account token is required to read installed marketplace apps.",
+            );
+        }
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let rows = worker::query!(
+        &database,
+        "SELECT mp.plugin_id, mp.display_name, mp.description, mp.latest_version,
+                mpp.projection_json
+         FROM account_marketplace_installs ami
+         JOIN marketplace_plugins mp ON mp.plugin_id = ami.plugin_id
+         JOIN plugin_releases pr
+           ON pr.plugin_id = mp.plugin_id AND pr.version = mp.latest_version
+         LEFT JOIN marketplace_plugin_projections mpp ON mpp.plugin_id = mp.plugin_id
+         WHERE ami.account_user_id = ?1
+           AND mp.visibility = 'public' AND mp.review_state = 'approved'
+           AND pr.release_status = 'approved' AND pr.deployment_url <> ''
+         ORDER BY ami.updated_at DESC, mp.plugin_id ASC",
+        &account.user_id
+    )?
+    .all()
+    .await?
+    .results::<MarketplaceInstalledPluginRow>()?;
+    let apps = rows
+        .iter()
+        .map(marketplace_installed_projection)
+        .collect::<Vec<_>>();
+    Response::from_json(&json!({
+        "protocol": "fabushi.miniapp.marketplace.v2",
+        "accountSynchronized": true,
+        "apps": apps,
+    }))
+}
+
+pub(super) async fn marketplace_plugin_add(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_account(&request, &context.env) {
+        Ok(account) => account,
+        Err(_) => {
+            return error_response(
+                401,
+                "unauthorized",
+                "A valid Mahayana account token is required to install marketplace apps.",
+            );
+        }
+    };
+    let plugin_id = route_identifier(&context, "plugin_id")?.to_string();
+    let body = request.json::<Value>().await.unwrap_or(Value::Null);
+    let platform = body
+        .get("platform")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown");
+    if platform.len() > 64
+        || !platform
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return error_response(
+            400,
+            "invalid_marketplace_platform",
+            "platform must be a normalized identifier.",
+        );
+    }
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let row = worker::query!(
+        &database,
+        "SELECT mp.plugin_id, mp.display_name, mp.description, mp.latest_version,
+                mpp.projection_json
+         FROM marketplace_plugins mp
+         JOIN plugin_releases pr
+           ON pr.plugin_id = mp.plugin_id AND pr.version = mp.latest_version
+         LEFT JOIN marketplace_plugin_projections mpp ON mpp.plugin_id = mp.plugin_id
+         WHERE mp.plugin_id = ?1
+           AND mp.visibility = 'public' AND mp.review_state = 'approved'
+           AND pr.release_status = 'approved' AND pr.deployment_url <> ''",
+        &plugin_id
+    )?
+    .first::<MarketplaceInstalledPluginRow>(None)
+    .await?;
+    let Some(row) = row else {
+        return error_response(
+            404,
+            "marketplace_plugin_not_found",
+            "The approved marketplace plugin does not exist.",
+        );
+    };
+    let now = now_seconds();
+    worker::query!(
+        &database,
+        "INSERT INTO account_marketplace_installs
+         (account_user_id, plugin_id, platform, installed_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?4)
+         ON CONFLICT(account_user_id, plugin_id) DO UPDATE SET
+           platform = excluded.platform,
+           updated_at = excluded.updated_at",
+        &account.user_id,
+        &plugin_id,
+        platform,
+        now
+    )?
+    .run()
+    .await?;
+    let app = marketplace_installed_projection(&row);
+    Response::from_json(&json!({
+        "added": true,
+        "accountSynchronized": true,
+        "pluginId": plugin_id,
+        "bot": app.get("bot").cloned().unwrap_or(Value::Null),
+        "app": app,
+    }))
+}
+
 pub(super) async fn marketplace_release_publish(
     mut request: Request,
     context: RouteContext<()>,
