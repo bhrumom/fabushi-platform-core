@@ -2243,6 +2243,106 @@ pub(super) async fn revoke_account_session(
     Ok(())
 }
 
+async fn ensure_bound_account_session_active(
+    env: &Env,
+    user_id: &str,
+    session_id: &str,
+) -> Result<()> {
+    #[derive(Debug, Deserialize)]
+    struct BoundSessionRow {
+        user_id: String,
+        expires_at: i64,
+        revoked_at: Option<i64>,
+    }
+
+    if user_id.trim().is_empty() || session_id.trim().is_empty() {
+        return Err(worker::Error::RustError(
+            "invalid session-bound account claims".into(),
+        ));
+    }
+    let database = env.d1(ACCOUNT_DATABASE_BINDING)?;
+    let row = worker::query!(
+        &database,
+        "SELECT user_id, expires_at, revoked_at FROM account_sessions
+         WHERE session_id = ?1 LIMIT 1",
+        session_id
+    )?
+    .first::<BoundSessionRow>(None)
+    .await?;
+    let Some(row) = row else {
+        return Err(worker::Error::RustError(
+            "account session is not active".into(),
+        ));
+    };
+    if row.user_id != user_id || row.revoked_at.is_some() || row.expires_at <= now_seconds() {
+        return Err(worker::Error::RustError(
+            "account session is not active".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(super) async fn authenticated_session_account(
+    request: &Request,
+    env: &Env,
+) -> Result<AuthenticatedAccount> {
+    let account = authenticated_account(request, env)?;
+    let Some(session_id) = account.session_id.as_deref() else {
+        return Err(worker::Error::RustError(
+            "session-backed Fabushi account required".into(),
+        ));
+    };
+    ensure_bound_account_session_active(env, &account.user_id, session_id).await?;
+    Ok(account)
+}
+
+pub(super) async fn authenticated_plugin_account(
+    request: &Request,
+    env: &Env,
+    plugin_id: &str,
+) -> Result<AuthenticatedAccount> {
+    if !is_identifier(plugin_id) {
+        return Err(worker::Error::RustError(
+            "invalid delegated plugin id".into(),
+        ));
+    }
+    let authorization = request
+        .headers()
+        .get("Authorization")?
+        .ok_or_else(|| worker::Error::RustError("missing Authorization header".into()))?;
+    let token = authorization
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| worker::Error::RustError("invalid Authorization scheme".into()))?;
+    let public_key = env.secret("ACCESS_TOKEN_PUBLIC_KEY_PEM")?.to_string();
+    let key = DecodingKey::from_rsa_pem(public_key.as_bytes()).map_err(jwt_error)?;
+    let audience = format!("plugin:{plugin_id}");
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_issuer(&[ACCESS_TOKEN_ISSUER]);
+    validation.set_audience(&[audience.as_str()]);
+    let claims = decode::<PluginAccessTokenClaims>(token, &key, &validation)
+        .map_err(jwt_error)?
+        .claims;
+    let expected_scope = format!("miniapp:{plugin_id}");
+    if claims.token_use != "plugin"
+        || claims.sub.trim().is_empty()
+        || claims.sid.trim().is_empty()
+        || claims.device_id.trim().is_empty()
+        || claims.scope.len() != 1
+        || claims.scope.first().map(String::as_str) != Some(expected_scope.as_str())
+    {
+        return Err(worker::Error::RustError(
+            "invalid plugin access token claims".into(),
+        ));
+    }
+    ensure_bound_account_session_active(env, &claims.sub, &claims.sid).await?;
+    Ok(AuthenticatedAccount {
+        user_id: claims.sub,
+        session_id: Some(claims.sid),
+        scopes: claims.scope,
+        is_test_account: false,
+    })
+}
+
 pub(super) fn authenticated_user(request: &Request, env: &Env) -> Result<String> {
     Ok(authenticated_account(request, env)?.user_id)
 }

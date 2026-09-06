@@ -56,6 +56,8 @@ pub struct PluginAccessTokenClaims {
     pub aud: String,
     pub scope: Vec<String>,
     pub device_id: String,
+    /// Parent Fabushi account session. Protected plugin reads re-check this session server-side.
+    pub sid: String,
     pub jti: String,
     pub iat: usize,
     pub exp: usize,

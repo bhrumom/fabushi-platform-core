@@ -301,8 +301,20 @@ pub(super) async fn commerce_entitlement(
     request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let user_id = authenticated_user(&request, &context.env)?;
     let plugin_id = route_identifier(&context, "plugin_id")?;
+    let user_id = match authenticated_user(&request, &context.env) {
+        Ok(user_id) => user_id,
+        Err(_) => match authenticated_plugin_account(&request, &context.env, plugin_id).await {
+            Ok(account) => account.user_id,
+            Err(_) => {
+                return error_response(
+                    401,
+                    "authentication_required",
+                    "active Fabushi account or matching Mini App session required",
+                );
+            }
+        },
+    };
     let capability = route_identifier(&context, "capability")?;
     let database = context.env.d1(DATABASE_BINDING)?;
     let now = now_seconds();
@@ -477,32 +489,48 @@ pub(super) async fn delegated_plugin_token(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let user_id = authenticated_user(&request, &context.env)?;
+    let account = match authenticated_session_account(&request, &context.env).await {
+        Ok(account) => account,
+        Err(_) => {
+            return error_response(
+                401,
+                "session_required",
+                "active Fabushi account session required for Mini App credential bootstrap",
+            );
+        }
+    };
+    let Some(session_id) = account.session_id.clone() else {
+        return error_response(
+            401,
+            "session_required",
+            "active Fabushi account session required",
+        );
+    };
     let delegated: DelegatedTokenRequest = request.json().await?;
     validate_delegated_request(&delegated)?;
     let now = now_seconds() as usize;
     let expires_at = now + 300;
     let claims = PluginAccessTokenClaims {
         iss: ACCESS_TOKEN_ISSUER.to_string(),
-        sub: user_id,
+        sub: account.user_id,
         aud: format!("plugin:{}", delegated.plugin_id),
         scope: delegated.scopes,
         device_id: delegated.device_id,
+        sid: session_id,
         jti: Uuid::new_v4().to_string(),
         iat: now,
         exp: expires_at,
         token_use: "plugin".to_string(),
     };
+    // Reuse the canonical account signing key so every verifier can use the existing
+    // public JWKS. token_use + audience + exact scope keep delegated tokens distinct.
     let private_key = context
         .env
-        .secret("PLUGIN_TOKEN_PRIVATE_KEY_PEM")?
+        .secret("ACCESS_TOKEN_PRIVATE_KEY_PEM")?
         .to_string();
     let mut header = Header::new(Algorithm::RS256);
-    header.kid = context
-        .env
-        .var("PLUGIN_TOKEN_KEY_ID")
-        .ok()
-        .map(|value| value.to_string());
+    header.typ = Some("JWT".to_string());
+    header.kid = Some(context.env.var("ACCESS_TOKEN_KEY_ID")?.to_string());
     let key = EncodingKey::from_rsa_pem(private_key.as_bytes()).map_err(jwt_error)?;
     let token = encode(&header, &claims, &key).map_err(jwt_error)?;
     Response::from_json(&json!({
@@ -510,6 +538,42 @@ pub(super) async fn delegated_plugin_token(
         "tokenType": "Bearer",
         "expiresIn": 300,
         "expiresAt": expires_at,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DelegatedTokenIntrospectRequest {
+    plugin_id: String,
+}
+
+pub(super) async fn delegated_plugin_token_introspect(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    if request.method() != Method::Post {
+        return error_response(405, "method_not_allowed", "POST required");
+    }
+    let body: DelegatedTokenIntrospectRequest = request.json().await?;
+    if !is_identifier(&body.plugin_id) {
+        return error_response(400, "invalid_plugin_id", "invalid delegated plugin id");
+    }
+    let account = match authenticated_plugin_account(&request, &context.env, &body.plugin_id).await
+    {
+        Ok(account) => account,
+        Err(_) => {
+            return error_response(
+                401,
+                "invalid_plugin_token",
+                "Mini App credential is invalid, expired, or its Fabushi session was revoked",
+            );
+        }
+    };
+    Response::from_json(&json!({
+        "active": true,
+        "pluginId": body.plugin_id,
+        "sessionBound": true,
+        "user": { "id": account.user_id },
     }))
 }
 
@@ -524,14 +588,16 @@ fn validate_delegated_request(request: &DelegatedTokenRequest) -> Result<()> {
             "invalid delegated device id".into(),
         ));
     }
-    if request.scopes.len() > 32
+    let expected_scope = format!("miniapp:{}", request.plugin_id);
+    if request.scopes.len() != 1
+        || request.scopes.first().map(String::as_str) != Some(expected_scope.as_str())
         || request
             .scopes
             .iter()
             .any(|scope| scope.len() > 96 || !is_scope(scope))
     {
         return Err(worker::Error::RustError(
-            "invalid delegated token scopes".into(),
+            "delegated token must contain only the matching Mini App scope".into(),
         ));
     }
     Ok(())

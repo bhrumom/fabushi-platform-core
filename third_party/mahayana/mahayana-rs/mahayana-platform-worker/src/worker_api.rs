@@ -469,6 +469,10 @@ pub async fn main(request: Request, env: Env, _context: Context) -> Result<Respo
             Ok(Response::ok(jwks)?.with_headers(json_headers()))
         })
         .post_async("/v1/auth/plugin-token", delegated_plugin_token)
+        .post_async(
+            "/v1/auth/plugin-token/introspect",
+            delegated_plugin_token_introspect,
+        )
         .get_async("/v1/ai/usage", ai_usage_status)
         .post_async("/v1/ai/usage/reservations", ai_usage_reserve)
         .post_async(
