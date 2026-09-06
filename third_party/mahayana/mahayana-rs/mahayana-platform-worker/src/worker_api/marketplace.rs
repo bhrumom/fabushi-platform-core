@@ -226,6 +226,84 @@ pub(super) async fn marketplace_plugin_add(
     }))
 }
 
+pub(super) async fn marketplace_plugin_route(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    use crate::marketplace_route::{MarketplaceRouteError, route_marketplace_input};
+
+    let account = match authenticated_account(&request, &context.env) {
+        Ok(account) => account,
+        Err(_) => {
+            return error_response(
+                401,
+                "unauthorized",
+                "A valid Mahayana account token is required to route marketplace app input.",
+            );
+        }
+    };
+    let plugin_id = route_identifier(&context, "plugin_id")?.to_string();
+    let body = request.json::<Value>().await.unwrap_or(Value::Null);
+    let input = body
+        .get("input")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let row = worker::query!(
+        &database,
+        "SELECT mp.plugin_id, mp.display_name, mp.description, mp.latest_version,
+                mpp.projection_json
+         FROM account_marketplace_installs ami
+         JOIN marketplace_plugins mp ON mp.plugin_id = ami.plugin_id
+         JOIN plugin_releases pr
+           ON pr.plugin_id = mp.plugin_id AND pr.version = mp.latest_version
+         LEFT JOIN marketplace_plugin_projections mpp ON mpp.plugin_id = mp.plugin_id
+         WHERE ami.account_user_id = ?1 AND mp.plugin_id = ?2
+           AND mp.visibility = 'public' AND mp.review_state = 'approved'
+           AND pr.release_status = 'approved' AND pr.deployment_url <> ''",
+        &account.user_id,
+        &plugin_id
+    )?
+    .first::<MarketplaceInstalledPluginRow>(None)
+    .await?;
+    let Some(row) = row else {
+        return error_response(
+            404,
+            "marketplace_plugin_not_installed",
+            "The marketplace app is not installed for this account.",
+        );
+    };
+    let projection = marketplace_installed_projection(&row);
+    match route_marketplace_input(&plugin_id, &projection, input) {
+        Ok(payload) => Response::from_json(&payload),
+        Err(MarketplaceRouteError::InvalidInput) => error_response(
+            400,
+            "invalid_marketplace_input",
+            "input must be non-empty and at most 10000 bytes.",
+        ),
+        Err(MarketplaceRouteError::CommandMismatch) => error_response(
+            400,
+            "marketplace_command_mismatch",
+            "The slash command targets another marketplace app.",
+        ),
+        Err(MarketplaceRouteError::CommandNotFound) => error_response(
+            400,
+            "marketplace_command_not_found",
+            "The requested marketplace command is not declared.",
+        ),
+        Err(MarketplaceRouteError::InvalidArguments) => error_response(
+            400,
+            "invalid_marketplace_command_arguments",
+            "Slash command arguments must be a JSON object.",
+        ),
+        Err(MarketplaceRouteError::InvalidProjection) => error_response(
+            409,
+            "invalid_marketplace_route_projection",
+            "The installed marketplace projection does not declare a valid command surface.",
+        ),
+    }
+}
+
 pub(super) async fn marketplace_release_publish(
     mut request: Request,
     context: RouteContext<()>,

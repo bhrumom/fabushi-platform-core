@@ -534,6 +534,10 @@ pub async fn main(request: Request, env: Env, _context: Context) -> Result<Respo
             "/v1/marketplace/plugins/:plugin_id/add",
             marketplace_plugin_add,
         )
+        .post_async(
+            "/v1/marketplace/plugins/:plugin_id/route",
+            marketplace_plugin_route,
+        )
         .post_async("/v1/marketplace/releases", marketplace_release_publish)
         .post_async(
             "/v1/marketplace/external-releases",

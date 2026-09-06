@@ -6,6 +6,9 @@ mod auth;
 #[cfg(any(target_arch = "wasm32", test))]
 mod capability_access;
 
+#[cfg(any(target_arch = "wasm32", test))]
+mod marketplace_route;
+
 pub const PLATFORM_SCHEMA_V1: &str = include_str!("../migrations/0001_platform.sql");
 pub const CI_RUNNER_AUTH_SOURCE_V1: &str = include_str!("worker_api/ci_runner.rs");
 pub const LISTENER_RELAY_SCHEMA_V5: &str = include_str!("../migrations/0005_listener_relay.sql");
@@ -20,6 +23,8 @@ pub const REMOTE_COMPUTER_TRANSPORT_CONTRACT_SCHEMA_V17: &str =
     include_str!("../migrations/0017_remote_computer_transport_contract.sql");
 pub const MARKETPLACE_ACCOUNT_INSTALL_SCHEMA_V18: &str =
     include_str!("../migrations/0018_marketplace_account_installs.sql");
+pub const MARKETPLACE_ROUTE_PROJECTION_SCHEMA_V19: &str =
+    include_str!("../migrations/0019_marketplace_route_projection.sql");
 pub const WORKSPACE_MESSAGING_SCHEMA_V7: &str =
     include_str!("../migrations/0007_workspace_messaging.sql");
 pub const FABUSHI_PAY_SCHEMA_V7: &str = include_str!("../migrations/0007_fabushi_pay.sql");
