@@ -54,6 +54,62 @@ fn natural_score(command: &Value, normalized: &str) -> usize {
         .count()
 }
 
+fn natural_arguments(command: &Value, input: &str) -> Value {
+    let Some(argument_name) = command
+        .get("naturalLanguageArgument")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    else {
+        return json!({"input": input});
+    };
+
+    let mut prefixes = Vec::new();
+    if let Some(name) = command.get("name").and_then(Value::as_str) {
+        prefixes.push(name.trim().to_string());
+    }
+    prefixes.extend(strings(command, "aliases"));
+    prefixes.extend(strings(command, "naturalLanguageHints"));
+    prefixes.sort_by_key(|phrase| std::cmp::Reverse(phrase.chars().count()));
+
+    let normalized = input.trim().to_lowercase();
+    let mut content = input.trim();
+    for prefix in prefixes {
+        let prefix = prefix.trim();
+        if prefix.is_empty() {
+            continue;
+        }
+        let normalized_prefix = prefix.to_lowercase();
+        if !normalized.starts_with(&normalized_prefix) {
+            continue;
+        }
+        if let Some(remainder) = content.get(prefix.len()..) {
+            let stripped = remainder.trim_start_matches(|character: char| {
+                character.is_whitespace()
+                    || matches!(character, ':' | '：' | '-' | '—' | ',' | '，')
+            });
+            if !stripped.is_empty() {
+                content = stripped;
+            }
+        }
+        break;
+    }
+
+    let mut arguments = serde_json::Map::new();
+    arguments.insert(
+        argument_name.to_string(),
+        Value::String(
+            if content.is_empty() {
+                input.trim()
+            } else {
+                content
+            }
+            .to_string(),
+        ),
+    );
+    Value::Object(arguments)
+}
+
 fn dispatch(
     plugin_id: &str,
     projection: &Value,
@@ -176,7 +232,12 @@ pub(crate) fn route_marketplace_input(
         }
     }
     if let Some((command, score)) = best.filter(|(_, score)| *score > 0) {
-        return dispatch(plugin_id, projection, command, json!({"input": input}));
+        return dispatch(
+            plugin_id,
+            projection,
+            command,
+            natural_arguments(command, input),
+        );
     }
     let surface = projection
         .get("surfaces")
@@ -193,4 +254,45 @@ pub(crate) fn route_marketplace_input(
         "surface": surface,
         "requiresMahayanaPlanning": true,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn projection() -> Value {
+        json!({
+            "bot": {"id": "global-dharma-bot"},
+            "surfaces": [{"id": "remote-mcp", "kind": "mcp-http", "url": "https://api.example/mcp"}],
+            "commands": [{
+                "name": "send",
+                "description": "发送一条法布施内容。",
+                "surfaceId": "remote-mcp",
+                "tool": "send",
+                "approval": "required",
+                "aliases": ["发送"],
+                "naturalLanguageHints": ["发送法布施内容", "全球发送"],
+                "naturalLanguageArgument": "content"
+            }]
+        })
+    }
+
+    #[test]
+    fn maps_natural_language_send_payload_to_content() {
+        let routed = route_marketplace_input("global-dharma", &projection(), "发送金刚经").unwrap();
+        assert_eq!(routed.pointer("/command/tool"), Some(&json!("send")));
+        assert_eq!(routed.pointer("/arguments/content"), Some(&json!("金刚经")));
+        assert!(routed.pointer("/arguments/input").is_none());
+    }
+
+    #[test]
+    fn keeps_explicit_slash_arguments_exact() {
+        let routed = route_marketplace_input(
+            "global-dharma",
+            &projection(),
+            "/global-dharma:send {\"content\":\"心经\"}",
+        )
+        .unwrap();
+        assert_eq!(routed.pointer("/arguments/content"), Some(&json!("心经")));
+    }
 }
