@@ -11,14 +11,18 @@ pub(super) async fn marketplace_plugins(
             query = format!("%{}%", value.trim());
         } else if key == "platform" && !value.trim().is_empty() {
             let value = value.trim().to_string();
-            if !matches!(value.as_str(), "cli" | "desktop" | "mobile" | "web") {
-                return error_response(
-                    400,
-                    "invalid_marketplace_platform",
-                    "platform must be cli, desktop, mobile, or web.",
-                );
-            }
-            platform = Some(value);
+            let normalized_platform = match value.as_str() {
+                "ios" | "android" => "mobile",
+                "cli" | "desktop" | "mobile" | "web" => value.as_str(),
+                _ => {
+                    return error_response(
+                        400,
+                        "invalid_marketplace_platform",
+                        "platform must be cli, desktop, mobile, web, ios, or android.",
+                    );
+                }
+            };
+            platform = Some(normalized_platform.to_string());
         }
     }
     let platform_pattern = platform

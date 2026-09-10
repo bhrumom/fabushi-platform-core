@@ -30,6 +30,14 @@ worker = { path = "../mahayana-pay-worker/worker-compat" }
 codegen-units = 1
 lto = "thin"
 opt-level = "z"
-strip = "symbols"
+# wasm-bindgen requires the externref table in release Wasm output; stripping
+# symbols removes it. Keep debug info stripped while preserving Wasm metadata.
+strip = "debuginfo"
+
+# Cloudflare's build image does not need the optional wasm-opt download for
+# this worker. Keeping the bindgen output unoptimized also avoids making a
+# production deploy depend on an external binary mirror.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
 
 [workspace]

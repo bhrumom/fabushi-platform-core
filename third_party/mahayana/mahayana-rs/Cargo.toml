@@ -180,7 +180,9 @@ codegen-units = 256
 codegen-units = 1
 lto = "thin"
 opt-level = "z"
-strip = "symbols"
+# wasm-bindgen requires the externref table in release Wasm output; stripping
+# symbols removes it. Keep debug info stripped while preserving Wasm metadata.
+strip = "debuginfo"
 
 # Compatibility crates still use the audited upstream patches while they are
 # isolated behind explicit adapters. Native Mahayana crates do not depend on

@@ -261,7 +261,9 @@ pub async fn create_intent(mut request: Request, context: RouteContext<()>) -> R
                 worker::Error::RustError("invalid payment provider product configuration".into())
             })?;
     let provider_product_ref = provider_refs.get(rail).cloned();
-    if rail != "credits" && provider_product_ref.as_deref().is_none_or(str::is_empty) {
+    if !matches!(rail, "credits" | "web_provider" | "merchant_provider")
+        && provider_product_ref.as_deref().is_none_or(str::is_empty)
+    {
         return error_response(
             409,
             "provider_product_missing",
@@ -374,11 +376,30 @@ pub async fn checkout_action(request: Request, context: RouteContext<()>) -> Res
         }),
         "web_provider" | "merchant_provider" => {
             let base = env_string(&context.env, "FABUSHI_PAY_CHECKOUT_URL")?;
+            let checkout_token = checkout_token(&context.env, &payment)?;
             let separator = if base.contains('?') { '&' } else { '?' };
-            json!({
+            let checkout_url = format!(
+                "{base}{separator}paymentId={}&checkoutToken={}",
+                payment.payment_id, checkout_token
+            );
+            let mut action = json!({
                 "kind": "redirect",
-                "url": format!("{base}{separator}paymentId={}", payment.payment_id),
-            })
+                "url": checkout_url,
+            });
+            if let Some(alipay_base) =
+                optional_env_string(&context.env, "FABUSHI_PAY_ALIPAY_CHECKOUT_URL")
+            {
+                let alipay_separator = if alipay_base.contains('?') { '&' } else { '?' };
+                action["alternatives"] = json!([{
+                    "provider": "alipay",
+                    "kind": "redirect",
+                    "url": format!(
+                        "{alipay_base}{alipay_separator}paymentId={}&checkoutToken={}",
+                        payment.payment_id, checkout_token
+                    ),
+                }]);
+            }
+            action
         }
         _ => return error_response(409, "unsupported_rail", "payment rail is not supported"),
     };
@@ -622,6 +643,7 @@ pub async fn provider_webhook(mut request: Request, context: RouteContext<()>) -
         provider.as_str(),
         "web"
             | "merchant"
+            | "stripe"
             | "stripe_connect"
             | "adyen_platform"
             | "paypal_multiparty"
@@ -1799,6 +1821,22 @@ fn env_string(env: &Env, name: &str) -> Result<String> {
     )))
 }
 
+fn optional_env_string(env: &Env, name: &str) -> Option<String> {
+    if let Ok(value) = env.secret(name) {
+        let value = value.to_string();
+        if !value.trim().is_empty() {
+            return Some(value);
+        }
+    }
+    if let Ok(value) = env.var(name) {
+        let value = value.to_string();
+        if !value.trim().is_empty() {
+            return Some(value);
+        }
+    }
+    None
+}
+
 fn now_seconds() -> i64 {
     (worker::Date::now().as_millis() / 1000.0) as i64
 }
@@ -1806,6 +1844,45 @@ fn now_seconds() -> i64 {
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn checkout_token(env: &Env, payment: &PaymentIntentRow) -> Result<String> {
+    let secret = env_string(env, "FABUSHI_PAY_WEBHOOK_SECRET")?;
+    let payload = json!({
+        "v": 1,
+        "paymentId": payment.payment_id,
+        "userId": payment.user_id,
+        "exp": now_seconds().saturating_add(15 * 60),
+    })
+    .to_string();
+    let encoded_payload =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.as_bytes());
+    let signature = hmac_sha256(secret.as_bytes(), encoded_payload.as_bytes());
+    Ok(format!(
+        "{encoded_payload}.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature)
+    ))
+}
+
+fn hmac_sha256(key: &[u8], message: &[u8]) -> Vec<u8> {
+    const BLOCK_SIZE: usize = 64;
+    let mut normalized = if key.len() > BLOCK_SIZE {
+        Sha256::digest(key).to_vec()
+    } else {
+        key.to_vec()
+    };
+    normalized.resize(BLOCK_SIZE, 0);
+
+    let mut inner = Vec::with_capacity(BLOCK_SIZE + message.len());
+    let mut outer = Vec::with_capacity(BLOCK_SIZE + 32);
+    for byte in &normalized {
+        inner.push(*byte ^ 0x36);
+        outer.push(*byte ^ 0x5c);
+    }
+    inner.extend_from_slice(message);
+    let inner_digest = Sha256::digest(inner);
+    outer.extend_from_slice(&inner_digest);
+    Sha256::digest(outer).to_vec()
 }
 
 fn d1_changes(result: &worker::D1Result) -> usize {

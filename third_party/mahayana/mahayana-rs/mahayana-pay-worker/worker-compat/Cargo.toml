@@ -1,6 +1,9 @@
 [package]
 name = "worker"
-version = "0.8.5-fabushi.1"
+# Keep the wrapper's semantic version compatible with worker-build's package
+# detection. The implementation remains a local compatibility layer around
+# worker-real, so this does not change the upstream worker-rs dependency.
+version = "0.8.5"
 edition = "2024"
 license = "Apache-2.0"
 publish = false

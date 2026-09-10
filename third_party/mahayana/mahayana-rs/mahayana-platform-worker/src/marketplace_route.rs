@@ -231,7 +231,7 @@ pub(crate) fn route_marketplace_input(
             best = Some((command, score));
         }
     }
-    if let Some((command, score)) = best.filter(|(_, score)| *score > 0) {
+    if let Some((command, _score)) = best.filter(|(_, score)| *score > 0) {
         return dispatch(
             plugin_id,
             projection,

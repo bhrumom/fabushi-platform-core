@@ -89,15 +89,14 @@ pub fn validate_product_draft(input: &DeveloperProductDraft) -> Result<(), Catal
     } else if input.subscription_period_seconds.is_some() {
         return Err(CatalogError::InvalidSubscriptionPeriod);
     }
-    if let Some(code) = input.tax_code.as_deref() {
-        if code.trim().is_empty()
+    if let Some(code) = input.tax_code.as_deref()
+        && (code.trim().is_empty()
             || code.len() > 64
             || !code
                 .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
-        {
-            return Err(CatalogError::InvalidTaxCode);
-        }
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')))
+    {
+        return Err(CatalogError::InvalidTaxCode);
     }
     let rails = normalized_rails(input)?;
     if rails.iter().any(|rail| rail == "credits") && input.currency != "FBC" {

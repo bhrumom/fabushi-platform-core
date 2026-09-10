@@ -353,7 +353,19 @@ async fn create_product(mut req: Request, ctx: RouteContext<()>) -> Result<Respo
     let app = app_access(&ctx.env, &user, app_id, true).await?;
     let input: DeveloperProductDraft = req.json().await?;
     let id = format!("prod.{}", Uuid::new_v4().simple());
-    Response::from_json(&persist_product(&ctx.env, &user, &app, &id, &input, false).await?)
+    let mut result = persist_product(&ctx.env, &user, &app, &id, &input, false).await?;
+    if should_auto_sync_google(&input, &config(&ctx.env)) {
+        result["googleSync"] = match sync_google_product(&ctx.env, &user, app_id, &id).await {
+            Ok(sync) => sync,
+            Err(_) => json!({
+                "ok": false,
+                "provider": "google_play",
+                "status": 500,
+                "error": "Google catalog sync failed"
+            }),
+        };
+    }
+    Response::from_json(&result)
 }
 
 async fn update_product(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
@@ -370,7 +382,19 @@ async fn update_product(mut req: Request, ctx: RouteContext<()>) -> Result<Respo
     if old.sku != input.sku || old.product_kind != input.product_kind {
         return Response::error("sku and productKind are immutable", 409);
     }
-    Response::from_json(&persist_product(&ctx.env, &user, &app, id, &input, true).await?)
+    let mut result = persist_product(&ctx.env, &user, &app, id, &input, true).await?;
+    if should_auto_sync_google(&input, &config(&ctx.env)) {
+        result["googleSync"] = match sync_google_product(&ctx.env, &user, app_id, id).await {
+            Ok(sync) => sync,
+            Err(_) => json!({
+                "ok": false,
+                "provider": "google_play",
+                "status": 500,
+                "error": "Google catalog sync failed"
+            }),
+        };
+    }
+    Response::from_json(&result)
 }
 
 async fn apple_request(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
@@ -595,22 +619,17 @@ async fn send_google_json(
     Ok((status, bytes))
 }
 
-async fn sync_google(req: Request, ctx: RouteContext<()>) -> Result<Response> {
-    let user = require_developer(&req, &ctx.env)?;
-    if !env_enabled(&ctx.env, "GOOGLE_PLAY_CATALOG_SYNC_ENABLED") {
-        return Response::error("Google catalog sync is not enabled", 503);
-    }
-    let app_id = ctx
-        .param("mini_app_id")
-        .ok_or_else(|| worker::Error::RustError("missing app".into()))?;
-    let product_id = ctx
-        .param("product_id")
-        .ok_or_else(|| worker::Error::RustError("missing product".into()))?;
-    app_access(&ctx.env, &user, app_id, true).await?;
-    let p = product_row(&ctx.env, app_id, product_id).await?;
+async fn sync_google_product(
+    env: &Env,
+    user: &str,
+    app_id: &str,
+    product_id: &str,
+) -> Result<Value> {
+    app_access(env, user, app_id, true).await?;
+    let p = product_row(env, app_id, product_id).await?;
     let external = google_product_id(app_id, &p.sku);
     let spec = GoogleCatalogProduct {
-        package_name: env_text(&ctx.env, "GOOGLE_PLAY_PACKAGE_NAME")?,
+        package_name: env_text(env, "GOOGLE_PLAY_PACKAGE_NAME")?,
         product_id: external.clone(),
         display_name: p.display_name,
         description: p.description,
@@ -619,7 +638,7 @@ async fn sync_google(req: Request, ctx: RouteContext<()>) -> Result<Response> {
         amount_minor: p.amount,
         product_tax_category_code: p.tax_code,
     };
-    let token = google_token(&ctx.env).await?;
+    let token = google_token(env).await?;
 
     let conversion_call = build_google_price_conversion_request(&spec)
         .map_err(|e| worker::Error::RustError(e.to_string()))?;
@@ -636,9 +655,9 @@ async fn sync_google(req: Request, ctx: RouteContext<()>) -> Result<Response> {
             .take(500)
             .collect::<String>();
         let t = now();
-        worker::query!(&ctx.env.d1(DB)?,"UPDATE payment_provider_bindings SET sync_state='error',last_error=?1,updated_at=?2 WHERE product_id=?3 AND provider='google_play'",&error,t,product_id)?.run().await?;
-        return Response::from_json(
-            &json!({"ok":false,"stage":"convertRegionPrices","status":conversion_status,"error":error}),
+        worker::query!(&env.d1(DB)?,"UPDATE payment_provider_bindings SET sync_state='error',last_error=?1,updated_at=?2 WHERE product_id=?3 AND provider='google_play'",&error,t,product_id)?.run().await?;
+        return Ok(
+            json!({"ok":false,"stage":"convertRegionPrices","status":conversion_status,"error":error}),
         );
     }
     let converted: GoogleConvertedPrices =
@@ -659,18 +678,16 @@ async fn sync_google(req: Request, ctx: RouteContext<()>) -> Result<Response> {
             .chars()
             .take(500)
             .collect::<String>();
-        worker::query!(&ctx.env.d1(DB)?,"UPDATE payment_provider_bindings SET sync_state='error',last_error=?1,updated_at=?2 WHERE product_id=?3 AND provider='google_play'",&error,t,product_id)?.run().await?;
-        return Response::from_json(
-            &json!({"ok":false,"stage":"catalogSync","status":status,"error":error}),
-        );
+        worker::query!(&env.d1(DB)?,"UPDATE payment_provider_bindings SET sync_state='error',last_error=?1,updated_at=?2 WHERE product_id=?3 AND provider='google_play'",&error,t,product_id)?.run().await?;
+        return Ok(json!({"ok":false,"stage":"catalogSync","status":status,"error":error}));
     }
     let metadata = serde_json::json!({
         "regionVersion": converted.region_version.version,
         "convertedRegionCount": converted.converted_region_prices.len(),
     })
     .to_string();
-    activate_google_pay_rail(&ctx.env, product_id, &external, &metadata, t).await?;
-    Response::from_json(&json!({
+    activate_google_pay_rail(env, product_id, &external, &metadata, t).await?;
+    Ok(json!({
         "ok": true,
         "provider": "google_play",
         "externalProductRef": external,
@@ -678,6 +695,34 @@ async fn sync_google(req: Request, ctx: RouteContext<()>) -> Result<Response> {
         "regionVersion": converted.region_version.version,
         "convertedRegionCount": converted.converted_region_prices.len()
     }))
+}
+
+fn should_auto_sync_google(
+    input: &DeveloperProductDraft,
+    configuration: &ProviderConfiguration,
+) -> bool {
+    configuration.google_catalog_sync_enabled
+        && matches!(
+            input.product_kind.as_str(),
+            "digital_durable" | "digital_consumable" | "subscription"
+        )
+        && normalized_rails(input)
+            .map(|rails| rails.iter().any(|rail| rail == "google_play"))
+            .unwrap_or(false)
+}
+
+async fn sync_google(req: Request, ctx: RouteContext<()>) -> Result<Response> {
+    let user = require_developer(&req, &ctx.env)?;
+    if !env_enabled(&ctx.env, "GOOGLE_PLAY_CATALOG_SYNC_ENABLED") {
+        return Response::error("Google catalog sync is not enabled", 503);
+    }
+    let app_id = ctx
+        .param("mini_app_id")
+        .ok_or_else(|| worker::Error::RustError("missing app".into()))?;
+    let product_id = ctx
+        .param("product_id")
+        .ok_or_else(|| worker::Error::RustError("missing product".into()))?;
+    Response::from_json(&sync_google_product(&ctx.env, &user, app_id, product_id).await?)
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -25,6 +25,8 @@ routes = [
 [env.production.vars]
 APPLE_BUNDLE_ID = "com.ombhrum.fabushi"
 GOOGLE_PLAY_PACKAGE_NAME = "com.ombhrum.fabushi"
+FABUSHI_PAY_CHECKOUT_URL = "https://api.ombhrum.com/api/pay/checkout"
+FABUSHI_PAY_ALIPAY_CHECKOUT_URL = "https://api.ombhrum.com/api/pay/alipay/checkout"
 
 [[env.production.d1_databases]]
 binding = "PLATFORM_DB"

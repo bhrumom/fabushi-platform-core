@@ -28,6 +28,7 @@ routes = [
 [env.production.vars]
 APPLE_BUNDLE_ID = "com.ombhrum.fabushi"
 GOOGLE_PLAY_PACKAGE_NAME = "com.ombhrum.fabushi"
+GOOGLE_PLAY_CATALOG_SYNC_ENABLED = "true"
 FABUSHI_PAY_DEFAULT_PLATFORM_FEE_BPS = "500"
 
 [[env.production.d1_databases]]

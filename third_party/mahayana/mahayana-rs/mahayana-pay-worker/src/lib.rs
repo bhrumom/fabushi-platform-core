@@ -287,6 +287,7 @@ mod payment_api {
             provider.as_str(),
             "web"
                 | "merchant"
+                | "stripe"
                 | "stripe_connect"
                 | "adyen_platform"
                 | "paypal_multiparty"
