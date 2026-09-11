@@ -217,7 +217,12 @@ pub fn is_currency(value: &str) -> bool {
 }
 
 pub fn google_product_id(mini_app_id: &str, sku: &str) -> String {
-    let mut value: String = format!("{}.{}", mini_app_id, sku)
+    // Google Play product IDs are limited to 40 characters. Keep the readable
+    // form for the common case, and use a deterministic compact form for
+    // longer third-party SKUs instead of truncating (which could collide).
+    const GOOGLE_PRODUCT_ID_MAX_LEN: usize = 40;
+    const GOOGLE_HASH_HEX_LEN: usize = 16;
+    let value: String = format!("{}.{}", mini_app_id, sku)
         .to_ascii_lowercase()
         .chars()
         .map(|ch| {
@@ -228,8 +233,23 @@ pub fn google_product_id(mini_app_id: &str, sku: &str) -> String {
             }
         })
         .collect();
-    value.truncate(128);
-    value
+    if value.len() <= GOOGLE_PRODUCT_ID_MAX_LEN
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    {
+        return value;
+    }
+
+    let hash = value.bytes().fold(0xcbf29ce484222325_u64, |state, byte| {
+        state
+            .wrapping_mul(0x100000001b3)
+            .wrapping_add(u64::from(byte))
+    });
+    let prefix_len = GOOGLE_PRODUCT_ID_MAX_LEN - 2 - 1 - GOOGLE_HASH_HEX_LEN;
+    let prefix = value.chars().take(prefix_len).collect::<String>();
+    format!("g_{prefix}_{hash:016x}")
 }
 
 #[cfg(test)]
@@ -297,5 +317,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plans[0].sync_state, "pending_configuration");
+    }
+
+    #[test]
+    fn google_product_ids_are_stable_and_fit_google_play_limit() {
+        let short = google_product_id("global-dharma", "local-prayer-wheel.monthly");
+        assert_eq!(short, "global_dharma.local_prayer_wheel.monthly");
+
+        let long_sku = "a".repeat(128);
+        let first = google_product_id("a-very-long-third-party-mini-app", &long_sku);
+        let second = google_product_id("a-very-long-third-party-mini-app", &long_sku);
+        assert_eq!(first, second);
+        assert!(first.len() <= 40);
+        assert!(
+            first
+                .as_bytes()
+                .first()
+                .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        );
     }
 }

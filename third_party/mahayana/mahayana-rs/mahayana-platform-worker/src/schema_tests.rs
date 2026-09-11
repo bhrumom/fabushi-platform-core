@@ -286,11 +286,19 @@ fn worker_router_rejects_duplicate_developer_commerce_regressions() {
         ),
         (
             "post",
+            "/v1/developer/commerce/miniapps/:mini_app_id/products/batch",
+        ),
+        (
+            "post",
             "/v1/developer/commerce/miniapps/:mini_app_id/products/:product_id",
         ),
         (
             "post",
             "/v1/developer/commerce/miniapps/:mini_app_id/products/:product_id/google/sync",
+        ),
+        (
+            "post",
+            "/v1/developer/commerce/miniapps/:mini_app_id/google/sync",
         ),
         (
             "post",

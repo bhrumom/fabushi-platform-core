@@ -122,9 +122,12 @@ pub fn build_google_sync_request(
 
     if product.product_kind == "subscription" {
         return Ok(GoogleSyncRequest {
-            method: "POST".into(),
+            // PATCH + allowMissing is an idempotent upsert: the first publish
+            // creates the subscription and later publishes update listings or
+            // the existing base plan without a duplicate-product conflict.
+            method: "PATCH".into(),
             url: format!(
-                "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/{}/subscriptions?productId={}&regionsVersion.version={}",
+                "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/{}/subscriptions/{}?updateMask=listings,basePlans&regionsVersion.version={}&allowMissing=true",
                 product.package_name, product.product_id, region_version
             ),
             body: serde_json::json!({
@@ -151,7 +154,7 @@ pub fn build_google_sync_request(
     Ok(GoogleSyncRequest {
         method: "PATCH".into(),
         url: format!(
-            "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/{}/onetimeproducts/{}?updateMask=listings,purchaseOptions&regionsVersion.version={}",
+            "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/{}/onetimeproducts/{}?updateMask=listings,purchaseOptions&regionsVersion.version={}&allowMissing=true",
             product.package_name, product.product_id, region_version
         ),
         body: serde_json::json!({
@@ -179,12 +182,48 @@ pub fn build_google_sync_request(
     })
 }
 
+/// Builds the separate activation call required after a subscription upsert.
+/// Google intentionally leaves newly-created base plans in DRAFT state.
+pub fn build_google_base_plan_activation_request(
+    product: &GoogleCatalogProduct,
+) -> Result<GoogleSyncRequest, GoogleCatalogError> {
+    validate_product(product)?;
+    if product.product_kind != "subscription" {
+        return Err(GoogleCatalogError::InvalidProduct);
+    }
+    Ok(GoogleSyncRequest {
+        method: "POST".into(),
+        url: format!(
+            "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/{}/subscriptions/{}/basePlans/monthly:activate",
+            product.package_name, product.product_id
+        ),
+        body: serde_json::json!({}),
+    })
+}
+
 fn validate_product(product: &GoogleCatalogProduct) -> Result<(), GoogleCatalogError> {
     if product.package_name.trim().is_empty()
         || product.product_id.trim().is_empty()
+        || product.product_id.len() > 40
+        || !product
+            .product_id
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        || !product.product_id.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'.')
+        })
         || product.display_name.trim().is_empty()
         || product.amount_minor <= 0
         || product.currency.len() != 3
+        || !product
+            .currency
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase())
+        || !matches!(
+            product.product_kind.as_str(),
+            "digital_consumable" | "digital_durable" | "subscription"
+        )
     {
         return Err(GoogleCatalogError::InvalidProduct);
     }
@@ -300,7 +339,8 @@ mod tests {
     #[test]
     fn subscription_uses_same_converted_region_set_and_regions_version() {
         let req = build_google_sync_request(&product("subscription"), &converted()).unwrap();
-        assert_eq!(req.method, "POST");
+        assert_eq!(req.method, "PATCH");
+        assert!(req.url.contains("/subscriptions/") && req.url.contains("allowMissing=true"));
         assert_eq!(
             req.body["basePlans"][0]["autoRenewingBasePlanType"]["billingPeriodDuration"],
             "P1M"
@@ -321,6 +361,21 @@ mod tests {
         assert_eq!(
             build_google_sync_request(&product("digital_durable"), &value),
             Err(GoogleCatalogError::EmptyConvertedPrices)
+        );
+    }
+
+    #[test]
+    fn subscription_activation_is_a_separate_idempotent_step() {
+        let req = build_google_base_plan_activation_request(&product("subscription")).unwrap();
+        assert_eq!(req.method, "POST");
+        assert!(req.url.ends_with("/basePlans/monthly:activate"));
+    }
+
+    #[test]
+    fn unsupported_product_kinds_fail_closed() {
+        assert_eq!(
+            build_google_sync_request(&product("physical"), &converted()),
+            Err(GoogleCatalogError::InvalidProduct)
         );
     }
 }

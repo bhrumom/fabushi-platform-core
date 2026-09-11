@@ -3,6 +3,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use uuid::Uuid;
 use wasm_bindgen::JsValue;
 use worker::{
@@ -14,6 +15,11 @@ const DB: &str = "PLATFORM_DB";
 const ISSUER: &str = "https://api.ombhrum.com";
 const AUDIENCE: &str = "mahayana-platform";
 const GOOGLE_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+const GOOGLE_PUBLISHER_API_BASE: &str =
+    "https://androidpublisher.googleapis.com/androidpublisher/v3/applications";
+const MAX_PRODUCTS_PER_BATCH: usize = 100;
+const MAX_GOOGLE_SYNC_PER_BATCH: usize = 50;
+const GOOGLE_RECONCILIATION_STALE_AFTER_SECONDS: i64 = 86_400;
 
 #[derive(Debug, Clone, Deserialize)]
 struct AccessClaims {
@@ -53,20 +59,40 @@ struct MiniAppInput {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProductBatchInput {
+    products: Vec<DeveloperProductDraft>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GoogleBatchSyncInput {
+    #[serde(default)]
+    product_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ProductIdRow {
+    product_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GoogleBindingRow {
+    sync_state: String,
+    last_synced_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct ProductRow {
     product_id: String,
     mini_app_id: String,
-    developer_id: String,
     sku: String,
     display_name: String,
     description: String,
     product_kind: String,
-    entitlement_capability: String,
     tax_code: Option<String>,
-    subscription_period_seconds: Option<i64>,
     currency: String,
     amount: i64,
-    price_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -273,8 +299,33 @@ async fn list_products(req: Request, ctx: RouteContext<()>) -> Result<Response> 
         .param("mini_app_id")
         .ok_or_else(|| worker::Error::RustError("missing app".into()))?;
     app_access(&ctx.env, &user, app, false).await?;
-    let rows=worker::query!(&ctx.env.d1(DB)?,"SELECT c.product_id,c.sku,c.display_name,c.description,c.product_kind,c.entitlement_capability,c.tax_code,c.subscription_period_seconds,c.catalog_status,p.currency,p.amount,p.price_id FROM payment_product_catalog c JOIN prices p ON p.product_id=c.product_id AND p.active=1 WHERE c.mini_app_id=?1 ORDER BY c.created_at DESC",app)?.all().await?.results::<Value>()?;
+    let mut rows=worker::query!(&ctx.env.d1(DB)?,"SELECT c.product_id,c.sku,c.display_name,c.description,c.product_kind,c.entitlement_capability,c.tax_code,c.subscription_period_seconds,c.catalog_status,COALESCE(c.catalog_source,'developer_api') AS catalog_source,p.currency,p.amount,p.price_id,COALESCE((SELECT json_group_array(json_object('provider',b.provider,'externalProductRef',b.external_product_ref,'genericProductId',b.generic_product_id,'syncState',b.sync_state,'lastError',b.last_error,'lastSyncedAt',b.last_synced_at)) FROM payment_provider_bindings b WHERE b.product_id=c.product_id),'[]') AS provider_bindings FROM payment_product_catalog c JOIN prices p ON p.product_id=c.product_id AND p.active=1 WHERE c.mini_app_id=?1 ORDER BY c.created_at DESC",app)?.all().await?.results::<Value>()?;
+    for row in &mut rows {
+        let bindings = match row.get("provider_bindings") {
+            Some(Value::String(value)) => {
+                serde_json::from_str::<Value>(value).unwrap_or_else(|_| json!([]))
+            }
+            Some(Value::Array(value)) => Value::Array(value.clone()),
+            _ => json!([]),
+        };
+        if let Some(object) = row.as_object_mut() {
+            object.remove("provider_bindings");
+            object.insert("providerBindings".into(), bindings);
+        }
+    }
     Response::from_json(&json!({"products":rows}))
+}
+
+async fn product_id_for_sku(env: &Env, app: &str, sku: &str) -> Result<Option<String>> {
+    Ok(worker::query!(
+        &env.d1(DB)?,
+        "SELECT product_id FROM payment_product_catalog WHERE mini_app_id=?1 AND sku=?2 LIMIT 1",
+        app,
+        sku
+    )?
+    .first::<ProductIdRow>(None)
+    .await?
+    .map(|row| row.product_id))
 }
 
 async fn product_row(env: &Env, app: &str, product: &str) -> Result<ProductRow> {
@@ -322,13 +373,13 @@ async fn persist_product(
     if update {
         worker::query!(&db,"UPDATE prices SET active=0,ends_at=COALESCE(ends_at,?1) WHERE product_id=?2 AND active=1",t,product_id)?.run().await?;
     }
-    worker::query!(&db,"INSERT INTO payment_product_catalog (product_id,mini_app_id,developer_id,sku,display_name,description,product_kind,entitlement_capability,tax_code,subscription_period_seconds,catalog_status,created_by_user_id,updated_by_user_id,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'active',?11,?11,?12,?12) ON CONFLICT(product_id) DO UPDATE SET display_name=excluded.display_name,description=excluded.description,entitlement_capability=excluded.entitlement_capability,tax_code=excluded.tax_code,subscription_period_seconds=excluded.subscription_period_seconds,updated_by_user_id=excluded.updated_by_user_id,updated_at=excluded.updated_at",product_id,&app.mini_app_id,&app.developer_id,&input.sku,&input.display_name,&input.description,&input.product_kind,&input.entitlement_capability,input.tax_code.as_deref(),input.subscription_period_seconds,user,t)?.run().await?;
+    worker::query!(&db,"INSERT INTO payment_product_catalog (product_id,mini_app_id,developer_id,sku,display_name,description,product_kind,entitlement_capability,tax_code,subscription_period_seconds,catalog_status,catalog_source,created_by_user_id,updated_by_user_id,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'active','developer_api',?11,?11,?12,?12) ON CONFLICT(product_id) DO UPDATE SET display_name=excluded.display_name,description=excluded.description,entitlement_capability=excluded.entitlement_capability,tax_code=excluded.tax_code,subscription_period_seconds=excluded.subscription_period_seconds,catalog_status='active',catalog_source='developer_api',updated_by_user_id=excluded.updated_by_user_id,updated_at=excluded.updated_at",product_id,&app.mini_app_id,&app.developer_id,&input.sku,&input.display_name,&input.description,&input.product_kind,&input.entitlement_capability,input.tax_code.as_deref(),input.subscription_period_seconds,user,t)?.run().await?;
     let mode = if input.product_kind == "digital_consumable" {
         "consumable"
     } else {
         "durable"
     };
-    worker::query!(&db,"INSERT INTO products (product_id,plugin_id,sku,seller_user_id,entitlement_capability,consumption_mode,active,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,1,?7,?7) ON CONFLICT(product_id) DO UPDATE SET entitlement_capability=excluded.entitlement_capability,active=1,updated_at=excluded.updated_at",product_id,&app.mini_app_id,&input.sku,&app.developer_id,&input.entitlement_capability,mode,t)?.run().await?;
+    worker::query!(&db,"INSERT INTO products (product_id,plugin_id,sku,seller_user_id,entitlement_capability,consumption_mode,active,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,1,?7,?7) ON CONFLICT(product_id) DO UPDATE SET seller_user_id=excluded.seller_user_id,entitlement_capability=excluded.entitlement_capability,active=1,updated_at=excluded.updated_at",product_id,&app.mini_app_id,&input.sku,&app.developer_id,&input.entitlement_capability,mode,t)?.run().await?;
     worker::query!(&db,"INSERT INTO prices (price_id,product_id,currency,amount,active,starts_at,created_at) VALUES (?1,?2,?3,?4,1,?5,?5)",&price_id,product_id,&input.currency,input.amount,t)?.run().await?;
     let fee = env
         .var("FABUSHI_PAY_DEFAULT_PLATFORM_FEE_BPS")
@@ -340,6 +391,20 @@ async fn persist_product(
     for p in &plans {
         worker::query!(&db,"INSERT INTO payment_provider_bindings (product_id,provider,external_product_ref,generic_product_id,sync_state,metadata_json,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,'{}',?6,?6) ON CONFLICT(product_id,provider) DO UPDATE SET external_product_ref=excluded.external_product_ref,generic_product_id=excluded.generic_product_id,sync_state=excluded.sync_state,last_error=NULL,updated_at=excluded.updated_at",product_id,&p.provider,p.external_product_ref.as_deref(),p.generic_product_id.as_deref(),&p.sync_state,t)?.run().await?;
     }
+    let event_type = if update {
+        "product.updated"
+    } else {
+        "product.created"
+    };
+    let event_payload = json!({
+        "sku": input.sku,
+        "currency": input.currency,
+        "amount": input.amount,
+        "productKind": input.product_kind,
+        "catalogSource": "developer_api",
+    })
+    .to_string();
+    worker::query!(&db,"INSERT INTO developer_commerce_audit_events (event_id,developer_id,mini_app_id,product_id,actor_user_id,event_type,payload_json,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",format!("audit.{}",Uuid::new_v4().simple()),&app.developer_id,&app.mini_app_id,product_id,user,event_type,&event_payload,t)?.run().await?;
     Ok(
         json!({"productId":product_id,"priceId":price_id,"currency":input.currency,"amount":input.amount,"providerBindings":plans,"pricingAuthority":"fabushi-pay"}),
     )
@@ -395,6 +460,94 @@ async fn update_product(mut req: Request, ctx: RouteContext<()>) -> Result<Respo
         };
     }
     Response::from_json(&result)
+}
+
+/// Developer Commerce's idempotent catalog surface. The SKU is the developer's
+/// stable identity; repeating the same SKU updates its current price revision
+/// instead of creating a second hidden product. This is also the bootstrap path
+/// used to adopt the historical official-app rows without special product code.
+async fn batch_upsert_products(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
+    let user = require_developer(&req, &ctx.env)?;
+    let app_id = ctx
+        .param("mini_app_id")
+        .ok_or_else(|| worker::Error::RustError("missing app".into()))?;
+    let app = app_access(&ctx.env, &user, app_id, true).await?;
+    let input: ProductBatchInput = req.json().await?;
+    if input.products.is_empty() || input.products.len() > MAX_PRODUCTS_PER_BATCH {
+        return Response::error("products must contain 1 to 100 items", 400);
+    }
+
+    let mut seen_skus = BTreeSet::new();
+    for draft in &input.products {
+        if !seen_skus.insert(draft.sku.clone()) {
+            return Response::error("products must not contain duplicate SKUs", 400);
+        }
+        if let Err(error) = validate_product_draft(draft) {
+            return Response::error(format!("invalid product {}: {error}", draft.sku), 400);
+        }
+    }
+
+    let configuration = config(&ctx.env);
+    let google_token_result = if input
+        .products
+        .iter()
+        .any(|draft| should_auto_sync_google(draft, &configuration))
+    {
+        Some(google_token(&ctx.env).await)
+    } else {
+        None
+    };
+    let mut results = Vec::with_capacity(input.products.len());
+    let mut created_count = 0usize;
+    let mut updated_count = 0usize;
+    for draft in input.products {
+        let existing_id = product_id_for_sku(&ctx.env, app_id, &draft.sku).await?;
+        let (product_id, update) = match existing_id {
+            Some(product_id) => {
+                updated_count += 1;
+                (product_id, true)
+            }
+            None => {
+                created_count += 1;
+                (format!("prod.{}", Uuid::new_v4().simple()), false)
+            }
+        };
+        let mut result =
+            persist_product(&ctx.env, &user, &app, &product_id, &draft, update).await?;
+        result["operation"] = json!(if update { "updated" } else { "created" });
+        result["sku"] = json!(draft.sku);
+        if should_auto_sync_google(&draft, &configuration) {
+            result["googleSync"] = match google_token_result.as_ref() {
+                Some(Ok(token)) => {
+                    match sync_google_product_with_token(&ctx.env, app_id, &product_id, token).await
+                    {
+                        Ok(sync) => sync,
+                        Err(_) => json!({
+                            "ok": false,
+                            "provider": "google_play",
+                            "status": 500,
+                            "error": "Google catalog sync failed"
+                        }),
+                    }
+                }
+                Some(Err(_)) | None => json!({
+                    "ok": false,
+                    "provider": "google_play",
+                    "status": 500,
+                    "error": "Google catalog sync unavailable"
+                }),
+            };
+        }
+        results.push(result);
+    }
+
+    Response::from_json(&json!({
+        "products": results,
+        "createdCount": created_count,
+        "updatedCount": updated_count,
+        "pricingAuthority": "fabushi-pay",
+        "provisioning": "developer_api",
+    }))
 }
 
 async fn apple_request(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
@@ -602,16 +755,17 @@ async fn activate_google_pay_rail(
 async fn send_google_json(
     method: Method,
     url: &str,
-    body: &serde_json::Value,
+    body: Option<&serde_json::Value>,
     token: &str,
 ) -> Result<(u16, Vec<u8>)> {
     let headers = Headers::new();
     headers.set("Authorization", &format!("Bearer {token}"))?;
     headers.set("Content-Type", "application/json")?;
     let mut init = RequestInit::new();
-    init.with_method(method)
-        .with_headers(headers)
-        .with_body(Some(JsValue::from_str(&body.to_string())));
+    init.with_method(method).with_headers(headers);
+    if let Some(body) = body {
+        init.with_body(Some(JsValue::from_str(&body.to_string())));
+    }
     let outbound = Request::new_with_init(url, &init)?;
     let mut response = Fetch::Request(outbound).send().await?;
     let status = response.status_code();
@@ -619,13 +773,72 @@ async fn send_google_json(
     Ok((status, bytes))
 }
 
-async fn sync_google_product(
+async fn mark_google_binding_error(env: &Env, product_id: &str, error: &str) -> Result<()> {
+    let t = now();
+    worker::query!(&env.d1(DB)?,"UPDATE payment_provider_bindings SET sync_state='error',last_error=?1,updated_at=?2 WHERE product_id=?3 AND provider='google_play'",error,t,product_id)?.run().await?;
+    Ok(())
+}
+
+fn google_base_plan_is_active(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|value| value.get("basePlans").cloned())
+        .and_then(|value| value.as_array().cloned())
+        .and_then(|plans| {
+            plans
+                .into_iter()
+                .find(|plan| plan.get("basePlanId").and_then(Value::as_str) == Some("monthly"))
+        })
+        .and_then(|plan| plan.get("state").and_then(Value::as_str).map(str::to_owned))
+        .is_some_and(|state| state.eq_ignore_ascii_case("ACTIVE"))
+}
+
+async fn ensure_google_base_plan_active(
+    product: &GoogleCatalogProduct,
+    token: &str,
+    upsert_body: &[u8],
+) -> Result<Value> {
+    if google_base_plan_is_active(upsert_body) {
+        return Ok(json!({"activated": false, "state": "ACTIVE"}));
+    }
+
+    let activation = build_google_base_plan_activation_request(product)
+        .map_err(|e| worker::Error::RustError(e.to_string()))?;
+    let (status, body) =
+        send_google_json(Method::Post, &activation.url, Some(&activation.body), token).await?;
+    if (200..300).contains(&status) {
+        return Ok(json!({"activated": true, "status": status}));
+    }
+
+    // Activation is intentionally idempotent. A concurrent publisher may have
+    // activated the plan between the PATCH and this call; re-read the product
+    // before treating a 409 as a real provider failure.
+    if status == 409 {
+        let get_url = format!(
+            "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/{}/subscriptions/{}",
+            product.package_name, product.product_id
+        );
+        let (get_status, get_body) = send_google_json(Method::Get, &get_url, None, token).await?;
+        if (200..300).contains(&get_status) && google_base_plan_is_active(&get_body) {
+            return Ok(json!({"activated": false, "status": get_status, "state": "ACTIVE"}));
+        }
+    }
+
+    let error = String::from_utf8_lossy(&body)
+        .chars()
+        .take(500)
+        .collect::<String>();
+    Err(worker::Error::RustError(format!(
+        "Google base plan activation failed HTTP {status}: {error}"
+    )))
+}
+
+async fn sync_google_product_with_token(
     env: &Env,
-    user: &str,
     app_id: &str,
     product_id: &str,
+    token: &str,
 ) -> Result<Value> {
-    app_access(env, user, app_id, true).await?;
     let p = product_row(env, app_id, product_id).await?;
     let external = google_product_id(app_id, &p.sku);
     let spec = GoogleCatalogProduct {
@@ -638,15 +851,14 @@ async fn sync_google_product(
         amount_minor: p.amount,
         product_tax_category_code: p.tax_code,
     };
-    let token = google_token(env).await?;
 
     let conversion_call = build_google_price_conversion_request(&spec)
         .map_err(|e| worker::Error::RustError(e.to_string()))?;
     let (conversion_status, conversion_body) = send_google_json(
         Method::Post,
         &conversion_call.url,
-        &conversion_call.body,
-        &token,
+        Some(&conversion_call.body),
+        token,
     )
     .await?;
     if !(200..300).contains(&conversion_status) {
@@ -654,8 +866,7 @@ async fn sync_google_product(
             .chars()
             .take(500)
             .collect::<String>();
-        let t = now();
-        worker::query!(&env.d1(DB)?,"UPDATE payment_provider_bindings SET sync_state='error',last_error=?1,updated_at=?2 WHERE product_id=?3 AND provider='google_play'",&error,t,product_id)?.run().await?;
+        mark_google_binding_error(env, product_id, &error).await?;
         return Ok(
             json!({"ok":false,"stage":"convertRegionPrices","status":conversion_status,"error":error}),
         );
@@ -666,24 +877,47 @@ async fn sync_google_product(
         })?;
     let call = build_google_sync_request(&spec, &converted)
         .map_err(|e| worker::Error::RustError(e.to_string()))?;
-    let method = if call.method == "POST" {
-        Method::Post
-    } else {
-        Method::Patch
+    let method = match call.method.as_str() {
+        "POST" => Method::Post,
+        "PATCH" => Method::Patch,
+        _ => {
+            return Err(worker::Error::RustError(
+                "unsupported Google catalog method".into(),
+            ));
+        }
     };
-    let (status, body) = send_google_json(method, &call.url, &call.body, &token).await?;
+    let (status, body) = send_google_json(method, &call.url, Some(&call.body), token).await?;
     let t = now();
     if !(200..300).contains(&status) {
         let error = String::from_utf8_lossy(&body)
             .chars()
             .take(500)
             .collect::<String>();
-        worker::query!(&env.d1(DB)?,"UPDATE payment_provider_bindings SET sync_state='error',last_error=?1,updated_at=?2 WHERE product_id=?3 AND provider='google_play'",&error,t,product_id)?.run().await?;
+        mark_google_binding_error(env, product_id, &error).await?;
         return Ok(json!({"ok":false,"stage":"catalogSync","status":status,"error":error}));
     }
+    let activation = if spec.product_kind == "subscription" {
+        match ensure_google_base_plan_active(&spec, token, &body).await {
+            Ok(value) => Some(value),
+            Err(error) => {
+                let message = error.to_string();
+                mark_google_binding_error(env, product_id, &message).await?;
+                return Ok(json!({
+                    "ok": false,
+                    "stage": "basePlanActivation",
+                    "status": 502,
+                    "error": message,
+                }));
+            }
+        }
+    } else {
+        None
+    };
     let metadata = serde_json::json!({
         "regionVersion": converted.region_version.version,
         "convertedRegionCount": converted.converted_region_prices.len(),
+        "catalogOperation": "idempotent_upsert",
+        "basePlanActivation": activation,
     })
     .to_string();
     activate_google_pay_rail(env, product_id, &external, &metadata, t).await?;
@@ -695,6 +929,17 @@ async fn sync_google_product(
         "regionVersion": converted.region_version.version,
         "convertedRegionCount": converted.converted_region_prices.len()
     }))
+}
+
+async fn sync_google_product(
+    env: &Env,
+    user: &str,
+    app_id: &str,
+    product_id: &str,
+) -> Result<Value> {
+    app_access(env, user, app_id, true).await?;
+    let token = google_token(env).await?;
+    sync_google_product_with_token(env, app_id, product_id, &token).await
 }
 
 fn should_auto_sync_google(
@@ -725,6 +970,275 @@ async fn sync_google(req: Request, ctx: RouteContext<()>) -> Result<Response> {
     Response::from_json(&sync_google_product(&ctx.env, &user, app_id, product_id).await?)
 }
 
+fn query_component(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                vec![byte as char]
+            }
+            other => format!("%{other:02X}").chars().collect(),
+        })
+        .collect()
+}
+
+async fn list_google_product_ids(
+    package_name: &str,
+    resource: &str,
+    item_key: &str,
+    token: &str,
+) -> Result<BTreeSet<String>> {
+    let mut product_ids = BTreeSet::new();
+    let mut page_token = None;
+    for _ in 0..100 {
+        let mut url =
+            format!("{GOOGLE_PUBLISHER_API_BASE}/{package_name}/{resource}?pageSize=1000");
+        if let Some(page_token) = page_token.as_deref() {
+            url.push_str("&pageToken=");
+            url.push_str(&query_component(page_token));
+        }
+        let (status, body) = send_google_json(Method::Get, &url, None, token).await?;
+        if !(200..300).contains(&status) {
+            let error = String::from_utf8_lossy(&body)
+                .chars()
+                .take(500)
+                .collect::<String>();
+            return Err(worker::Error::RustError(format!(
+                "Google {resource} list failed HTTP {status}: {error}"
+            )));
+        }
+        let value: Value = serde_json::from_slice(&body)
+            .map_err(|_| worker::Error::RustError(format!("invalid Google {resource} list")))?;
+        if let Some(items) = value.get(item_key).and_then(Value::as_array) {
+            for item in items {
+                if let Some(product_id) = item.get("productId").and_then(Value::as_str) {
+                    product_ids.insert(product_id.to_string());
+                }
+            }
+        }
+        page_token = value
+            .get("nextPageToken")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if page_token.is_none() {
+            return Ok(product_ids);
+        }
+    }
+    Err(worker::Error::RustError(format!(
+        "Google {resource} pagination exceeded safety limit"
+    )))
+}
+
+async fn google_product_ids(
+    env: &Env,
+    token: &str,
+) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
+    let package_name = env_text(env, "GOOGLE_PLAY_PACKAGE_NAME")?;
+    let subscriptions =
+        list_google_product_ids(&package_name, "subscriptions", "subscriptions", token).await?;
+    let one_time_products =
+        list_google_product_ids(&package_name, "oneTimeProducts", "oneTimeProducts", token).await?;
+    Ok((subscriptions, one_time_products))
+}
+
+async fn google_sync_product_ids(
+    env: &Env,
+    app_id: &str,
+    requested: &[String],
+) -> Result<Vec<String>> {
+    if !requested.is_empty() {
+        let mut ids = Vec::with_capacity(requested.len());
+        for product_id in requested {
+            let row = product_row(env, app_id, product_id).await?;
+            if !matches!(
+                row.product_kind.as_str(),
+                "digital_durable" | "digital_consumable" | "subscription"
+            ) {
+                return Err(worker::Error::RustError(
+                    "Google Play only supports digital catalog products".into(),
+                ));
+            }
+            ids.push(row.product_id);
+        }
+        return Ok(ids);
+    }
+
+    worker::query!(
+        &env.d1(DB)?,
+        "SELECT c.product_id
+           FROM payment_product_catalog c
+           JOIN products p ON p.product_id=c.product_id AND p.active=1
+           JOIN prices pr ON pr.product_id=c.product_id AND pr.active=1
+           JOIN payment_product_config pc ON pc.product_id=c.product_id AND pc.active=1
+          WHERE c.mini_app_id=?1 AND c.catalog_status='active'
+            AND c.product_kind IN ('digital_durable','digital_consumable','subscription')
+            AND EXISTS (SELECT 1 FROM payment_provider_bindings pb
+                         WHERE pb.product_id=c.product_id
+                           AND pb.provider='google_play')
+          ORDER BY c.updated_at DESC
+          LIMIT ?2",
+        app_id,
+        MAX_GOOGLE_SYNC_PER_BATCH as i64
+    )?
+    .all()
+    .await?
+    .results::<ProductIdRow>()
+    .map(|rows| rows.into_iter().map(|row| row.product_id).collect())
+}
+
+async fn sync_google_batch(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
+    let user = require_developer(&req, &ctx.env)?;
+    if !env_enabled(&ctx.env, "GOOGLE_PLAY_CATALOG_SYNC_ENABLED") {
+        return Response::error("Google catalog sync is not enabled", 503);
+    }
+    let app_id = ctx
+        .param("mini_app_id")
+        .ok_or_else(|| worker::Error::RustError("missing app".into()))?;
+    app_access(&ctx.env, &user, app_id, true).await?;
+    let input: GoogleBatchSyncInput = req.json().await?;
+    if input.product_ids.len() > MAX_GOOGLE_SYNC_PER_BATCH {
+        return Response::error("productIds must contain at most 50 items", 400);
+    }
+    let product_ids = google_sync_product_ids(&ctx.env, app_id, &input.product_ids).await?;
+    if product_ids.is_empty() {
+        return Response::from_json(&json!({
+            "products": [],
+            "syncedCount": 0,
+            "failedCount": 0,
+            "provider": "google_play",
+        }));
+    }
+    let token = google_token(&ctx.env).await?;
+    let product_count = product_ids.len();
+    let mut results = Vec::with_capacity(product_count);
+    for product_id in product_ids {
+        let result =
+            match sync_google_product_with_token(&ctx.env, app_id, &product_id, &token).await {
+                Ok(result) => result,
+                Err(error) => json!({
+                    "ok": false,
+                    "productId": product_id,
+                    "provider": "google_play",
+                    "status": 500,
+                    "error": "Google catalog sync failed",
+                    "detail": error.to_string(),
+                }),
+            };
+        results.push(result);
+    }
+    let synced_count = results
+        .iter()
+        .filter(|result| result.get("ok").and_then(Value::as_bool) == Some(true))
+        .count();
+    Response::from_json(&json!({
+        "products": results,
+        "syncedCount": synced_count,
+        "failedCount": product_count.saturating_sub(synced_count),
+        "provider": "google_play",
+        "provisioning": "developer_api",
+    }))
+}
+
+async fn reconcile_google_catalog(env: &Env) -> Result<Value> {
+    if !env_enabled(env, "GOOGLE_PLAY_CATALOG_SYNC_ENABLED") {
+        return Ok(json!({
+            "ok": true,
+            "enabled": false,
+            "provider": "google_play",
+        }));
+    }
+    let token = google_token(env).await?;
+    let (subscription_ids, one_time_product_ids) = google_product_ids(env, &token).await?;
+    let database = env.d1(DB)?;
+    let candidates = worker::query!(
+        &database,
+        "SELECT c.product_id,c.mini_app_id,c.developer_id,c.sku,c.display_name,c.description,
+                c.product_kind,c.entitlement_capability,c.tax_code,c.subscription_period_seconds,
+                pr.currency,pr.amount,pr.price_id
+           FROM payment_product_catalog c
+           JOIN products p ON p.product_id=c.product_id AND p.active=1
+           JOIN prices pr ON pr.product_id=c.product_id AND pr.active=1
+           JOIN payment_product_config pc ON pc.product_id=c.product_id AND pc.active=1
+          WHERE c.catalog_status='active'
+            AND c.product_kind IN ('digital_durable','digital_consumable','subscription')
+            AND EXISTS (SELECT 1 FROM payment_provider_bindings pb
+                         WHERE pb.product_id=c.product_id AND pb.provider='google_play')
+          ORDER BY c.updated_at DESC
+          LIMIT ?1",
+        MAX_GOOGLE_SYNC_PER_BATCH as i64
+    )?
+    .all()
+    .await?
+    .results::<ProductRow>()?;
+
+    let checked_count = candidates.len();
+    let current = now();
+    let mut results = Vec::new();
+    let mut skipped_count = 0usize;
+    for product in candidates {
+        let binding = worker::query!(
+            &database,
+            "SELECT sync_state,last_synced_at FROM payment_provider_bindings WHERE product_id=?1 AND provider='google_play' LIMIT 1",
+            &product.product_id
+        )?
+        .first::<GoogleBindingRow>(None)
+        .await?;
+        let Some(binding) = binding else {
+            continue;
+        };
+        let external = google_product_id(&product.mini_app_id, &product.sku);
+        let exists = if product.product_kind == "subscription" {
+            subscription_ids.contains(&external)
+        } else {
+            one_time_product_ids.contains(&external)
+        };
+        let stale = binding.sync_state != "active"
+            || binding
+                .last_synced_at
+                .map(|synced_at| {
+                    current.saturating_sub(synced_at) >= GOOGLE_RECONCILIATION_STALE_AFTER_SECONDS
+                })
+                .unwrap_or(true);
+        if exists && !stale {
+            skipped_count += 1;
+            continue;
+        }
+        let result = match sync_google_product_with_token(
+            env,
+            &product.mini_app_id,
+            &product.product_id,
+            &token,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => json!({
+                "ok": false,
+                "productId": product.product_id,
+                "externalProductRef": external,
+                "status": 500,
+                "error": "Google catalog reconciliation failed",
+                "detail": error.to_string(),
+            }),
+        };
+        results.push(result);
+    }
+    let synced_count = results
+        .iter()
+        .filter(|result| result.get("ok").and_then(Value::as_bool) == Some(true))
+        .count();
+    Ok(json!({
+        "ok": results.iter().all(|result| result.get("ok").and_then(Value::as_bool) != Some(false)),
+        "provider": "google_play",
+        "checkedCount": checked_count,
+        "syncedCount": synced_count,
+        "failedCount": results.len().saturating_sub(synced_count),
+        "skippedCount": skipped_count,
+        "results": results,
+    }))
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PayoutProfileInput {
@@ -745,8 +1259,6 @@ struct DeveloperPayoutRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 struct DeveloperPayoutAccountRow {
-    payout_account_id: String,
-    developer_id: String,
     state: String,
     onboarding_state: String,
     kyc_status: String,
@@ -1171,14 +1683,19 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
       .post_async("/v1/developer/commerce/payout/request",request_payout)
       .get_async("/v1/developer/commerce/miniapps",list_apps).post_async("/v1/developer/commerce/miniapps/:mini_app_id",register_app)
       .get_async("/v1/developer/commerce/miniapps/:mini_app_id/products",list_products).post_async("/v1/developer/commerce/miniapps/:mini_app_id/products",create_product)
+      .post_async("/v1/developer/commerce/miniapps/:mini_app_id/products/batch",batch_upsert_products)
       .post_async("/v1/developer/commerce/miniapps/:mini_app_id/products/:product_id",update_product)
       .post_async("/v1/developer/commerce/miniapps/:mini_app_id/products/:product_id/google/sync",sync_google)
+      .post_async("/v1/developer/commerce/miniapps/:mini_app_id/google/sync",sync_google_batch)
       .post_async("/v1/pay/intents/:payment_id/apple/advanced-commerce",apple_request)
       .run(req,env).await
 }
 
 #[event(scheduled)]
 pub async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
+    if let Err(error) = reconcile_google_catalog(&env).await {
+        worker::console_error!("Google catalog reconciliation failed: {}", error);
+    }
     if let Err(error) = run_payout_maintenance(&env).await {
         worker::console_error!("developer payout maintenance failed: {}", error);
     }
