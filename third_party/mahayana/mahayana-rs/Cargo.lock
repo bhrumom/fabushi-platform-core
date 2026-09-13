@@ -9017,6 +9017,7 @@ dependencies = [
  "ratatui",
  "rpassword",
  "serde_json",
+ "semver",
  "sha2 0.10.9",
  "tar",
  "thiserror 2.0.20",

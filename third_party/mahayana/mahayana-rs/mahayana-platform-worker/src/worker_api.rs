@@ -891,7 +891,7 @@ fn validate_external_release_manifest(
         for platform in artifact_platforms.iter().filter_map(Value::as_str) {
             if !matches!(
                 platform,
-                "cli" | "desktop" | "mobile" | "web" | "ios" | "android"
+                "cli" | "desktop" | "mobile" | "web" | "ios" | "android" | "chrome-extension"
             ) {
                 return Err(format!("unsupported external artifact platform {platform}"));
             }

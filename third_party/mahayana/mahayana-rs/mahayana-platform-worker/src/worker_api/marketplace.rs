@@ -1,5 +1,238 @@
 use super::*;
 
+const MARKETPLACE_INSTALL_PROTOCOL: &str = "fabushi.marketplace.install.v1";
+const CHROME_EXTENSION_PLATFORM: &str = "chrome-extension";
+
+fn normalized_github_repository(value: &str) -> Option<String> {
+    let value = value.trim();
+    let repository = if value.starts_with("https://") {
+        let url = Url::parse(value).ok()?;
+        if url.scheme() != "https"
+            || url.host_str()?.eq_ignore_ascii_case("github.com") == false
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.port().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return None;
+        }
+        url.path().trim_matches('/').to_string()
+    } else {
+        value.to_string()
+    };
+    let parts = repository.split('/').collect::<Vec<_>>();
+    if parts.len() != 2
+        || parts.iter().any(|part| part.is_empty())
+        || repository.bytes().any(|byte| {
+            !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'/'))
+        })
+    {
+        return None;
+    }
+    Some(format!("https://github.com/{repository}"))
+}
+
+fn is_github_artifact_url(value: &str) -> bool {
+    let Ok(url) = Url::parse(value.trim()) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("github.com")
+                || host.eq_ignore_ascii_case("raw.githubusercontent.com")
+        })
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+}
+
+fn is_github_artifact_source(source: &Value) -> bool {
+    match source.get("type").and_then(Value::as_str) {
+        Some("https") => source
+            .get("url")
+            .and_then(Value::as_str)
+            .is_some_and(is_github_artifact_url),
+        Some("github-release") => {
+            normalized_github_repository(
+                source
+                    .get("repository")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            )
+            .is_some()
+                && source
+                    .get("tag")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty())
+                && source
+                    .get("asset")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty())
+        }
+        _ => false,
+    }
+}
+
+fn release_supports_chrome_extension(release_manifest: &Value) -> bool {
+    release_manifest
+        .get("artifacts")
+        .and_then(Value::as_array)
+        .is_some_and(|artifacts| {
+            artifacts.iter().any(|artifact| {
+                artifact
+                    .get("platforms")
+                    .and_then(Value::as_array)
+                    .is_some_and(|platforms| {
+                        platforms.iter().any(|platform| {
+                            matches!(
+                                platform.as_str(),
+                                Some("web" | "all" | CHROME_EXTENSION_PLATFORM)
+                            )
+                        })
+                    })
+            })
+        })
+}
+
+fn add_chrome_extension_platform(release_manifest: &mut Value) {
+    let Some(artifacts) = release_manifest
+        .get_mut("artifacts")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for artifact in artifacts {
+        let Some(platforms) = artifact.get_mut("platforms").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let web_compatible = platforms.iter().any(|platform| {
+            matches!(
+                platform.as_str(),
+                Some("web" | "all" | CHROME_EXTENSION_PLATFORM)
+            )
+        });
+        if web_compatible
+            && !platforms
+                .iter()
+                .any(|platform| platform.as_str() == Some(CHROME_EXTENSION_PLATFORM))
+        {
+            platforms.push(Value::String(CHROME_EXTENSION_PLATFORM.to_string()));
+        }
+    }
+}
+
+fn github_install_contract(
+    plugin_id: &str,
+    version: &str,
+    source: &Value,
+    release_manifest: &Value,
+) -> Option<Value> {
+    let manifest_source = release_manifest.get("source");
+    let repository = source
+        .get("repository")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            manifest_source
+                .and_then(|value| value.get("repository"))
+                .and_then(Value::as_str)
+        })
+        .and_then(normalized_github_repository)?;
+    let source_ref = source
+        .get("sourceRef")
+        .and_then(Value::as_str)
+        .or_else(|| source.get("commit").and_then(Value::as_str))
+        .or_else(|| {
+            manifest_source
+                .and_then(|value| value.get("sourceRef"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            manifest_source
+                .and_then(|value| value.get("commit"))
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|value| is_git_object_id(value))?
+        .to_string();
+    let artifacts = release_manifest.get("artifacts")?.as_array()?;
+    if artifacts.is_empty()
+        || artifacts.iter().any(|artifact| {
+            artifact
+                .get("source")
+                .is_none_or(|value| !is_github_artifact_source(value))
+                || artifact
+                    .get("sha256")
+                    .and_then(Value::as_str)
+                    .is_none_or(|digest| {
+                        digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                || artifact
+                    .get("size")
+                    .and_then(Value::as_u64)
+                    .is_none_or(|size| size == 0)
+        })
+    {
+        return None;
+    }
+    let manifest_url = source
+        .get("manifestUrl")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            manifest_source
+                .and_then(|value| value.get("manifestUrl"))
+                .and_then(Value::as_str)
+        });
+    let permissions = release_manifest
+        .get("permissions")
+        .cloned()
+        .or_else(|| release_manifest.get("requestedPermissions").cloned())
+        .unwrap_or_else(|| json!([]));
+    let mut install_source = json!({
+        "provider": "github",
+        "repository": repository,
+        "sourceRef": source_ref,
+        "marketplaceHostsPackage": false,
+    });
+    if let Some(manifest_url) = manifest_url.filter(|value| is_github_artifact_url(value)) {
+        install_source["manifestUrl"] = Value::String(manifest_url.to_string());
+    }
+    Some(json!({
+        "protocol": MARKETPLACE_INSTALL_PROTOCOL,
+        "strategy": "github-immutable",
+        "pluginId": plugin_id,
+        "version": version,
+        "source": install_source,
+        "artifacts": artifacts,
+        "update": {
+            "check": "marketplace-release",
+            "comparison": "version-then-artifact-sha256",
+            "allowDowngrade": false,
+            "rollback": "previous-active"
+        },
+        "permissions": permissions,
+    }))
+}
+
+fn enrich_github_release(
+    plugin_id: &str,
+    version: &str,
+    source: &Value,
+    release_manifest: Value,
+) -> (Value, Option<Value>) {
+    let mut candidate = release_manifest.clone();
+    add_chrome_extension_platform(&mut candidate);
+    let Some(install) = github_install_contract(plugin_id, version, source, &candidate) else {
+        return (release_manifest, None);
+    };
+    if let Some(object) = candidate.as_object_mut() {
+        object.insert("install".into(), install.clone());
+    }
+    (candidate, Some(install))
+}
+
 pub(super) async fn marketplace_plugins(
     request: Request,
     context: RouteContext<()>,
@@ -13,22 +246,27 @@ pub(super) async fn marketplace_plugins(
             let value = value.trim().to_string();
             let normalized_platform = match value.as_str() {
                 "ios" | "android" => "mobile",
-                "cli" | "desktop" | "mobile" | "web" => value.as_str(),
+                "cli" | "desktop" | "mobile" | "web" | "chrome-extension" => value.as_str(),
                 _ => {
                     return error_response(
                         400,
                         "invalid_marketplace_platform",
-                        "platform must be cli, desktop, mobile, web, ios, or android.",
+                        "platform must be cli, desktop, mobile, web, ios, android, or chrome-extension.",
                     );
                 }
             };
             platform = Some(normalized_platform.to_string());
         }
     }
-    let platform_pattern = platform
-        .as_deref()
-        .map(|value| format!("%\"{value}\"%"))
-        .unwrap_or_else(|| "%".to_string());
+    // Older approved rows predate the Chrome surface and only advertise
+    // `web`/`desktop` in platforms_json. Query those rows broadly, then apply
+    // the compatibility check against the release manifest below so a rolling
+    // deployment does not hide existing GitHub releases from Chrome clients.
+    let platform_pattern = match platform.as_deref() {
+        Some(CHROME_EXTENSION_PLATFORM) => "%".to_string(),
+        Some(value) => format!("%\"{value}\"%"),
+        None => "%".to_string(),
+    };
     let database = context.env.d1(DATABASE_BINDING)?;
     let rows = worker::query!(
         &database,
@@ -53,27 +291,50 @@ pub(super) async fn marketplace_plugins(
     .results::<MarketplacePluginRow>()?;
     let plugins = rows
         .into_iter()
-        .map(|row| {
+        .filter_map(|row| {
             let platforms =
                 serde_json::from_str::<Vec<String>>(&row.platforms_json).unwrap_or_default();
             let source = serde_json::from_str::<Value>(&row.source_json).unwrap_or(Value::Null);
-            let release_manifest =
+            let stored_release_manifest =
                 serde_json::from_str::<Value>(&row.release_manifest_json).unwrap_or(Value::Null);
-            json!({
+            if platform.as_deref() == Some(CHROME_EXTENSION_PLATFORM)
+                && !release_supports_chrome_extension(&stored_release_manifest)
+            {
+                return None;
+            }
+            let (release_manifest, install) = enrich_github_release(
+                &row.plugin_id,
+                row.latest_version.as_deref().unwrap_or_default(),
+                &source,
+                stored_release_manifest,
+            );
+            let release_manifest_sha256 = canonical_json_sha256(&release_manifest)
+                .unwrap_or_else(|_| row.release_manifest_sha256.clone());
+            let mut response_platforms = platforms;
+            if install.is_some()
+                && release_supports_chrome_extension(&release_manifest)
+                && !response_platforms
+                    .iter()
+                    .any(|platform| platform == CHROME_EXTENSION_PLATFORM)
+            {
+                response_platforms.push(CHROME_EXTENSION_PLATFORM.to_string());
+            }
+            Some(json!({
                 "pluginId": row.plugin_id,
                 "displayName": row.display_name,
                 "description": row.description,
                 "latestVersion": row.latest_version,
                 "packageSha256": row.package_sha256,
                 "packageSize": row.package_size.and_then(exact_nonnegative_i64),
-                "platforms": platforms,
+                "platforms": response_platforms,
                 "deploymentUrl": row.deployment_url,
                 "publishedAt": row.published_at.and_then(exact_nonnegative_i64),
                 "source": source,
                 "releaseManifest": release_manifest,
-                "releaseManifestSha256": row.release_manifest_sha256,
+                "install": install,
+                "releaseManifestSha256": release_manifest_sha256,
                 "releaseStatus": row.release_status,
-            })
+            }))
         })
         .collect::<Vec<_>>();
     Response::from_json(&json!({"plugins": plugins}))
@@ -420,9 +681,12 @@ pub(super) async fn marketplace_release_publish(
     let platforms = serde_json::from_str::<Vec<String>>(&field("platforms")?)
         .map_err(|_| worker::Error::RustError("invalid marketplace platforms".into()))?;
     if platforms.is_empty()
-        || platforms
-            .iter()
-            .any(|platform| !matches!(platform.as_str(), "cli" | "desktop" | "mobile" | "web"))
+        || platforms.iter().any(|platform| {
+            !matches!(
+                platform.as_str(),
+                "cli" | "desktop" | "mobile" | "web" | "chrome-extension"
+            )
+        })
     {
         return error_response(
             400,
@@ -675,7 +939,7 @@ pub(super) async fn marketplace_external_release_publish(
         || platforms.iter().any(|platform| {
             !matches!(
                 platform.as_str(),
-                "cli" | "desktop" | "mobile" | "web" | "ios" | "android"
+                "cli" | "desktop" | "mobile" | "web" | "ios" | "android" | "chrome-extension"
             )
         })
     {
@@ -793,13 +1057,22 @@ pub(super) async fn marketplace_external_release_publish(
         .first()
         .expect("validated primary URL")
         .clone();
-    let release_manifest_json = serde_json::to_string(&release_manifest)
-        .map_err(|error| worker::Error::RustError(error.to_string()))?;
-    let release_manifest_sha256 = format!("{:x}", Sha256::digest(release_manifest_json.as_bytes()));
     let source = body
         .get("source")
         .cloned()
         .unwrap_or_else(|| json!({"provider":"external","artifact": primary.get("source").cloned().unwrap_or(Value::Null)}));
+    let (release_manifest, install) =
+        enrich_github_release(&plugin_id, &version, &source, release_manifest);
+    let Some(install) = install else {
+        return error_response(
+            400,
+            "invalid_marketplace_source",
+            "Marketplace package releases must use a public GitHub repository, an immutable commit, and GitHub-hosted artifacts.",
+        );
+    };
+    let release_manifest_json = serde_json::to_string(&release_manifest)
+        .map_err(|error| worker::Error::RustError(error.to_string()))?;
+    let release_manifest_sha256 = format!("{:x}", Sha256::digest(release_manifest_json.as_bytes()));
     let source_json = serde_json::to_string(&source)
         .map_err(|error| worker::Error::RustError(error.to_string()))?;
     let platforms_json = serde_json::to_string(&platforms)
@@ -879,6 +1152,7 @@ pub(super) async fn marketplace_external_release_publish(
         "platforms": platforms,
         "source": source,
         "releaseManifest": release_manifest,
+        "install": install,
         "releaseManifestSha256": release_manifest_sha256,
         "resolvedArtifacts": resolved_artifacts,
         "releaseStatus": release_status,
@@ -934,10 +1208,27 @@ pub(super) async fn marketplace_release_metadata(
             "The approved plugin release does not exist.",
         );
     }
-    let platforms = serde_json::from_str::<Vec<String>>(&row.platforms_json).unwrap_or_default();
+    let mut platforms =
+        serde_json::from_str::<Vec<String>>(&row.platforms_json).unwrap_or_default();
     let source = serde_json::from_str::<Value>(&row.source_json).unwrap_or(Value::Null);
-    let release_manifest =
+    let stored_release_manifest =
         serde_json::from_str::<Value>(&row.release_manifest_json).unwrap_or(Value::Null);
+    let (release_manifest, install) = enrich_github_release(
+        &row.plugin_id,
+        &row.version,
+        &source,
+        stored_release_manifest,
+    );
+    let release_manifest_sha256 = canonical_json_sha256(&release_manifest)
+        .unwrap_or_else(|_| row.release_manifest_sha256.clone());
+    if install.is_some()
+        && release_supports_chrome_extension(&release_manifest)
+        && !platforms
+            .iter()
+            .any(|platform| platform == CHROME_EXTENSION_PLATFORM)
+    {
+        platforms.push(CHROME_EXTENSION_PLATFORM.to_string());
+    }
     let Some(package_size) = exact_nonnegative_i64(row.package_size) else {
         return error_response(
             503,
@@ -962,7 +1253,8 @@ pub(super) async fn marketplace_release_metadata(
         "platforms": platforms,
         "source": source,
         "releaseManifest": release_manifest,
-        "releaseManifestSha256": row.release_manifest_sha256,
+        "install": install,
+        "releaseManifestSha256": release_manifest_sha256,
         "releaseStatus": row.release_status,
     }))
 }
@@ -1194,4 +1486,68 @@ pub(super) async fn marketplace_release_revoke(
         "revokedAt": now,
         "reason": reason,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn github_release() -> (Value, Value) {
+        let source = json!({
+            "provider": "fabushi-official",
+            "repository": "https://github.com/bhrumom/fabushi",
+            "commit": "7b02d8d00e0646e9bf4e90a129cbf203fcff015d"
+        });
+        let release = json!({
+            "schemaVersion": 1,
+            "protocol": "mahayana.external-release.v1",
+            "pluginId": "global-dharma",
+            "version": "1.0.0",
+            "permissions": ["network"],
+            "artifacts": [{
+                "id": "global-dharma-universal-ui",
+                "runtime": "local-web",
+                "platforms": ["desktop", "web"],
+                "source": {
+                    "type": "https",
+                    "url": "https://raw.githubusercontent.com/bhrumom/fabushi/7b02d8d00e0646e9bf4e90a129cbf203fcff015d/marketplace/packages/global-dharma/1.0.0/app.tar.gz"
+                },
+                "sha256": "43de877dc87b5dff306164eb143baad545ef40bea2247f28cbe21616829478be",
+                "size": 1827,
+                "format": "tar-gz",
+                "entry": "index.html"
+            }]
+        });
+        (source, release)
+    }
+
+    #[test]
+    fn enriches_legacy_github_rows_with_shared_install_contract() {
+        let (source, release) = github_release();
+        let (enriched, install) = enrich_github_release("global-dharma", "1.0.0", &source, release);
+        let install = install.expect("GitHub release should be installable");
+        assert_eq!(install["protocol"], MARKETPLACE_INSTALL_PROTOCOL);
+        assert_eq!(install["strategy"], "github-immutable");
+        assert_eq!(install["source"]["sourceRef"], source["commit"]);
+        assert_eq!(
+            enriched["install"]["source"]["repository"],
+            "https://github.com/bhrumom/fabushi"
+        );
+        assert!(
+            enriched["artifacts"][0]["platforms"]
+                .as_array()
+                .is_some_and(|platforms| platforms
+                    .iter()
+                    .any(|platform| platform == CHROME_EXTENSION_PLATFORM))
+        );
+    }
+
+    #[test]
+    fn rejects_non_github_artifacts_from_the_unified_install_contract() {
+        let (source, mut release) = github_release();
+        release["artifacts"][0]["source"]["url"] =
+            Value::String("https://example.com/plugin.tar.gz".into());
+        let (_, install) = enrich_github_release("global-dharma", "1.0.0", &source, release);
+        assert!(install.is_none());
+    }
 }

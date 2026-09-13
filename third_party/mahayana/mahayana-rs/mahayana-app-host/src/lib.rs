@@ -40,6 +40,8 @@ const TEST_MARKETPLACE_PLUGINS: &[(&str, &str, &str)] = &[
         "受控自动确认与任务协作",
     ),
 ];
+const TEST_MARKETPLACE_REPOSITORY: &str = "https://github.com/bhrumom/fabushi";
+const TEST_MARKETPLACE_SOURCE_REF: &str = "7b02d8d00e0646e9bf4e90a129cbf203fcff015d";
 
 impl From<AppHostFeatureMode> for HostMode {
     fn from(value: AppHostFeatureMode) -> Self {
@@ -204,6 +206,7 @@ impl AppHost {
             "feature.marketplace.release" => self.marketplace_release(params),
             "feature.plugin.install" => self.install_plugin(params),
             "feature.plugin.uninstall" => self.uninstall_plugin(params),
+            "feature.plugin.rollback" => self.rollback_plugin(params),
             "feature.plugin.active" => self.active_plugin(params),
             "feature.plugin.listInstalled" => self.list_installed_plugins(),
             "feature.plugin.uiDocument" => self.plugin_ui_document(params),
@@ -407,6 +410,37 @@ impl AppHost {
                     "test marketplace plugin {plugin_id} was not found"
                 )));
             }
+            let artifact_id = format!("{plugin_id}-test-ui");
+            let artifact_url = format!(
+                "https://raw.githubusercontent.com/bhrumom/fabushi/{TEST_MARKETPLACE_SOURCE_REF}/marketplace/packages/{plugin_id}/1.0.0/app.tar.gz"
+            );
+            let artifact = json!({
+                "id": artifact_id,
+                "runtime": "local-web",
+                "platforms": ["desktop"],
+                "source": {"type": "https", "url": artifact_url},
+                "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                "size": 1,
+                "format": "tar-gz"
+            });
+            let install = json!({
+                "protocol": "fabushi.marketplace.install.v1",
+                "strategy": "github-immutable",
+                "pluginId": plugin_id,
+                "version": version,
+                "source": {
+                    "repository": TEST_MARKETPLACE_REPOSITORY,
+                    "sourceRef": TEST_MARKETPLACE_SOURCE_REF,
+                    "marketplaceHostsPackage": false
+                },
+                "artifacts": [artifact.clone()],
+                "update": {
+                    "check": "marketplace-release",
+                    "comparison": "version-then-artifact-sha256",
+                    "allowDowngrade": false,
+                    "rollback": "previous-active"
+                }
+            });
             return Ok(json!({
                 "pluginId": plugin_id,
                 "version": version,
@@ -416,9 +450,15 @@ impl AppHost {
                     "protocol": "mahayana.external-release.v1",
                     "pluginId": plugin_id,
                     "version": version,
+                    "source": {
+                        "repository": TEST_MARKETPLACE_REPOSITORY,
+                        "sourceRef": TEST_MARKETPLACE_SOURCE_REF
+                    },
                     "permissions": [],
-                    "artifacts": []
-                }
+                    "artifacts": [artifact],
+                    "install": install.clone()
+                },
+                "install": install
             }));
         }
         self.product
@@ -556,6 +596,15 @@ impl AppHost {
         let pointer = self
             .installer()?
             .active(plugin_id)
+            .map_err(|error| AppHostError::Operation(error.to_string()))?;
+        serde_json::to_value(pointer).map_err(|error| AppHostError::Operation(error.to_string()))
+    }
+
+    fn rollback_plugin(&self, params: Value) -> Result<Value, AppHostError> {
+        let plugin_id = string_param(&params, "pluginId")?;
+        let pointer = self
+            .installer()?
+            .rollback(plugin_id)
             .map_err(|error| AppHostError::Operation(error.to_string()))?;
         serde_json::to_value(pointer).map_err(|error| AppHostError::Operation(error.to_string()))
     }

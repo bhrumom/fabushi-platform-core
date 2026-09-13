@@ -990,7 +990,7 @@ impl MahayanaProductClient {
             .map(|platform| {
                 if matches!(
                     platform.as_str(),
-                    "cli" | "desktop" | "mobile" | "web" | "ios" | "android"
+                    "cli" | "desktop" | "mobile" | "web" | "ios" | "android" | "chrome-extension"
                 ) {
                     Ok(platform.clone())
                 } else {
@@ -2774,6 +2774,7 @@ fn safe_marketplace_platform(value: &str) -> Result<&str, ProductError> {
         "web" => Ok("web"),
         "ios" => Ok("ios"),
         "android" => Ok("android"),
+        "chrome-extension" => Ok("chrome-extension"),
         _ => Err(ProductError::InvalidParameter("platform")),
     }
 }
@@ -3576,6 +3577,10 @@ mod tests {
         assert_eq!(safe_marketplace_platform("desktop"), Ok("desktop"));
         assert_eq!(safe_marketplace_platform("ios"), Ok("ios"));
         assert_eq!(safe_marketplace_platform("android"), Ok("android"));
+        assert_eq!(
+            safe_marketplace_platform("chrome-extension"),
+            Ok("chrome-extension")
+        );
         assert_eq!(
             safe_marketplace_platforms(&[
                 "desktop".into(),

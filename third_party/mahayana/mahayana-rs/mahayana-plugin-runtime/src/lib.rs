@@ -13,6 +13,7 @@ use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File};
 use std::io::{self, Cursor, Read};
@@ -82,6 +83,10 @@ pub struct ExternalReleaseManifest {
     #[serde(default)]
     pub permissions: Vec<String>,
     pub artifacts: Vec<ReleaseArtifact>,
+    /// Present for Marketplace releases. Generic external releases may omit
+    /// this field and retain the broader runtime resolver contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install: Option<serde_json::Value>,
 }
 
 impl ExternalReleaseManifest {
@@ -120,6 +125,7 @@ impl ExternalReleaseManifest {
                 "version/artifacts missing".into(),
             ));
         }
+        validate_path_segment(&self.version, "release version")?;
         let mut ids = BTreeSet::new();
         for artifact in &self.artifacts {
             if !ids.insert(&artifact.id) {
@@ -147,6 +153,9 @@ impl ExternalReleaseManifest {
                 )));
             }
             validate_source(&artifact.source)?;
+        }
+        if let Some(install) = &self.install {
+            validate_marketplace_install_contract(self, install)?;
         }
         Ok(())
     }
@@ -583,6 +592,14 @@ impl PluginInstaller {
         }
         verify_bytes(bytes, &artifact.sha256, artifact.size)?;
         let plugin_root = self.root.join(&release.plugin_id);
+        if let Some(active) = self.active(&release.plugin_id)?
+            && compare_install_versions(&release.version, &active.version) == Ordering::Less
+        {
+            return Err(RuntimeError::DowngradeBlocked {
+                current: active.version,
+                candidate: release.version.clone(),
+            });
+        }
         let versions_root = plugin_root.join("versions");
         fs::create_dir_all(&versions_root).map_err(RuntimeError::Io)?;
         let final_dir = versions_root.join(&release.version).join(&artifact.id);
@@ -650,17 +667,60 @@ impl PluginInstaller {
         pointer: &InstalledPluginPointer,
     ) -> Result<(), RuntimeError> {
         fs::create_dir_all(plugin_root).map_err(RuntimeError::Io)?;
+        let active = plugin_root.join("active.json");
+        if active.is_file() {
+            let current: InstalledPluginPointer = serde_json::from_slice(&fs::read(&active)?)
+                .map_err(|error| RuntimeError::InvalidRelease(error.to_string()))?;
+            if current != *pointer {
+                let previous = plugin_root.join("previous-active.json");
+                let bytes = serde_json::to_vec_pretty(&current)
+                    .map_err(|error| RuntimeError::InvalidRelease(error.to_string()))?;
+                let temporary =
+                    plugin_root.join(format!("previous-active.{}.json", Uuid::new_v4()));
+                fs::write(&temporary, bytes).map_err(RuntimeError::Io)?;
+                #[cfg(windows)]
+                if previous.exists() {
+                    fs::remove_file(&previous).map_err(RuntimeError::Io)?;
+                }
+                fs::rename(&temporary, &previous).map_err(RuntimeError::Io)?;
+            }
+        }
         let bytes = serde_json::to_vec_pretty(pointer)
             .map_err(|error| RuntimeError::InvalidRelease(error.to_string()))?;
         let temp = plugin_root.join(format!("active.{}.json", Uuid::new_v4()));
         fs::write(&temp, bytes).map_err(RuntimeError::Io)?;
-        let active = plugin_root.join("active.json");
         #[cfg(windows)]
         if active.exists() {
             fs::remove_file(&active).map_err(RuntimeError::Io)?;
         }
         fs::rename(&temp, &active).map_err(RuntimeError::Io)?;
         Ok(())
+    }
+
+    /// Switch back to the version that was active immediately before the
+    /// latest successful activation. This is intentionally explicit: normal
+    /// installs remain monotonic and cannot silently downgrade.
+    pub fn rollback(
+        &self,
+        plugin_id: &str,
+    ) -> Result<Option<InstalledPluginPointer>, RuntimeError> {
+        validate_identifier(plugin_id, "pluginId")?;
+        let plugin_root = self.root.join(plugin_id);
+        let previous_path = plugin_root.join("previous-active.json");
+        let source = match fs::read(&previous_path) {
+            Ok(source) => source,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(RuntimeError::Io(error)),
+        };
+        let previous: InstalledPluginPointer = serde_json::from_slice(&source)
+            .map_err(|error| RuntimeError::InvalidRelease(error.to_string()))?;
+        if !Path::new(&previous.installed_path).is_dir() {
+            return Err(RuntimeError::InvalidRelease(
+                "previous active plugin files are missing".into(),
+            ));
+        }
+        self.activate(&plugin_root, &previous)?;
+        Ok(Some(previous))
     }
 
     pub fn active(&self, plugin_id: &str) -> Result<Option<InstalledPluginPointer>, RuntimeError> {
@@ -1205,6 +1265,40 @@ fn verify_bytes(
     Ok(())
 }
 
+fn compare_install_versions(candidate: &str, current: &str) -> Ordering {
+    fn normalize(value: &str) -> &str {
+        let trimmed = value.trim();
+        trimmed.strip_prefix('v').unwrap_or(trimmed)
+    }
+    let candidate = normalize(candidate);
+    let current = normalize(current);
+    match (Version::parse(candidate), Version::parse(current)) {
+        (Ok(candidate), Ok(current)) => candidate.cmp(&current),
+        _ => {
+            let tokenize = |value: &str| {
+                value
+                    .split(['.', '+', '-'])
+                    .map(|part| part.parse::<u64>().unwrap_or(0))
+                    .collect::<Vec<_>>()
+            };
+            let candidate_parts = tokenize(candidate);
+            let current_parts = tokenize(current);
+            for index in 0..candidate_parts.len().max(current_parts.len()) {
+                let left = candidate_parts.get(index).copied().unwrap_or_default();
+                let right = current_parts.get(index).copied().unwrap_or_default();
+                if left != right {
+                    return left.cmp(&right);
+                }
+            }
+            match (candidate.contains('-'), current.contains('-')) {
+                (true, false) => Ordering::Less,
+                (false, true) => Ordering::Greater,
+                _ => Ordering::Equal,
+            }
+        }
+    }
+}
+
 fn validate_source(source: &ArtifactSource) -> Result<(), RuntimeError> {
     match source {
         ArtifactSource::Https { url } => {
@@ -1230,6 +1324,159 @@ fn validate_source(source: &ArtifactSource) -> Result<(), RuntimeError> {
         }
     }
     Ok(())
+}
+
+fn validate_marketplace_install_contract(
+    release: &ExternalReleaseManifest,
+    install: &serde_json::Value,
+) -> Result<(), RuntimeError> {
+    let object = install.as_object().ok_or_else(|| {
+        RuntimeError::InvalidRelease("marketplace install contract must be an object".into())
+    })?;
+    if object.get("protocol").and_then(serde_json::Value::as_str)
+        != Some("fabushi.marketplace.install.v1")
+        || object.get("strategy").and_then(serde_json::Value::as_str) != Some("github-immutable")
+        || object.get("pluginId").and_then(serde_json::Value::as_str)
+            != Some(release.plugin_id.as_str())
+        || object.get("version").and_then(serde_json::Value::as_str)
+            != Some(release.version.as_str())
+    {
+        return Err(RuntimeError::InvalidRelease(
+            "marketplace install contract identity or strategy is invalid".into(),
+        ));
+    }
+
+    let source = object
+        .get("source")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            RuntimeError::InvalidRelease("marketplace install contract has no source".into())
+        })?;
+    let repository = source
+        .get("repository")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            RuntimeError::InvalidRelease("marketplace source has no GitHub repository".into())
+        })?;
+    validate_github_repository_url(repository)?;
+    let _source_ref = source
+        .get("sourceRef")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| {
+            RuntimeError::InvalidRelease(
+                "marketplace sourceRef must be a 40-character Git commit".into(),
+            )
+        })?;
+    if source
+        .get("marketplaceHostsPackage")
+        .and_then(serde_json::Value::as_bool)
+        != Some(false)
+    {
+        return Err(RuntimeError::InvalidRelease(
+            "marketplace must not host executable package bytes".into(),
+        ));
+    }
+
+    let contract_artifacts = object
+        .get("artifacts")
+        .and_then(serde_json::Value::as_array)
+        .filter(|artifacts| !artifacts.is_empty())
+        .ok_or_else(|| {
+            RuntimeError::InvalidRelease("marketplace install contract has no artifacts".into())
+        })?;
+    if contract_artifacts.len() != release.artifacts.len()
+        || release
+            .artifacts
+            .iter()
+            .any(|artifact| !is_github_artifact_source(&artifact.source))
+    {
+        return Err(RuntimeError::InvalidRelease(
+            "marketplace artifacts must be GitHub-hosted and match the release".into(),
+        ));
+    }
+    for (artifact, contract) in release.artifacts.iter().zip(contract_artifacts) {
+        let contract_object = contract.as_object().ok_or_else(|| {
+            RuntimeError::InvalidRelease("marketplace artifact contract is invalid".into())
+        })?;
+        let same_id = contract_object
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            == Some(artifact.id.as_str());
+        let same_digest = contract_object
+            .get("sha256")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|digest| digest.eq_ignore_ascii_case(&artifact.sha256));
+        let same_size = contract_object
+            .get("size")
+            .and_then(serde_json::Value::as_u64)
+            == Some(artifact.size);
+        if !(same_id && same_digest && same_size) {
+            return Err(RuntimeError::InvalidRelease(
+                "marketplace install artifact does not match release artifact".into(),
+            ));
+        }
+    }
+    let allow_downgrade = object
+        .get("update")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|update| update.get("allowDowngrade"))
+        .and_then(serde_json::Value::as_bool);
+    if allow_downgrade != Some(false) {
+        return Err(RuntimeError::InvalidRelease(
+            "marketplace updates must reject downgrade".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_github_repository_url(value: &str) -> Result<(), RuntimeError> {
+    let url =
+        Url::parse(value.trim()).map_err(|error| RuntimeError::InvalidSource(error.to_string()))?;
+    if url.scheme() != "https"
+        || !url
+            .host_str()
+            .is_some_and(|host| host.eq_ignore_ascii_case("github.com"))
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(RuntimeError::InvalidSource(
+            "marketplace repository must be a public GitHub URL".into(),
+        ));
+    }
+    let path = url.path().trim_matches('/');
+    let mut parts = path.split('/');
+    let owner = parts.next().unwrap_or_default();
+    let repo = parts.next().unwrap_or_default();
+    if parts.next().is_some() || owner.is_empty() || repo.is_empty() {
+        return Err(RuntimeError::InvalidSource(
+            "marketplace repository must be https://github.com/owner/repo".into(),
+        ));
+    }
+    validate_github_repository(&format!("{owner}/{repo}"))
+}
+
+fn is_github_artifact_source(source: &ArtifactSource) -> bool {
+    match source {
+        ArtifactSource::Https { url } => Url::parse(url.trim()).is_ok_and(|url| {
+            url.scheme() == "https"
+                && url.host_str().is_some_and(|host| {
+                    host.eq_ignore_ascii_case("github.com")
+                        || host.eq_ignore_ascii_case("raw.githubusercontent.com")
+                })
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.port().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none()
+        }),
+        ArtifactSource::GithubRelease { .. } => true,
+        ArtifactSource::Npm { .. } => false,
+    }
 }
 
 fn validate_identifier(value: &str, kind: &'static str) -> Result<(), RuntimeError> {
@@ -1480,6 +1727,8 @@ pub enum RuntimeError {
     SizeMismatch,
     #[error("artifact SHA-256 mismatch")]
     DigestMismatch,
+    #[error("refusing to downgrade plugin from {current} to {candidate}")]
+    DowngradeBlocked { current: String, candidate: String },
     #[error("npm package integrity mismatch")]
     NpmIntegrityMismatch,
     #[error("npm dependency limit exceeded: {0}")]
@@ -1596,6 +1845,7 @@ mod tests {
             version: "1.0.0".into(),
             permissions: vec!["network".into()],
             artifacts: vec![artifact.clone()],
+            install: None,
         };
         let temp = tempfile::tempdir().unwrap();
         let installer = PluginInstaller::new(temp.path()).unwrap();
@@ -1609,6 +1859,163 @@ mod tests {
                 .is_file()
         );
         assert_eq!(installer.active("global-dharma").unwrap(), Some(pointer));
+    }
+
+    #[test]
+    fn updates_are_monotonic_and_keep_an_explicit_previous_active_pointer() {
+        let archive = tar_gz(&[("plugin.json", br#"{"ok":true}"#)]);
+        let digest = format!("{:x}", Sha256::digest(&archive));
+        let artifact = ReleaseArtifact {
+            id: "universal".into(),
+            runtime: "local-web".into(),
+            platforms: vec!["desktop".into(), "chrome-extension".into()],
+            source: ArtifactSource::Https {
+                url: "https://example.com/plugin.tar.gz".into(),
+            },
+            sha256: digest,
+            size: archive.len() as u64,
+            format: ArtifactFormat::TarGz,
+            entry: Some("plugin.json".into()),
+        };
+        let release_v1 = ExternalReleaseManifest {
+            schema_version: 1,
+            protocol: "mahayana.external-release.v1".into(),
+            plugin_id: "monotonic-plugin".into(),
+            version: "1.0.0".into(),
+            permissions: Vec::new(),
+            artifacts: vec![artifact.clone()],
+            install: None,
+        };
+        let release_v2 = ExternalReleaseManifest {
+            version: "2.0.0".into(),
+            ..release_v1.clone()
+        };
+        let release_v15 = ExternalReleaseManifest {
+            version: "1.5.0".into(),
+            ..release_v1.clone()
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let installer = PluginInstaller::new(temp.path()).unwrap();
+        installer
+            .install_verified_bytes(&release_v1, &artifact, &archive)
+            .unwrap();
+        installer
+            .install_verified_bytes(&release_v2, &artifact, &archive)
+            .unwrap();
+        assert_eq!(
+            installer
+                .active("monotonic-plugin")
+                .unwrap()
+                .unwrap()
+                .version,
+            "2.0.0"
+        );
+        assert!(matches!(
+            installer.install_verified_bytes(&release_v15, &artifact, &archive),
+            Err(RuntimeError::DowngradeBlocked { .. })
+        ));
+        assert_eq!(
+            installer
+                .rollback("monotonic-plugin")
+                .unwrap()
+                .unwrap()
+                .version,
+            "1.0.0"
+        );
+        assert_eq!(
+            installer
+                .active("monotonic-plugin")
+                .unwrap()
+                .unwrap()
+                .version,
+            "1.0.0"
+        );
+    }
+
+    #[test]
+    fn marketplace_install_contract_is_github_pinned_and_matches_artifacts() {
+        let release: ExternalReleaseManifest = serde_json::from_value(serde_json::json!({
+            "schemaVersion": 1,
+            "protocol": "mahayana.external-release.v1",
+            "pluginId": "github-plugin",
+            "version": "1.0.0",
+            "permissions": [],
+            "artifacts": [{
+                "id": "universal",
+                "runtime": "local-web",
+                "platforms": ["desktop", "cli"],
+                "source": {
+                    "type": "https",
+                    "url": "https://raw.githubusercontent.com/example/repository/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/extension.tar.gz"
+                },
+                "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "size": 4,
+                "format": "tar-gz",
+                "entry": "index.html"
+            }],
+            "install": {
+                "protocol": "fabushi.marketplace.install.v1",
+                "strategy": "github-immutable",
+                "pluginId": "github-plugin",
+                "version": "1.0.0",
+                "source": {
+                    "repository": "https://github.com/example/repository",
+                    "sourceRef": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "marketplaceHostsPackage": false
+                },
+                "artifacts": [{
+                    "id": "universal",
+                    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "size": 4
+                }],
+                "update": {"allowDowngrade": false}
+            }
+        }))
+        .unwrap();
+        assert!(release.validate().is_ok());
+    }
+
+    #[test]
+    fn marketplace_install_contract_rejects_non_github_artifacts() {
+        let mut release: ExternalReleaseManifest = serde_json::from_value(serde_json::json!({
+            "schemaVersion": 1,
+            "protocol": "mahayana.external-release.v1",
+            "pluginId": "github-plugin",
+            "version": "1.0.0",
+            "permissions": [],
+            "artifacts": [{
+                "id": "universal",
+                "runtime": "local-web",
+                "platforms": ["desktop"],
+                "source": {"type": "https", "url": "https://raw.githubusercontent.com/example/repository/a/archive.tar.gz"},
+                "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "size": 4,
+                "format": "tar-gz",
+                "entry": "index.html"
+            }],
+            "install": {
+                "protocol": "fabushi.marketplace.install.v1",
+                "strategy": "github-immutable",
+                "pluginId": "github-plugin",
+                "version": "1.0.0",
+                "source": {
+                    "repository": "https://github.com/example/repository",
+                    "sourceRef": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "marketplaceHostsPackage": false
+                },
+                "artifacts": [{
+                    "id": "universal",
+                    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "size": 4
+                }],
+                "update": {"allowDowngrade": false}
+            }
+        }))
+        .unwrap();
+        release.artifacts[0].source = ArtifactSource::Https {
+            url: "https://example.com/archive.tar.gz".into(),
+        };
+        assert!(release.validate().is_err());
     }
 
     #[test]
@@ -1634,6 +2041,7 @@ mod tests {
             version: "1.0.0".into(),
             permissions: vec!["network".into()],
             artifacts: vec![artifact.clone()],
+            install: None,
         };
         let temp = tempfile::tempdir().unwrap();
         let installer = PluginInstaller::new(temp.path()).unwrap();
