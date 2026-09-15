@@ -3,6 +3,107 @@ use super::*;
 const MARKETPLACE_INSTALL_PROTOCOL: &str = "fabushi.marketplace.install.v1";
 const CHROME_EXTENSION_PLATFORM: &str = "chrome-extension";
 
+// The Chrome extension has a separately released userscript runtime.  Keep
+// this projection independent from the desktop Mini App release in D1: a
+// Chrome client may still be running an older unpacked extension whose
+// bundled fallback is stale, while desktop clients must continue to receive
+// the approved Mini App package.  The immutable commit, byte count and
+// digest are checked again by the extension before installation.
+const CHATGPT_USERSCRIPT_PLUGIN_ID: &str = "chatgpt-auto-confirm";
+const CHATGPT_USERSCRIPT_VERSION: &str = "2.9.30";
+const CHATGPT_USERSCRIPT_REPOSITORY: &str =
+    "https://github.com/bhrumom/fabushi-chatgpt-auto-confirm-userscript";
+const CHATGPT_USERSCRIPT_COMMIT: &str = "480ebe61ba039f15e7023bbc0253ea23c373aba0";
+const CHATGPT_USERSCRIPT_RELEASE_URL: &str =
+    "https://github.com/bhrumom/fabushi-chatgpt-auto-confirm-userscript/releases/tag/v2.9.30";
+const CHATGPT_USERSCRIPT_ARTIFACT_URL: &str = "https://raw.githubusercontent.com/bhrumom/fabushi-chatgpt-auto-confirm-userscript/480ebe61ba039f15e7023bbc0253ea23c373aba0/chatgpt-auto-confirm.user.js";
+const CHATGPT_USERSCRIPT_SHA256: &str =
+    "d15040a5d420b0fa4cc38b195f178143a2d22a166e3357f88c7159c6b7a3b14a";
+const CHATGPT_USERSCRIPT_SIZE: i64 = 224_113;
+const CHATGPT_USERSCRIPT_PUBLISHED_AT: i64 = 1_789_406_675;
+
+fn chatgpt_userscript_projection() -> Value {
+    let permissions = json!(["读取 ChatGPT 页面状态", "显示任务队列", "仅在匹配页面运行"]);
+    let artifact = json!({
+        "id": "chatgpt-auto-confirm-userscript",
+        "runtime": "userscript",
+        "platforms": [CHROME_EXTENSION_PLATFORM],
+        "source": {
+            "type": "https",
+            "url": CHATGPT_USERSCRIPT_ARTIFACT_URL,
+        },
+        "sha256": CHATGPT_USERSCRIPT_SHA256,
+        "size": CHATGPT_USERSCRIPT_SIZE,
+        "format": "user-js",
+        "entry": "chatgpt-auto-confirm.user.js",
+    });
+    let surfaces = json!([{
+        "id": "userscript",
+        "kind": "userscript",
+        "title": "ChatGPT 网页油猴脚本",
+        "entry": "chatgpt-auto-confirm.user.js",
+        "platforms": [CHROME_EXTENSION_PLATFORM],
+    }]);
+    let source = json!({
+        "provider": "github",
+        "repository": CHATGPT_USERSCRIPT_REPOSITORY,
+        "sourceRef": CHATGPT_USERSCRIPT_COMMIT,
+        "releaseUrl": CHATGPT_USERSCRIPT_RELEASE_URL,
+        "marketplaceHostsPackage": false,
+    });
+    let install = json!({
+        "protocol": MARKETPLACE_INSTALL_PROTOCOL,
+        "strategy": "github-immutable",
+        "pluginId": CHATGPT_USERSCRIPT_PLUGIN_ID,
+        "version": CHATGPT_USERSCRIPT_VERSION,
+        "source": source.clone(),
+        "artifacts": [artifact.clone()],
+        "update": {
+            "check": "marketplace-release",
+            "comparison": "version-then-artifact-sha256",
+            "allowDowngrade": false,
+            "rollback": "previous-active",
+        },
+        "permissions": permissions.clone(),
+    });
+    let release_manifest = json!({
+        "schemaVersion": 1,
+        "protocol": "mahayana.external-release.v1",
+        "pluginId": CHATGPT_USERSCRIPT_PLUGIN_ID,
+        "version": CHATGPT_USERSCRIPT_VERSION,
+        "runtimeForm": "userscript",
+        "runtime": "userscript",
+        "entry": "chatgpt-auto-confirm.user.js",
+        "surfaces": surfaces.clone(),
+        "permissions": permissions.clone(),
+        "artifacts": [artifact.clone()],
+        "source": source.clone(),
+        "install": install.clone(),
+    });
+    let release_manifest_sha256 = canonical_json_sha256(&release_manifest).unwrap_or_default();
+    json!({
+        "pluginId": CHATGPT_USERSCRIPT_PLUGIN_ID,
+        "displayName": "ChatGPT 自动确认",
+        "description": "独立运行于 ChatGPT 网页的自动确认、对话和可恢复任务队列控制台，不依赖 Fabushi 桌面端。",
+        "latestVersion": CHATGPT_USERSCRIPT_VERSION,
+        "runtimeForm": "userscript",
+        "installMode": "package",
+        "platforms": [CHROME_EXTENSION_PLATFORM],
+        "packageSha256": CHATGPT_USERSCRIPT_SHA256,
+        "packageSize": CHATGPT_USERSCRIPT_SIZE,
+        "deploymentUrl": CHATGPT_USERSCRIPT_ARTIFACT_URL,
+        "publishedAt": CHATGPT_USERSCRIPT_PUBLISHED_AT,
+        "source": source.clone(),
+        "surfaces": surfaces.clone(),
+        "commands": [],
+        "permissions": permissions.clone(),
+        "releaseManifest": release_manifest,
+        "install": install,
+        "releaseManifestSha256": release_manifest_sha256,
+        "releaseStatus": "approved",
+    })
+}
+
 fn normalized_github_repository(value: &str) -> Option<String> {
     let value = value.trim();
     let repository = if value.starts_with("https://") {
@@ -292,6 +393,16 @@ pub(super) async fn marketplace_plugins(
     let plugins = rows
         .into_iter()
         .filter_map(|row| {
+            // The public Chrome catalog must expose the separately released
+            // userscript even while the D1 row still points at the desktop
+            // Mini App package.  Without this projection an older extension
+            // merges its bundled 2.9.28 fallback over the 1.0.1 package and
+            // incorrectly reports that it is up to date.
+            if platform.as_deref() == Some(CHROME_EXTENSION_PLATFORM)
+                && row.plugin_id == CHATGPT_USERSCRIPT_PLUGIN_ID
+            {
+                return Some(chatgpt_userscript_projection());
+            }
             let platforms =
                 serde_json::from_str::<Vec<String>>(&row.platforms_json).unwrap_or_default();
             let source = serde_json::from_str::<Value>(&row.source_json).unwrap_or(Value::Null);
@@ -1165,6 +1276,9 @@ pub(super) async fn marketplace_release_metadata(
 ) -> Result<Response> {
     let plugin_id = route_identifier(&context, "plugin_id")?;
     let version = route_version(&context)?;
+    if plugin_id == CHATGPT_USERSCRIPT_PLUGIN_ID && version == CHATGPT_USERSCRIPT_VERSION {
+        return Response::from_json(&chatgpt_userscript_projection());
+    }
     let database = context.env.d1(DATABASE_BINDING)?;
     let row = worker::query!(
         &database,
@@ -1549,5 +1663,50 @@ mod tests {
             Value::String("https://example.com/plugin.tar.gz".into());
         let (_, install) = enrich_github_release("global-dharma", "1.0.0", &source, release);
         assert!(install.is_none());
+    }
+
+    #[test]
+    fn exposes_the_pinned_chatgpt_userscript_as_a_chrome_only_projection() {
+        let projection = chatgpt_userscript_projection();
+        assert_eq!(projection["pluginId"], CHATGPT_USERSCRIPT_PLUGIN_ID);
+        assert_eq!(projection["latestVersion"], CHATGPT_USERSCRIPT_VERSION);
+        assert_eq!(projection["platforms"], json!([CHROME_EXTENSION_PLATFORM]));
+        assert_eq!(
+            projection["install"]["source"]["sourceRef"],
+            CHATGPT_USERSCRIPT_COMMIT
+        );
+        assert_eq!(
+            projection["install"]["artifacts"][0]["sha256"],
+            CHATGPT_USERSCRIPT_SHA256
+        );
+        assert_eq!(
+            projection["install"]["artifacts"][0]["size"],
+            CHATGPT_USERSCRIPT_SIZE
+        );
+        assert_eq!(projection["releaseManifest"]["runtimeForm"], "userscript");
+        assert_eq!(
+            projection["releaseManifest"]["surfaces"][0]["platforms"],
+            json!([CHROME_EXTENSION_PLATFORM])
+        );
+        assert_eq!(
+            projection["releaseManifest"]["install"]["protocol"],
+            MARKETPLACE_INSTALL_PROTOCOL
+        );
+        assert!(release_supports_chrome_extension(
+            &projection["releaseManifest"]
+        ));
+        assert!(
+            github_install_contract(
+                CHATGPT_USERSCRIPT_PLUGIN_ID,
+                CHATGPT_USERSCRIPT_VERSION,
+                &projection["source"],
+                &projection["releaseManifest"],
+            )
+            .is_some()
+        );
+        assert_eq!(
+            projection["releaseManifestSha256"].as_str().map(str::len),
+            Some(64)
+        );
     }
 }
