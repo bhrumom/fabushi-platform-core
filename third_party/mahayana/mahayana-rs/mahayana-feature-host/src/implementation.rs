@@ -7060,6 +7060,15 @@ impl FeatureHostController {
         query: Option<String>,
     ) -> Result<CommandAccepted, FeatureHostError> {
         self.require_authenticated_account()?;
+        self.production_list_conversations_from_runtime(request_id, query)
+    }
+
+    #[cfg(feature = "production")]
+    fn production_list_conversations_from_runtime(
+        &self,
+        request_id: String,
+        query: Option<String>,
+    ) -> Result<CommandAccepted, FeatureHostError> {
         let conversations = match self.runtime()?.execute(RuntimeCommand::ListConversations)? {
             RuntimeResponse::Conversations { data } => data,
             other => return Err(unexpected_response("conversation.list", other)),
@@ -7101,6 +7110,15 @@ impl FeatureHostController {
         conversation_id: String,
     ) -> Result<CommandAccepted, FeatureHostError> {
         self.require_authenticated_account()?;
+        self.production_open_conversation_from_runtime(request_id, conversation_id)
+    }
+
+    #[cfg(feature = "production")]
+    fn production_open_conversation_from_runtime(
+        &self,
+        request_id: String,
+        conversation_id: String,
+    ) -> Result<CommandAccepted, FeatureHostError> {
         let conversation_id = required(conversation_id, "conversationId")?;
         let messages = match self
             .runtime()?
@@ -13066,5 +13084,203 @@ mod tests {
                 && code == "provider_error"
                 && message == "provider unavailable"
         ));
+    }
+
+    #[cfg(feature = "production")]
+    #[derive(Default)]
+    struct FcmUnreadBackend;
+
+    #[cfg(feature = "production")]
+    #[async_trait::async_trait]
+    impl mahayana_kernel::EngineBackend for FcmUnreadBackend {
+        fn descriptor(&self) -> mahayana_kernel::BackendDescriptor {
+            mahayana_kernel::BackendDescriptor {
+                id: "fcm-unread-test".into(),
+                display_name: "FCM unread deterministic backend".into(),
+                native: true,
+                capabilities: mahayana_kernel::CapabilitySet::new([
+                    mahayana_kernel::Capability::Model,
+                ]),
+            }
+        }
+
+        async fn open_session(
+            &self,
+            _request: mahayana_kernel::OpenSessionRequest,
+        ) -> Result<mahayana_kernel::SessionId, mahayana_kernel::KernelError> {
+            Ok(mahayana_kernel::SessionId::new())
+        }
+
+        async fn run(
+            &self,
+            request: mahayana_kernel::RunRequest,
+            events: mahayana_kernel::SharedKernelEventSink,
+        ) -> Result<(), mahayana_kernel::KernelError> {
+            events.emit(mahayana_kernel::KernelEvent::MessageCompleted {
+                operation_id: request.operation_id,
+                text: "deterministic assistant completion".into(),
+            })
+        }
+
+        async fn interrupt(
+            &self,
+            _operation_id: &mahayana_kernel::OperationId,
+        ) -> Result<(), mahayana_kernel::KernelError> {
+            Ok(())
+        }
+
+        async fn resolve_approval(
+            &self,
+            _resolution: mahayana_kernel::ApprovalResolution,
+        ) -> Result<(), mahayana_kernel::KernelError> {
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "production")]
+    fn fcm_unread_production_controller() -> FeatureHostController {
+        let profile = format!("fcm-unread-cross-layer-{}", std::process::id());
+        let host_config = isolated_host_config(&profile);
+        let runtime = MahayanaHost::create_with_engine_backend_for_test(
+            host_config,
+            std::sync::Arc::new(FcmUnreadBackend),
+        )
+        .expect("create deterministic production runtime");
+        let mut controller = FeatureHostController::create_test_backend(
+            HostConfig {
+                profile_id: profile,
+                mode: HostMode::Test,
+            },
+            SurfacePlatform::Electron,
+            None,
+        );
+        controller.config.mode = HostMode::Production;
+        controller.runtime = Some(runtime);
+        controller
+    }
+
+    #[cfg(feature = "production")]
+    fn fcm_assistant_unread(controller: &FeatureHostController, request_id: &str) -> u32 {
+        controller
+            .production_list_conversations_from_runtime(request_id.into(), None)
+            .expect("authoritative conversation.list");
+        let mut state = controller.state().expect("feature state");
+        while let Some(event) = state.events.pop_back() {
+            if let HostEvent::ConversationListed { conversations, .. } = event {
+                return conversations
+                    .into_iter()
+                    .find(|conversation| conversation.id == MAHAYANA_AI_CONVERSATION_ID)
+                    .expect("assistant conversation")
+                    .unread_count;
+            }
+        }
+        panic!("conversation.list event missing")
+    }
+
+    #[cfg(feature = "production")]
+    fn wait_for_fcm_assistant_unread(
+        controller: &FeatureHostController,
+        expected: u32,
+        request_id: &str,
+    ) {
+        for attempt in 0..100 {
+            if fcm_assistant_unread(controller, &format!("{request_id}-{attempt}")) == expected {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("assistant unread did not become {expected}")
+    }
+
+    #[cfg(feature = "production")]
+    #[test]
+    fn fcm_010_13_11_production_adapter_keeps_read_boundary_conversation_scoped() {
+        let controller = fcm_unread_production_controller();
+        let assistant = ConversationId(MAHAYANA_AI_CONVERSATION_ID.to_string());
+        let research = ConversationId("codex:agent:research".to_string());
+
+        assert_eq!(fcm_assistant_unread(&controller, "initial-list"), 0);
+
+        controller
+            .runtime()
+            .expect("runtime")
+            .execute(RuntimeCommand::SendMessage {
+                conversation_id: assistant.clone(),
+                text: "visible assistant completion".into(),
+                client_message_id: Some("visible-completion".into()),
+                hidden: false,
+            })
+            .expect("visible production runtime send");
+        wait_for_fcm_assistant_unread(&controller, 1, "after-visible");
+
+        controller
+            .production_open_conversation_from_runtime("open-research".into(), research.0.clone())
+            .expect("explicit unrelated conversation.open");
+        assert_eq!(
+            fcm_assistant_unread(&controller, "after-unrelated-open"),
+            1,
+            "opening a shared-provider codex conversation must not clear assistant unread"
+        );
+
+        controller
+            .runtime()
+            .expect("runtime")
+            .execute(RuntimeCommand::ConversationHistory {
+                conversation_id: assistant.clone(),
+                limit: Some(2_000),
+            })
+            .expect("background history request clamped by Runtime");
+        assert_eq!(
+            fcm_assistant_unread(&controller, "after-background-history"),
+            1,
+            "Runtime clamp=500 background history must not acknowledge unread"
+        );
+
+        let visible_history_before_hidden = match controller
+            .runtime()
+            .expect("runtime")
+            .execute(RuntimeCommand::ConversationHistory {
+                conversation_id: assistant.clone(),
+                limit: Some(500),
+            })
+            .expect("visible history before hidden completion")
+        {
+            RuntimeResponse::History { data } => data.len(),
+            other => panic!("unexpected history response: {other:?}"),
+        };
+        controller
+            .runtime()
+            .expect("runtime")
+            .execute(RuntimeCommand::SendMessage {
+                conversation_id: assistant.clone(),
+                text: "hidden background completion".into(),
+                client_message_id: Some("hidden-completion".into()),
+                hidden: true,
+            })
+            .expect("hidden production runtime send");
+        std::thread::sleep(Duration::from_millis(25));
+        assert_eq!(fcm_assistant_unread(&controller, "after-hidden"), 1);
+        let visible_history_after_hidden = match controller
+            .runtime()
+            .expect("runtime")
+            .execute(RuntimeCommand::ConversationHistory {
+                conversation_id: assistant.clone(),
+                limit: Some(500),
+            })
+            .expect("visible history after hidden completion")
+        {
+            RuntimeResponse::History { data } => data.len(),
+            other => panic!("unexpected history response: {other:?}"),
+        };
+        assert_eq!(visible_history_after_hidden, visible_history_before_hidden);
+
+        controller
+            .production_open_conversation_from_runtime("open-assistant".into(), assistant.0.clone())
+            .expect("explicit assistant conversation.open");
+        assert_eq!(
+            fcm_assistant_unread(&controller, "after-assistant-open"),
+            0,
+            "only explicit assistant open may clear assistant unread"
+        );
     }
 }

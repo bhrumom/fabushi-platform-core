@@ -146,6 +146,46 @@ impl MahayanaHost {
         })
     }
 
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn create_with_engine_backend_for_test(
+        config: HostCreateConfig,
+        backend: Arc<dyn EngineBackend>,
+    ) -> Result<Self, HostError> {
+        let api_base_url = env::var("MAHAYANA_API_BASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "https://api.ombhrum.com".to_string());
+        let product_client = match (
+            config.product_session_path.clone(),
+            config.product_surface_state_path.clone(),
+        ) {
+            (Some(session_path), Some(surface_state_path)) => {
+                MahayanaProductClient::new_with_surface_state_path(
+                    api_base_url.clone(),
+                    session_path,
+                    surface_state_path,
+                )
+            }
+            (Some(session_path), None) => {
+                MahayanaProductClient::new(api_base_url.clone(), session_path)
+            }
+            (None, Some(surface_state_path)) => MahayanaProductClient::new_with_surface_state_path(
+                api_base_url,
+                default_product_session_path(),
+                surface_state_path,
+            ),
+            (None, None) => MahayanaProductClient::default(),
+        };
+        let runtime = RuntimeBuilder::new(config.runtime)
+            .with_engine_backend(backend)?
+            .build()?;
+        Ok(Self {
+            runtime: Arc::new(runtime),
+            product_client,
+        })
+    }
+
     pub fn status(&self) -> RuntimeStatus {
         self.runtime.status()
     }

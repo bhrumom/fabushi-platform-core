@@ -18,6 +18,7 @@ web-wasm = ["mahayana-runtime-core/web-wasm"]
 local-only = ["mahayana-runtime-core/local-only"]
 remote-model-provider = ["mahayana-runtime-core/remote-model-provider"]
 telemetry = ["mahayana-runtime-core/telemetry"]
+test-support = []
 codex-compat = ["dep:mahayana-agent-codex", "dep:codex-protocol"]
 
 [dependencies]
