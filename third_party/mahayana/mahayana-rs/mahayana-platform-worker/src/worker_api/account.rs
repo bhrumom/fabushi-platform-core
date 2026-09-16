@@ -1706,6 +1706,9 @@ fn browser_result_page_for_device(
     attempt_id: Option<&str>,
     device_id: &str,
 ) -> Result<Response> {
+    if device_id == "fabushi-web-wasm" || device_id.starts_with("fabushi-web-") {
+        return browser_web_result_page(success, message, attempt_id);
+    }
     if success {
         if let Some(request_id) = device_id.strip_prefix("mcp-oauth-") {
             let valid = (32..=128).contains(&request_id.len())
@@ -1724,6 +1727,46 @@ fn browser_result_page_for_device(
         }
     }
     browser_result_page(success, message, attempt_id)
+}
+
+fn browser_web_result_page(
+    success: bool,
+    message: &str,
+    attempt_id: Option<&str>,
+) -> Result<Response> {
+    let status = if success { "completed" } else { "failed" };
+    let attempt_literal =
+        serde_json::to_string(attempt_id.unwrap_or_default()).unwrap_or_else(|_| "\"\"".into());
+    let close_script = if success {
+        format!(
+            "try{{window.opener?.postMessage({{type:'fabushi.auth.complete',status:'{status}',attemptId:{attempt_literal}}},'https://web.ombhrum.com')}}catch{{}}setTimeout(()=>{{try{{window.close()}}catch{{}}}},220);"
+        )
+    } else {
+        String::new()
+    };
+    let tone = if success { "ok" } else { "warn" };
+    let eyebrow = if success {
+        "AUTHENTICATED"
+    } else {
+        "LOGIN INTERRUPTED"
+    };
+    browser_html_response(format!(
+        r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Fabushi Web 登录</title><style>*{{box-sizing:border-box}}html,body{{margin:0;min-height:100%;background:#080808;color:#f6f6f2;font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}body{{min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(circle at 50% 35%,rgba(121,98,255,.12),transparent 29%),#080808}}main{{width:min(440px,100%);padding:42px;border:1px solid rgba(255,255,255,.1);border-radius:28px;background:rgba(18,18,18,.94);box-shadow:0 40px 100px rgba(0,0,0,.55);text-align:center}}.state{{width:9px;height:9px;display:inline-block;margin-right:7px;border-radius:50%;background:#72d8ad;box-shadow:0 0 0 6px rgba(114,216,173,.08)}}main[data-tone="warn"] .state{{background:#ff9b7f;box-shadow:0 0 0 6px rgba(255,155,127,.08)}}.eyebrow{{margin:0 0 10px;color:#8d7ee8;font-size:10px;font-weight:850;letter-spacing:.17em}}h1{{margin:0;font-size:26px;font-weight:580;letter-spacing:-.035em}}p{{margin:14px auto 0;color:#8f8f8f;font-size:13px;line-height:1.65}}.return{{height:46px;margin-top:26px;display:flex;align-items:center;justify-content:center;border-radius:13px;background:#f0f0ec;color:#101010;text-decoration:none;font-size:13px;font-weight:780}}small{{display:block;margin-top:18px;color:#5f5f5f;font-size:10px;line-height:1.6}}</style></head><body><main data-tone="{tone}"><p class="eyebrow"><span class="state"></span>{eyebrow}</p><h1>{title}</h1><p>{message}</p><a class="return" href="https://web.ombhrum.com/">返回 Fabushi Web</a><small>{hint}</small></main><script>{close_script}</script></body></html>"#,
+        tone = tone,
+        eyebrow = eyebrow,
+        title = if success {
+            "登录成功"
+        } else {
+            "登录未完成"
+        },
+        message = html_escape(message),
+        hint = if success {
+            "正在关闭登录窗口；Fabushi Web 会通过一次性会话领取登录结果。"
+        } else {
+            "请返回 Fabushi Web 后重新发起登录。"
+        },
+        close_script = close_script,
+    ))
 }
 
 fn browser_result_page(success: bool, message: &str, attempt_id: Option<&str>) -> Result<Response> {
@@ -1753,13 +1796,7 @@ fn browser_result_page_with_status(
             )
         })
         .unwrap_or_default();
-    let wake_script = deep_link
-        .as_deref()
-        .map(|link| {
-            let literal = serde_json::to_string(link).unwrap_or_else(|_| "null".into());
-            format!("setTimeout(()=>{{try{{window.location.href={literal}}}catch{{}}}},350);")
-        })
-        .unwrap_or_default();
+    let wake_script = "";
     let tone = if success { "ok" } else { "warn" };
     let eyebrow = if success {
         "AUTHENTICATED"
@@ -1767,7 +1804,7 @@ fn browser_result_page_with_status(
         "LOGIN INTERRUPTED"
     };
     browser_html_response(format!(
-        r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Fabushi 登录</title><style>*{{box-sizing:border-box}}html,body{{margin:0;min-height:100%;background:#080808;color:#f6f6f2;font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}body{{min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(circle at 50% 35%,rgba(121,98,255,.12),transparent 29%),#080808}}main{{width:min(440px,100%);padding:42px;border:1px solid rgba(255,255,255,.1);border-radius:28px;background:rgba(18,18,18,.94);box-shadow:0 40px 100px rgba(0,0,0,.55);text-align:center}}.mark{{position:relative;width:72px;height:78px;margin:0 auto 28px;border-radius:52% 48% 57% 43% / 46% 58% 42% 54%;background:#f4f4f0;animation:float 4.6s ease-in-out infinite}}.mark:before,.mark:after{{content:"";position:absolute;top:34px;width:8px;height:10px;border-radius:999px;background:#101010}}.mark:before{{left:23px}}.mark:after{{right:23px}}.ring{{position:absolute;inset:-10px;border:1px solid rgba(255,255,255,.1);border-radius:47% 53% 50% 50%;animation:orbit 8s linear infinite}}.eyebrow{{margin:0 0 10px;color:#8d7ee8;font-size:10px;font-weight:850;letter-spacing:.17em}}h1{{margin:0;font-size:26px;font-weight:580;letter-spacing:-.035em}}p{{margin:14px auto 0;color:#8f8f8f;font-size:13px;line-height:1.65}}.state{{width:9px;height:9px;display:inline-block;margin-right:7px;border-radius:50%;background:#72d8ad;box-shadow:0 0 0 6px rgba(114,216,173,.08)}}main[data-tone="warn"] .state{{background:#ff9b7f;box-shadow:0 0 0 6px rgba(255,155,127,.08)}}.return{{height:46px;margin-top:26px;display:flex;align-items:center;justify-content:center;border-radius:13px;background:#f0f0ec;color:#101010;text-decoration:none;font-size:13px;font-weight:780}}small{{display:block;margin-top:18px;color:#5f5f5f;font-size:10px;line-height:1.6}}@keyframes float{{0%,100%{{transform:translateY(0) rotate(-2deg)}}50%{{transform:translateY(-5px) rotate(2deg)}}}}@keyframes orbit{{to{{transform:rotate(360deg)}}}}@media(max-width:640px){{html,body{{background:#fafaf7;color:#171717}}body{{display:block;min-height:100svh;padding:0;background:#fafaf7}}main{{min-height:100svh;width:100%;padding:90px 28px max(34px,env(safe-area-inset-bottom));border:0;border-radius:0;background:#fafaf7;box-shadow:none;display:flex;flex-direction:column;justify-content:center}}.mark{{background:#171717}}.mark:before,.mark:after{{background:#fff}}h1{{font-size:30px}}p{{color:#777771}}.return{{background:#171717;color:#fff;height:56px;border-radius:14px}}small{{color:#9a9a94}}}}@media(prefers-reduced-motion:reduce){{*{{animation:none!important}}}}</style></head><body><main data-tone="{tone}"><div class="mark"><i class="ring"></i></div><p class="eyebrow"><span class="state"></span>{eyebrow}</p><h1>{title}</h1><p>{message}</p>{link_markup}<small>如果 Fabushi 没有自动返回，请点击上方按钮；登录结果仍会通过一次性会话安全领取。</small></main><script>{wake_script}</script></body></html>"#,
+        r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Fabushi 登录</title><style>*{{box-sizing:border-box}}html,body{{margin:0;min-height:100%;background:#080808;color:#f6f6f2;font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}body{{min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(circle at 50% 35%,rgba(121,98,255,.12),transparent 29%),#080808}}main{{width:min(440px,100%);padding:42px;border:1px solid rgba(255,255,255,.1);border-radius:28px;background:rgba(18,18,18,.94);box-shadow:0 40px 100px rgba(0,0,0,.55);text-align:center}}.mark{{position:relative;width:72px;height:78px;margin:0 auto 28px;border-radius:52% 48% 57% 43% / 46% 58% 42% 54%;background:#f4f4f0;animation:float 4.6s ease-in-out infinite}}.mark:before,.mark:after{{content:"";position:absolute;top:34px;width:8px;height:10px;border-radius:999px;background:#101010}}.mark:before{{left:23px}}.mark:after{{right:23px}}.ring{{position:absolute;inset:-10px;border:1px solid rgba(255,255,255,.1);border-radius:47% 53% 50% 50%;animation:orbit 8s linear infinite}}.eyebrow{{margin:0 0 10px;color:#8d7ee8;font-size:10px;font-weight:850;letter-spacing:.17em}}h1{{margin:0;font-size:26px;font-weight:580;letter-spacing:-.035em}}p{{margin:14px auto 0;color:#8f8f8f;font-size:13px;line-height:1.65}}.state{{width:9px;height:9px;display:inline-block;margin-right:7px;border-radius:50%;background:#72d8ad;box-shadow:0 0 0 6px rgba(114,216,173,.08)}}main[data-tone="warn"] .state{{background:#ff9b7f;box-shadow:0 0 0 6px rgba(255,155,127,.08)}}.return{{height:46px;margin-top:26px;display:flex;align-items:center;justify-content:center;border-radius:13px;background:#f0f0ec;color:#101010;text-decoration:none;font-size:13px;font-weight:780}}small{{display:block;margin-top:18px;color:#5f5f5f;font-size:10px;line-height:1.6}}@keyframes float{{0%,100%{{transform:translateY(0) rotate(-2deg)}}50%{{transform:translateY(-5px) rotate(2deg)}}}}@keyframes orbit{{to{{transform:rotate(360deg)}}}}@media(max-width:640px){{html,body{{background:#fafaf7;color:#171717}}body{{display:block;min-height:100svh;padding:0;background:#fafaf7}}main{{min-height:100svh;width:100%;padding:90px 28px max(34px,env(safe-area-inset-bottom));border:0;border-radius:0;background:#fafaf7;box-shadow:none;display:flex;flex-direction:column;justify-content:center}}.mark{{background:#171717}}.mark:before,.mark:after{{background:#fff}}h1{{font-size:30px}}p{{color:#777771}}.return{{background:#171717;color:#fff;height:56px;border-radius:14px}}small{{color:#9a9a94}}}}@media(prefers-reduced-motion:reduce){{*{{animation:none!important}}}}</style></head><body><main data-tone="{tone}"><div class="mark"><i class="ring"></i></div><p class="eyebrow"><span class="state"></span>{eyebrow}</p><h1>{title}</h1><p>{message}</p>{link_markup}<small>返回按钮仅用于唤醒已安装的 Fabushi 客户端；登录结果仍会通过一次性会话安全领取。</small></main><script>{wake_script}</script></body></html>"#,
         tone = tone,
         eyebrow = eyebrow,
         title = if success {
