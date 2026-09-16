@@ -16,7 +16,7 @@ const CHATGPT_USERSCRIPT_REPOSITORY: &str =
 const CHATGPT_USERSCRIPT_COMMIT: &str = "50569be0ab88909408ed8880a24c185906d760eb";
 const CHATGPT_USERSCRIPT_RELEASE_URL: &str =
     "https://github.com/bhrumom/fabushi-chatgpt-auto-confirm-userscript/releases/tag/v2.9.32";
-const CHATGPT_USERSCRIPT_ARTIFACT_URL: &str = "https://github.com/bhrumom/fabushi-chatgpt-auto-confirm-userscript/releases/download/v2.9.32/chatgpt-auto-confirm.user.js";
+const CHATGPT_USERSCRIPT_ARTIFACT_URL: &str = "https://raw.githubusercontent.com/bhrumom/fabushi-chatgpt-auto-confirm-userscript/50569be0ab88909408ed8880a24c185906d760eb/chatgpt-auto-confirm.user.js";
 const CHATGPT_USERSCRIPT_SHA256: &str =
     "30ec1f70e0c14a8ebbd530b2cf0186a2d63690bf85e45b8ec8d0e1a81090e9e7";
 const CHATGPT_USERSCRIPT_SIZE: i64 = 234_862;
