@@ -10,17 +10,17 @@ const CHROME_EXTENSION_PLATFORM: &str = "chrome-extension";
 // the approved Mini App package.  The immutable commit, byte count and
 // digest are checked again by the extension before installation.
 const CHATGPT_USERSCRIPT_PLUGIN_ID: &str = "chatgpt-auto-confirm";
-const CHATGPT_USERSCRIPT_VERSION: &str = "2.9.31";
+const CHATGPT_USERSCRIPT_VERSION: &str = "2.9.32";
 const CHATGPT_USERSCRIPT_REPOSITORY: &str =
     "https://github.com/bhrumom/fabushi-chatgpt-auto-confirm-userscript";
-const CHATGPT_USERSCRIPT_COMMIT: &str = "5f7d1f26a9883e6806ec855f5f2177ad737aa07e";
+const CHATGPT_USERSCRIPT_COMMIT: &str = "50569be0ab88909408ed8880a24c185906d760eb";
 const CHATGPT_USERSCRIPT_RELEASE_URL: &str =
-    "https://github.com/bhrumom/fabushi-chatgpt-auto-confirm-userscript/releases/tag/v2.9.31";
-const CHATGPT_USERSCRIPT_ARTIFACT_URL: &str = "https://raw.githubusercontent.com/bhrumom/fabushi-chatgpt-auto-confirm-userscript/5f7d1f26a9883e6806ec855f5f2177ad737aa07e/chatgpt-auto-confirm.user.js";
+    "https://github.com/bhrumom/fabushi-chatgpt-auto-confirm-userscript/releases/tag/v2.9.32";
+const CHATGPT_USERSCRIPT_ARTIFACT_URL: &str = "https://github.com/bhrumom/fabushi-chatgpt-auto-confirm-userscript/releases/download/v2.9.32/chatgpt-auto-confirm.user.js";
 const CHATGPT_USERSCRIPT_SHA256: &str =
-    "1e025a9b64bcba225059a0768fb08b5bcf818f902f8c7c4e5980505958e6fe2a";
-const CHATGPT_USERSCRIPT_SIZE: i64 = 225_544;
-const CHATGPT_USERSCRIPT_PUBLISHED_AT: i64 = 1_789_449_292;
+    "30ec1f70e0c14a8ebbd530b2cf0186a2d63690bf85e45b8ec8d0e1a81090e9e7";
+const CHATGPT_USERSCRIPT_SIZE: i64 = 234_862;
+const CHATGPT_USERSCRIPT_PUBLISHED_AT: i64 = 1_789_483_274;
 
 fn chatgpt_userscript_projection() -> Value {
     let permissions = json!(["读取 ChatGPT 页面状态", "显示任务队列", "仅在匹配页面运行"]);
