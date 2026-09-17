@@ -98,15 +98,32 @@ impl AppHost {
         app_data_dir: impl Into<PathBuf>,
         feature_mode: AppHostFeatureMode,
     ) -> Result<Self, AppHostError> {
+        Self::new_with_feature_mode_and_storage_passphrase(app_data_dir, feature_mode, None)
+    }
+
+    pub fn new_with_feature_mode_and_storage_passphrase(
+        app_data_dir: impl Into<PathBuf>,
+        feature_mode: AppHostFeatureMode,
+        storage_passphrase: Option<String>,
+    ) -> Result<Self, AppHostError> {
         let app_data_dir = app_data_dir.into();
         std::fs::create_dir_all(&app_data_dir)
             .map_err(|error| AppHostError::Operation(error.to_string()))?;
         let feature_root = feature_host_root(&app_data_dir);
-        let feature = create_feature_host(&app_data_dir, feature_mode)?;
-        let product = MahayanaProductClient::new_with_default_api_base_url(
-            feature_root.join("account-session.json"),
-            feature_root.join("product-surface.json"),
-        );
+        let feature = create_feature_host(&app_data_dir, feature_mode, storage_passphrase.clone())?;
+        let product = match storage_passphrase {
+            Some(passphrase) => {
+                MahayanaProductClient::new_with_default_api_base_url_and_storage_passphrase(
+                    feature_root.join("account-session.json"),
+                    feature_root.join("product-surface.json"),
+                    passphrase,
+                )
+            }
+            None => MahayanaProductClient::new_with_default_api_base_url(
+                feature_root.join("account-session.json"),
+                feature_root.join("product-surface.json"),
+            ),
+        };
         product
             .bootstrap_ci_test_account_session()
             .map_err(|error| {
@@ -932,6 +949,7 @@ fn feature_host_root(app_data_dir: &Path) -> PathBuf {
 fn create_feature_host(
     app_data_dir: &Path,
     feature_mode: AppHostFeatureMode,
+    storage_passphrase: Option<String>,
 ) -> Result<FeatureHostController, AppHostError> {
     let root = feature_host_root(app_data_dir);
     std::fs::create_dir_all(&root).map_err(|error| AppHostError::Operation(error.to_string()))?;
@@ -961,6 +979,7 @@ fn create_feature_host(
         automation_path: Some(root.join("automations.json")),
         use_codex_account: std::env::var("MAHAYANA_USE_CODEX_ACCOUNT").as_deref() == Ok("1"),
         codex_home: std::env::var_os("MAHAYANA_CODEX_HOME").map(PathBuf::from),
+        product_storage_passphrase: storage_passphrase,
         model_bearer_token: std::env::var("MAHAYANA_MODEL_BEARER_TOKEN")
             .ok()
             .filter(|value| !value.is_empty()),

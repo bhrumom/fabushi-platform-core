@@ -139,6 +139,33 @@ trait CredentialStore: fmt::Debug + Send + Sync {
     fn save(&self, service: &str, account: &str, value: &str) -> Result<()>;
 }
 
+#[derive(Clone)]
+struct FixedCredentialStore {
+    passphrase: Arc<str>,
+}
+
+impl fmt::Debug for FixedCredentialStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FixedCredentialStore")
+            .finish_non_exhaustive()
+    }
+}
+
+impl CredentialStore for FixedCredentialStore {
+    fn load(&self, _service: &str, _account: &str) -> Result<Option<String>> {
+        Ok(Some(self.passphrase.to_string()))
+    }
+
+    fn save(&self, _service: &str, _account: &str, value: &str) -> Result<()> {
+        anyhow::ensure!(
+            value == self.passphrase.as_ref(),
+            "platform passphrase mismatch"
+        );
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct DefaultCredentialStore;
 
@@ -188,6 +215,25 @@ impl SecretsManager {
                     home,
                     namespace,
                     Arc::new(DefaultCredentialStore),
+                )),
+            },
+        }
+    }
+
+    pub fn new_with_namespace_and_passphrase(
+        home: PathBuf,
+        backend_kind: SecretsBackendKind,
+        namespace: LocalSecretsNamespace,
+        passphrase: impl Into<String>,
+    ) -> Self {
+        match backend_kind {
+            SecretsBackendKind::Local => Self {
+                backend: Arc::new(LocalSecretsBackend::new_with_store(
+                    home,
+                    namespace,
+                    Arc::new(FixedCredentialStore {
+                        passphrase: Arc::from(passphrase.into()),
+                    }),
                 )),
             },
         }
@@ -788,6 +834,36 @@ mod tests {
         );
         assert_eq!(desktop_auth.legacy_keyring_service(), None);
         assert_eq!(desktop_managed.legacy_keyring_service(), None);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn injected_platform_passphrase_restores_encrypted_session_after_manager_recreation()
+    -> Result<()> {
+        let root = temporary_root("platform-passphrase");
+        let name = SecretName::new("MAHAYANA_ACCOUNT_SESSION")?;
+        let first = SecretsManager::new_with_namespace_and_passphrase(
+            root.clone(),
+            SecretsBackendKind::Local,
+            LocalSecretsNamespace::MahayanaAuth,
+            "stable-platform-secret",
+        );
+        first.set(&SecretScope::Global, &name, "durable-account-session")?;
+        drop(first);
+
+        let restored = SecretsManager::new_with_namespace_and_passphrase(
+            root.clone(),
+            SecretsBackendKind::Local,
+            LocalSecretsNamespace::MahayanaAuth,
+            "stable-platform-secret",
+        );
+        assert_eq!(
+            restored.get(&SecretScope::Global, &name)?,
+            Some("durable-account-session".to_string())
+        );
+        let ciphertext = fs::read(restored.backend.secrets_path())?;
+        assert!(!String::from_utf8_lossy(&ciphertext).contains("durable-account-session"));
         fs::remove_dir_all(root)?;
         Ok(())
     }

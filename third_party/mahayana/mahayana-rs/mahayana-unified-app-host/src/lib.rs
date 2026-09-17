@@ -171,6 +171,20 @@ impl UnifiedAppHost {
         Self::from_app(app_data_dir, app)
     }
 
+    pub fn new_with_feature_mode_and_storage_passphrase(
+        app_data_dir: impl Into<PathBuf>,
+        feature_mode: AppHostFeatureMode,
+        storage_passphrase: String,
+    ) -> Result<Self, AppHostError> {
+        let app_data_dir = app_data_dir.into();
+        let app = AppHost::new_with_feature_mode_and_storage_passphrase(
+            app_data_dir.clone(),
+            feature_mode,
+            Some(storage_passphrase),
+        )?;
+        Self::from_app(app_data_dir, app)
+    }
+
     fn from_app(app_data_dir: PathBuf, app: AppHost) -> Result<Self, AppHostError> {
         let harness = HarnessApi::new(harness_build_profile());
         let journal = HarnessJournal::open(&app_data_dir.join("harness"), &harness)?;

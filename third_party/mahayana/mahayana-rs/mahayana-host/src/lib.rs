@@ -78,6 +78,10 @@ pub struct HostCreateConfig {
     /// intentionally excluded from serialized Host configuration.
     #[serde(skip)]
     pub model_bearer_token: Option<String>,
+    /// Stable OS-protected storage passphrase injected by native mobile shells.
+    /// It is process-memory only and is never serialized into Host config.
+    #[serde(skip)]
+    pub product_storage_passphrase: Option<String>,
     #[serde(skip)]
     pub model_wire_api: mahayana_model::responses::ResponsesWireApi,
     #[serde(skip)]
@@ -124,11 +128,21 @@ impl MahayanaHost {
             config.product_surface_state_path.clone(),
         ) {
             (Some(session_path), Some(surface_state_path)) => {
-                MahayanaProductClient::new_with_surface_state_path(
-                    api_base_url.clone(),
-                    session_path,
-                    surface_state_path,
-                )
+                match config.product_storage_passphrase.clone() {
+                    Some(passphrase) => {
+                        MahayanaProductClient::new_with_surface_state_path_and_storage_passphrase(
+                            api_base_url.clone(),
+                            session_path,
+                            surface_state_path,
+                            passphrase,
+                        )
+                    }
+                    None => MahayanaProductClient::new_with_surface_state_path(
+                        api_base_url.clone(),
+                        session_path,
+                        surface_state_path,
+                    ),
+                }
             }
             (Some(session_path), None) => {
                 MahayanaProductClient::new(api_base_url.clone(), session_path)

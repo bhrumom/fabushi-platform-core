@@ -979,6 +979,15 @@ pub enum TranscriptCard {
         name: String,
         sheets: Vec<SpreadsheetSheet>,
     },
+    #[serde(rename = "miniApp")]
+    MiniApp {
+        #[serde(rename = "miniAppId")]
+        mini_app_id: String,
+        name: String,
+        html: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2962,5 +2971,24 @@ mod tests {
         assert_eq!(value["entryId"], "entry-1");
         assert_eq!(value["card"]["kind"], "secretRequest");
         assert_eq!(value["card"]["requestId"], "api-key");
+    }
+
+    #[test]
+    fn mini_app_transcript_card_uses_frontend_camel_case_shape() {
+        let event = HostEvent::TranscriptCard {
+            timestamp: "0".into(),
+            entry_id: "entry-miniapp".into(),
+            operation_id: Some("operation-miniapp".into()),
+            card: TranscriptCard::MiniApp {
+                mini_app_id: "counter-demo".into(),
+                name: "Counter".into(),
+                html: "<!doctype html><html></html>".into(),
+                description: Some("Runnable demo".into()),
+            },
+        };
+        let value = serde_json::to_value(event).expect("encode Mini App card");
+        assert_eq!(value["card"]["kind"], "miniApp");
+        assert_eq!(value["card"]["miniAppId"], "counter-demo");
+        assert_eq!(value["card"]["name"], "Counter");
     }
 }

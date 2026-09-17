@@ -577,6 +577,51 @@ impl MahayanaProductClient {
         session_path: impl Into<PathBuf>,
         surface_state_path: impl Into<PathBuf>,
     ) -> Self {
+        Self::new_with_surface_state_path_and_optional_passphrase(
+            api_base_url,
+            session_path,
+            surface_state_path,
+            None,
+        )
+    }
+
+    pub fn new_with_surface_state_path_and_storage_passphrase(
+        api_base_url: impl Into<String>,
+        session_path: impl Into<PathBuf>,
+        surface_state_path: impl Into<PathBuf>,
+        storage_passphrase: impl Into<String>,
+    ) -> Self {
+        Self::new_with_surface_state_path_and_optional_passphrase(
+            api_base_url,
+            session_path,
+            surface_state_path,
+            Some(storage_passphrase.into()),
+        )
+    }
+
+    pub fn new_with_default_api_base_url_and_storage_passphrase(
+        session_path: impl Into<PathBuf>,
+        surface_state_path: impl Into<PathBuf>,
+        storage_passphrase: impl Into<String>,
+    ) -> Self {
+        let api_base_url = env::var("MAHAYANA_API_BASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_API_BASE_URL.to_string());
+        Self::new_with_surface_state_path_and_storage_passphrase(
+            api_base_url,
+            session_path,
+            surface_state_path,
+            storage_passphrase,
+        )
+    }
+
+    fn new_with_surface_state_path_and_optional_passphrase(
+        api_base_url: impl Into<String>,
+        session_path: impl Into<PathBuf>,
+        surface_state_path: impl Into<PathBuf>,
+        storage_passphrase: Option<String>,
+    ) -> Self {
         let session_path = session_path.into();
         let mahayana_home = session_path
             .parent()
@@ -590,20 +635,40 @@ impl MahayanaProductClient {
             surface_state_path: surface_state_path.into(),
             browser_login_poll_dir,
             skills_root: default_codex_skills_root(),
-            secrets_manager: SecretsManager::new_with_namespace(
-                mahayana_home.clone(),
-                SecretsBackendKind::Local,
-                product_auth_secrets_namespace(
-                    env::var("MAHAYANA_AUTH_STORAGE_NAMESPACE").ok().as_deref(),
+            secrets_manager: match storage_passphrase.as_deref() {
+                Some(passphrase) => SecretsManager::new_with_namespace_and_passphrase(
+                    mahayana_home.clone(),
+                    SecretsBackendKind::Local,
+                    product_auth_secrets_namespace(
+                        env::var("MAHAYANA_AUTH_STORAGE_NAMESPACE").ok().as_deref(),
+                    ),
+                    passphrase.to_string(),
                 ),
-            ),
-            managed_secrets: SecretsManager::new_with_namespace(
-                mahayana_home,
-                SecretsBackendKind::Local,
-                product_managed_secrets_namespace(
-                    env::var("MAHAYANA_AUTH_STORAGE_NAMESPACE").ok().as_deref(),
+                None => SecretsManager::new_with_namespace(
+                    mahayana_home.clone(),
+                    SecretsBackendKind::Local,
+                    product_auth_secrets_namespace(
+                        env::var("MAHAYANA_AUTH_STORAGE_NAMESPACE").ok().as_deref(),
+                    ),
                 ),
-            ),
+            },
+            managed_secrets: match storage_passphrase {
+                Some(passphrase) => SecretsManager::new_with_namespace_and_passphrase(
+                    mahayana_home,
+                    SecretsBackendKind::Local,
+                    product_managed_secrets_namespace(
+                        env::var("MAHAYANA_AUTH_STORAGE_NAMESPACE").ok().as_deref(),
+                    ),
+                    passphrase,
+                ),
+                None => SecretsManager::new_with_namespace(
+                    mahayana_home,
+                    SecretsBackendKind::Local,
+                    product_managed_secrets_namespace(
+                        env::var("MAHAYANA_AUTH_STORAGE_NAMESPACE").ok().as_deref(),
+                    ),
+                ),
+            },
         };
         client.import_legacy_session_if_needed();
         client

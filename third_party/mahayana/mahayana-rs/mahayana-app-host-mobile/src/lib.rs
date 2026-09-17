@@ -27,6 +27,45 @@ pub unsafe extern "C" fn mahayana_app_host_create(
     }
 }
 
+/// Creates a production native app-host with a stable storage passphrase supplied
+/// by the platform Keychain/Keystore bridge. The passphrase is consumed in memory
+/// and never written to the Rust app-data directory.
+///
+/// # Safety
+/// Both pointers must reference valid NUL-terminated strings for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mahayana_app_host_create_with_storage_passphrase(
+    app_data_dir: *const c_char,
+    storage_passphrase: *const c_char,
+) -> *mut UnifiedAppHost {
+    if storage_passphrase.is_null() {
+        return std::ptr::null_mut();
+    }
+    let path = if app_data_dir.is_null() {
+        default_app_data_dir()
+    } else {
+        PathBuf::from(
+            unsafe { CStr::from_ptr(app_data_dir) }
+                .to_string_lossy()
+                .into_owned(),
+        )
+    };
+    let passphrase = unsafe { CStr::from_ptr(storage_passphrase) }
+        .to_string_lossy()
+        .into_owned();
+    if passphrase.is_empty() {
+        return std::ptr::null_mut();
+    }
+    match UnifiedAppHost::new_with_feature_mode_and_storage_passphrase(
+        path,
+        AppHostFeatureMode::Production,
+        passphrase,
+    ) {
+        Ok(host) => Box::into_raw(Box::new(host)),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
 /// Creates a native app-host handle backed by the deterministic FeatureHost test mode.
 /// This is used only by explicit UI/instrumentation test harnesses; normal app
 /// creation continues to use the production mode.
@@ -141,12 +180,24 @@ mod android_jni {
         mut env: JNIEnv,
         _object: JObject,
         app_data_dir: JString,
+        storage_passphrase: JString,
     ) -> jlong {
         let path = match env.get_string(&app_data_dir) {
             Ok(value) => PathBuf::from(value.to_string_lossy().into_owned()),
             Err(_) => return 0,
         };
-        match UnifiedAppHost::new(path) {
+        let passphrase = match env.get_string(&storage_passphrase) {
+            Ok(value) => value.to_string_lossy().into_owned(),
+            Err(_) => return 0,
+        };
+        if passphrase.is_empty() {
+            return 0;
+        }
+        match UnifiedAppHost::new_with_feature_mode_and_storage_passphrase(
+            path,
+            AppHostFeatureMode::Production,
+            passphrase,
+        ) {
             Ok(host) => Box::into_raw(Box::new(host)) as jlong,
             Err(_) => 0,
         }
