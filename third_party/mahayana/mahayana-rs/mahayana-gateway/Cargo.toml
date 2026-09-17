@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[lib]
+path = "src/lib_v2.rs"
+
 [dependencies]
 chrono.workspace = true
 mahayana-core.workspace = true

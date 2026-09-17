@@ -7,6 +7,7 @@ description = "Bidirectional JSON-RPC server-request state for Mahayana gateway 
 publish = false
 
 [lib]
+path = "src/lib_v2.rs"
 doctest = false
 
 [dependencies]
