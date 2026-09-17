@@ -1,0 +1,16 @@
+[package]
+name = "mahayana-gateway-peer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bidirectional JSON-RPC server-request state for Mahayana gateway transports."
+publish = false
+
+[lib]
+doctest = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true

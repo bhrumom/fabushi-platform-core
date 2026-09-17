@@ -9004,6 +9004,9 @@ dependencies = [
  "mahayana-core",
  "mahayana-feature-host",
  "mahayana-ffi",
+ "mahayana-gateway",
+ "mahayana-gateway-peer",
+ "mahayana-gateway-protocol",
  "mahayana-host",
  "mahayana-host-protocol",
  "mahayana-mcp-runtime",
@@ -9101,6 +9104,37 @@ dependencies = [
  "once_cell",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "mahayana-gateway"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "mahayana-core",
+ "mahayana-gateway-protocol",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "mahayana-gateway-peer"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "uuid",
+]
+
+[[package]]
+name = "mahayana-gateway-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
