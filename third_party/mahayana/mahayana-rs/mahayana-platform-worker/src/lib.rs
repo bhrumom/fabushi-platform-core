@@ -25,6 +25,10 @@ pub const MARKETPLACE_ACCOUNT_INSTALL_SCHEMA_V18: &str =
     include_str!("../migrations/0018_marketplace_account_installs.sql");
 pub const MARKETPLACE_ROUTE_PROJECTION_SCHEMA_V19: &str =
     include_str!("../migrations/0019_marketplace_route_projection.sql");
+pub const REMOTE_COMPUTER_TRANSPORT_AUDIT_SCHEMA_V24: &str =
+    include_str!("../migrations/0024_remote_computer_transport_audit.sql");
+pub const REMOTE_COMPUTER_AUDIT_GRANTS_SCHEMA_V25: &str =
+    include_str!("../migrations/0025_remote_computer_audit_grants.sql");
 pub const WORKSPACE_MESSAGING_SCHEMA_V7: &str =
     include_str!("../migrations/0007_workspace_messaging.sql");
 pub const FABUSHI_PAY_SCHEMA_V7: &str = include_str!("../migrations/0007_fabushi_pay.sql");

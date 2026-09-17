@@ -520,6 +520,10 @@ pub async fn main(request: Request, env: Env, _context: Context) -> Result<Respo
             remote_computer_session_activate,
         )
         .post_async(
+            "/v1/computers/:device_id/sessions/:session_id/transport",
+            remote_computer_session_transport,
+        )
+        .post_async(
             "/v1/computers/:device_id/sessions/:session_id/close",
             remote_computer_session_close,
         )
