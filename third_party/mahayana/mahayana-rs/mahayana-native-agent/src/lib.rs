@@ -197,53 +197,62 @@ impl KernelEventSink for NativeEventBridge {
                 detail,
                 metadata,
                 ..
-            } => AgentEvent::Activity {
-                activity: AgentActivity {
-                    step_id: metadata
-                        .get("stepId")
-                        .and_then(Value::as_str)
-                        .unwrap_or("mahayana-native")
-                        .to_string(),
-                    kind,
-                    title,
-                    detail,
-                    status: activity_status(&metadata),
-                    metadata: Some(metadata),
-                },
-            },
+            } => {
+                let step_id = metadata
+                    .get("stepId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("mahayana-native:{kind}:{title}"));
+                AgentEvent::Activity {
+                    activity: AgentActivity {
+                        step_id,
+                        kind,
+                        title,
+                        detail,
+                        status: activity_status(&metadata),
+                        metadata: Some(metadata),
+                    },
+                }
+            }
             KernelEvent::ToolStarted { tool, .. } if tool == "send_message" => return Ok(()),
             KernelEvent::ToolStarted {
                 tool, arguments, ..
-            } => AgentEvent::Activity {
-                activity: AgentActivity {
-                    step_id: format!("tool:{tool}"),
-                    kind: "tool".into(),
-                    title: format!("Running {tool}"),
-                    detail: None,
-                    status: AgentActivityStatus::Running,
-                    metadata: Some(json!({"tool":tool,"arguments":arguments})),
-                },
-            },
+            } => {
+                let (title, detail) = tool_activity_copy(&tool, false, true);
+                AgentEvent::Activity {
+                    activity: AgentActivity {
+                        step_id: format!("tool:{tool}"),
+                        kind: "tool".into(),
+                        title,
+                        detail,
+                        status: AgentActivityStatus::Running,
+                        metadata: Some(json!({"tool":tool,"arguments":arguments})),
+                    },
+                }
+            }
             KernelEvent::ToolCompleted { tool, .. } if tool == "send_message" => return Ok(()),
             KernelEvent::ToolCompleted {
                 tool,
                 output,
                 success,
                 ..
-            } => AgentEvent::Activity {
-                activity: AgentActivity {
-                    step_id: format!("tool:{tool}"),
-                    kind: "tool".into(),
-                    title: format!("Completed {tool}"),
-                    detail: None,
-                    status: if success {
-                        AgentActivityStatus::Completed
-                    } else {
-                        AgentActivityStatus::Failed
+            } => {
+                let (title, detail) = tool_activity_copy(&tool, true, success);
+                AgentEvent::Activity {
+                    activity: AgentActivity {
+                        step_id: format!("tool:{tool}"),
+                        kind: "tool".into(),
+                        title,
+                        detail,
+                        status: if success {
+                            AgentActivityStatus::Completed
+                        } else {
+                            AgentActivityStatus::Failed
+                        },
+                        metadata: Some(json!({"tool":tool,"output":output,"success":success})),
                     },
-                    metadata: Some(json!({"tool":tool,"output":output,"success":success})),
-                },
-            },
+                }
+            }
             KernelEvent::CheckpointCreated {
                 checkpoint_id,
                 label,
@@ -631,6 +640,44 @@ fn policy_for_profile(profile: RuntimeProfile) -> ExecutionPolicy {
         RuntimeProfile::MobileEmbedded | RuntimeProfile::WebWasm => {
             ExecutionPolicy::mobile_default()
         }
+    }
+}
+
+fn tool_activity_copy(tool: &str, completed: bool, success: bool) -> (String, Option<String>) {
+    let (running, done, detail) = match tool {
+        "subagent_run" => (
+            "请独立子智能体复核第一版",
+            "独立复核已完成",
+            "检查完整性、可运行性和明显遗漏",
+        ),
+        "workspace_read" => ("读取工作区文件", "工作区文件已读取", "基于真实文件继续处理"),
+        "workspace_write" => ("写入实现文件", "实现文件已写入", "把变更落到实际工作区"),
+        "workspace_search" => ("搜索相关代码", "相关代码搜索完成", "定位需要处理的实现位置"),
+        "workspace_checkpoint" => (
+            "创建安全检查点",
+            "安全检查点已创建",
+            "为后续修改保留可恢复状态",
+        ),
+        "process_exec" => ("运行验证命令", "验证命令已完成", "使用真实执行结果检查实现"),
+        "git_status" => ("检查改动状态", "改动状态已检查", "确认当前工作区变更"),
+        "git_diff" => ("检查代码差异", "代码差异已检查", "核对实际修改内容"),
+        "web_search" => ("搜索外部资料", "外部资料搜索完成", "获取任务需要的最新信息"),
+        "web_fetch" => ("读取外部资料", "外部资料读取完成", "核对来源内容"),
+        "workflow_create" => ("建立执行步骤", "执行步骤已建立", "按依赖关系组织后续工作"),
+        "workflow_status" => ("检查任务进度", "任务进度已更新", "确认各步骤当前状态"),
+        _ => ("执行工具步骤", "工具步骤已完成", "继续推进实际任务"),
+    };
+    if completed {
+        if success {
+            (done.to_string(), Some(detail.to_string()))
+        } else {
+            (
+                format!("{done}（失败）"),
+                Some("这一步没有成功，Agent 会根据错误继续处理".into()),
+            )
+        }
+    } else {
+        (running.to_string(), Some(detail.to_string()))
     }
 }
 
