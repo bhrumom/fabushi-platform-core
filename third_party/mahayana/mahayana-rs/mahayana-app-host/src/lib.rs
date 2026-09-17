@@ -221,6 +221,7 @@ impl AppHost {
                 .map_err(|error| AppHostError::Operation(error.to_string())),
             "feature.marketplace.browse" => self.marketplace_browse(params),
             "feature.marketplace.release" => self.marketplace_release(params),
+            "feature.marketplace.add" => self.marketplace_add(params),
             "feature.plugin.install" => self.install_plugin(params),
             "feature.plugin.uninstall" => self.uninstall_plugin(params),
             "feature.plugin.rollback" => self.rollback_plugin(params),
@@ -480,6 +481,39 @@ impl AppHost {
         }
         self.product
             .marketplace_release_metadata(plugin_id, version)
+            .map_err(|error| AppHostError::Operation(error.to_string()))
+    }
+
+    fn marketplace_add(&self, params: Value) -> Result<Value, AppHostError> {
+        let plugin_id = string_param(&params, "pluginId")?;
+        let requested_platform = params
+            .get("platform")
+            .and_then(Value::as_str)
+            .unwrap_or(host_platform());
+        let marketplace_platform = match requested_platform {
+            "ios" | "android" => "mobile",
+            other => other,
+        };
+        if self.feature_mode == AppHostFeatureMode::Test {
+            if !TEST_MARKETPLACE_PLUGINS
+                .iter()
+                .any(|(candidate, _, _)| *candidate == plugin_id)
+            {
+                return Err(AppHostError::Operation(format!(
+                    "test marketplace plugin {plugin_id} was not found"
+                )));
+            }
+            return Ok(json!({
+                "added": true,
+                "accountSynchronized": true,
+                "bot": {
+                    "id": format!("{plugin_id}-bot"),
+                    "displayName": plugin_id,
+                },
+            }));
+        }
+        self.product
+            .marketplace_add(plugin_id, marketplace_platform)
             .map_err(|error| AppHostError::Operation(error.to_string()))
     }
 

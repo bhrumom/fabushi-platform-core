@@ -884,6 +884,17 @@ impl MahayanaProductClient {
         )
     }
 
+    pub fn marketplace_add(&self, plugin_id: &str, platform: &str) -> Result<Value, ProductError> {
+        let plugin_id = safe_path_identifier(plugin_id, "pluginId")?;
+        let platform = safe_marketplace_platform(platform)?;
+        let token = self.authorization_token(&Value::Null)?;
+        self.post_json(
+            &format!("/v1/marketplace/plugins/{plugin_id}/add"),
+            json!({"platform": platform}),
+            Some(&token),
+        )
+    }
+
     pub fn download_marketplace_plugin(
         &self,
         plugin_id: &str,
