@@ -5708,13 +5708,25 @@ impl FeatureHostController {
                 .lock()
                 .map_err(|_| FeatureHostError::StatePoisoned)? = next_account_id.clone();
         }
-        let mut state = self.state()?;
-        state.session_active = logged_in;
-        state.auth_user = if logged_in {
-            auth.get("user").cloned()
-        } else {
-            None
-        };
+        {
+            let mut state = self.state()?;
+            state.session_active = logged_in;
+            state.auth_user = if logged_in {
+                auth.get("user").cloned()
+            } else {
+                None
+            };
+        }
+        if logged_in {
+            // A signed-in Host is not ready for chat until the real Mahayana
+            // provider session exists. This runs on restored sessions and on
+            // fresh password/browser/OAuth login, so the first chat.send only
+            // submits work; it never becomes the trigger that starts the
+            // provider process/thread.
+            self.runtime()?.warmup_conversation(ConversationId(
+                MAHAYANA_AI_CONVERSATION_ID.to_string(),
+            ))?;
+        }
         Ok(())
     }
 

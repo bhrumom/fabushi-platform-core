@@ -212,6 +212,10 @@ impl ConversationProvider for KernelConversationProvider {
         Ok(messages)
     }
 
+    async fn warmup(&self, conversation_id: &ConversationId) -> Result<(), ConversationError> {
+        self.session_id(conversation_id).await.map(|_| ())
+    }
+
     async fn send_message(
         &self,
         request: SendMessageRequest,

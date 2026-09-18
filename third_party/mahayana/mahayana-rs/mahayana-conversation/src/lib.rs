@@ -62,6 +62,16 @@ pub trait ConversationProvider: Send + Sync {
         limit: u32,
     ) -> Result<Vec<Message>, ConversationError>;
 
+    /// Prepare provider-owned resources needed by the first user-visible turn
+    /// without sending model input or mutating the conversation transcript.
+    ///
+    /// Providers that have no cold session/setup cost may keep the default
+    /// no-op. Native agent providers should make this idempotent so product
+    /// startup can establish real readiness before the composer is usable.
+    async fn warmup(&self, _conversation_id: &ConversationId) -> Result<(), ConversationError> {
+        Ok(())
+    }
+
     async fn send_message(
         &self,
         request: SendMessageRequest,

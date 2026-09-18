@@ -234,6 +234,19 @@ impl MahayanaRuntime {
         }
     }
 
+    /// Prepare the provider/session behind a conversation before the first
+    /// user-visible message. This is intentionally side-effect free with
+    /// respect to transcript content and is safe to call more than once.
+    pub fn warmup_conversation(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<(), RuntimeError> {
+        let provider = self.providers.for_conversation(&conversation_id)?;
+        self.async_runtime
+            .block_on(provider.warmup(&conversation_id))
+            .map_err(RuntimeError::from)
+    }
+
     /// Reset local conversation/Agent state when the authenticated product
     /// account changes. This also drains queued events so a previous account's
     /// reply cannot appear after the new account is ready.
@@ -807,6 +820,7 @@ mod tests {
     use mahayana_core::Message;
     use mahayana_core::MessageId;
     use mahayana_core::MessageRole;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct EchoAgent;
 
@@ -911,6 +925,106 @@ mod tests {
             }
         }
         assert!(saw_delta && saw_message && saw_complete);
+    }
+
+    struct CountingAgent {
+        starts: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl AgentBackend for CountingAgent {
+        async fn start_thread(
+            &self,
+            _request: StartThreadRequest,
+        ) -> Result<AgentThreadId, AgentError> {
+            let sequence = self.starts.fetch_add(1, Ordering::SeqCst) + 1;
+            AgentThreadId::new(format!("thread:warmup:{sequence}"))
+                .map_err(|error| AgentError::Backend(error.to_string()))
+        }
+
+        async fn send_message(
+            &self,
+            request: AgentMessageRequest,
+            events: SharedAgentEventSink,
+        ) -> Result<(), AgentError> {
+            events.emit(AgentEvent::MessageCompleted {
+                message: Message {
+                    id: MessageId::generated("message"),
+                    conversation_id: request.conversation_id,
+                    role: MessageRole::Assistant,
+                    text: "ready".to_string(),
+                    created_at_ms: 0,
+                    metadata: Value::Null,
+                },
+            })
+        }
+
+        async fn interrupt(&self, _operation_id: &OperationId) -> Result<(), AgentError> {
+            Ok(())
+        }
+
+        async fn resolve_approval(
+            &self,
+            _resolution: ApprovalResolution,
+        ) -> Result<(), AgentError> {
+            Ok(())
+        }
+
+        fn name(&self) -> &'static str {
+            "counting-test"
+        }
+    }
+
+    #[test]
+    fn warmup_opens_agent_session_once_before_first_message() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let backend: Arc<dyn AgentBackend> = Arc::new(CountingAgent {
+            starts: Arc::clone(&starts),
+        });
+        let runtime = RuntimeBuilder::new(RuntimeConfig::default())
+            .with_agent_backend(backend)
+            .expect("register agent")
+            .build()
+            .expect("build runtime");
+        let conversation_id =
+            ConversationId(CODEX_ASSISTANT_CONVERSATION_ID.to_string());
+
+        runtime
+            .warmup_conversation(conversation_id.clone())
+            .expect("warm conversation");
+        runtime
+            .warmup_conversation(conversation_id.clone())
+            .expect("repeat warm conversation");
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+
+        let response = runtime
+            .execute(RuntimeCommand::SendMessage {
+                conversation_id,
+                text: "first visible prompt".to_string(),
+                client_message_id: Some("first-visible-prompt".to_string()),
+                hidden: false,
+            })
+            .expect("send first message");
+        let RuntimeResponse::Accepted { operation_id } = response else {
+            panic!("expected accepted response");
+        };
+        for _ in 0..4 {
+            let Some(event) = runtime
+                .receive(Duration::from_secs(1))
+                .expect("receive warmup regression event")
+            else {
+                continue;
+            };
+            if matches!(
+                event,
+                RuntimeEvent::OperationCompleted {
+                    operation_id: completed
+                } if completed == operation_id
+            ) {
+                break;
+            }
+        }
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
     }
 
     #[test]

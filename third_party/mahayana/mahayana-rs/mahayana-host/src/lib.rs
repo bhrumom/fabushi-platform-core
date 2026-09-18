@@ -15,6 +15,7 @@ use mahayana_conversation::ConversationProvider;
 use mahayana_core::ApprovalDecision;
 use mahayana_core::ApprovalId;
 use mahayana_core::BuildProfile;
+use mahayana_core::ConversationId;
 use mahayana_core::ModelProviderMode;
 use mahayana_core::OperationId;
 use mahayana_core::RuntimeCommand;
@@ -202,6 +203,17 @@ impl MahayanaHost {
 
     pub fn status(&self) -> RuntimeStatus {
         self.runtime.status()
+    }
+
+    /// Prepare a conversation provider/session before its first user prompt.
+    /// The warmup performs no model inference and writes no transcript content.
+    pub fn warmup_conversation(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<(), HostError> {
+        self.runtime
+            .warmup_conversation(conversation_id)
+            .map_err(HostError::from)
     }
 
     pub fn execute(&self, command: RuntimeCommand) -> Result<RuntimeResponse, HostError> {
