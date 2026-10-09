@@ -5,6 +5,9 @@ compatibility_date = "2026-07-18"
 # platform resolves their public URLs instead of requiring per-plugin bindings.
 compatibility_flags = ["global_fetch_strictly_public"]
 
+[triggers]
+crons = ["*/10 * * * *"]
+
 [build]
 command = "worker-build --release --no-panic-recovery"
 

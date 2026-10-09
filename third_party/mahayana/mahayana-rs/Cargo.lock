@@ -9422,6 +9422,7 @@ dependencies = [
 name = "mahayana-platform-worker"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "argon2",
  "base64 0.22.1",
  "getrandom 0.2.17",
