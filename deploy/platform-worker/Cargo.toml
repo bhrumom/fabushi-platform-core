@@ -1,0 +1,41 @@
+[package]
+name = "mahayana-platform-worker"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+
+[lib]
+path = "../../third_party/mahayana/mahayana-rs/mahayana-platform-worker/src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+doctest = false
+
+[dependencies]
+aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc"] }
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
+base64 = "0.22"
+getrandom = { version = "0.2", features = ["js"] }
+mahayana-platform-core = { path = "../../third_party/mahayana/mahayana-rs/mahayana-platform-core" }
+pbkdf2 = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+uuid = { version = "1", features = ["js", "v4"] }
+url = "2"
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+jsonwebtoken = { version = "10.4.0", default-features = false, features = ["rust_crypto", "use_pem"] }
+worker = { version = "0.8.5", features = ["d1", "queue"] }
+wasm-bindgen = "=0.2.126"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = "z"
+strip = "debuginfo"

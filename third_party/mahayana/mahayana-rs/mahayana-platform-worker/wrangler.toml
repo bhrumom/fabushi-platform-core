@@ -1,5 +1,5 @@
 name = "mahayana-platform"
-main = "build/worker/shim.mjs"
+main = "../../../../deploy/platform-worker/build/worker/shim.mjs"
 compatibility_date = "2026-07-18"
 # Marketplace plugins are independent public Workers/Pages deployments. The
 # platform resolves their public URLs instead of requiring per-plugin bindings.
@@ -9,7 +9,7 @@ compatibility_flags = ["global_fetch_strictly_public"]
 crons = ["*/10 * * * *"]
 
 [build]
-command = "worker-build --release --no-panic-recovery"
+command = "cd ../../../../deploy/platform-worker && worker-build --release --no-panic-recovery"
 
 [vars]
 ACCESS_TOKEN_KEY_ID = "mahayana-account-2026-07"

@@ -1,10 +1,10 @@
 name: Official MCP OAuth broker
 on:
   pull_request:
-    paths: ['third_party/mahayana/mahayana-rs/mahayana-platform-worker/**', 'third_party/mahayana/mahayana-rs/Cargo.lock', '.github/workflows/official-mcp-oauth.yml', 'scripts/test-mcp-oauth-migration.py']
+    paths: ['third_party/mahayana/mahayana-rs/mahayana-platform-worker/**', 'third_party/mahayana/mahayana-rs/Cargo.lock', '.github/workflows/official-mcp-oauth.yml', 'scripts/test-mcp-oauth-migration.py', 'deploy/platform-worker/**']
   push:
     branches: [main, work/official-mcp-oauth-20261009]
-    paths: ['third_party/mahayana/mahayana-rs/mahayana-platform-worker/**', 'third_party/mahayana/mahayana-rs/Cargo.lock', '.github/workflows/official-mcp-oauth.yml', 'scripts/test-mcp-oauth-migration.py']
+    paths: ['third_party/mahayana/mahayana-rs/mahayana-platform-worker/**', 'third_party/mahayana/mahayana-rs/Cargo.lock', '.github/workflows/official-mcp-oauth.yml', 'scripts/test-mcp-oauth-migration.py', 'deploy/platform-worker/**']
 permissions:
   contents: read
 jobs:
@@ -21,11 +21,11 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: third_party/mahayana/mahayana-rs -> target
+          workspaces: deploy/platform-worker -> target
       - name: Test connection policy and authenticated credential delivery
-        run: cargo test --locked --manifest-path third_party/mahayana/mahayana-rs/Cargo.toml -p mahayana-platform-worker
+        run: cargo test --locked --manifest-path deploy/platform-worker/Cargo.toml -p mahayana-platform-worker
       - name: Compile actual Cloudflare Worker and broker routes
-        run: cargo check --locked --manifest-path third_party/mahayana/mahayana-rs/Cargo.toml --target wasm32-unknown-unknown -p mahayana-platform-worker
+        run: cargo check --locked --manifest-path deploy/platform-worker/Cargo.toml --target wasm32-unknown-unknown -p mahayana-platform-worker
       - name: Verify additive connection migration and attempt lifecycle
         run: python3 scripts/test-mcp-oauth-migration.py
       - name: Record exact source and verification scope
