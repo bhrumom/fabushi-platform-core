@@ -16,6 +16,8 @@ jobs:
           toolchain: 1.97.1
       - name: Resolve canonical isolated Worker lock in Actions
         run: cargo metadata --manifest-path deploy/platform-worker/Cargo.toml --format-version 1 > /dev/null
+      - name: Expose generated dependency metadata for commit readback
+        run: python3 -c "import pathlib,base64; print('CARGO_LOCK_BASE64:'+base64.b64encode(pathlib.Path('deploy/platform-worker/Cargo.lock').read_bytes()).decode())"
       - uses: actions/upload-artifact@v4
         with:
           name: canonical-worker-lock-${{ github.sha }}
