@@ -9,6 +9,9 @@ mod capability_access;
 #[cfg(any(target_arch = "wasm32", test))]
 mod marketplace_route;
 
+#[cfg(any(target_arch = "wasm32", test))]
+mod mcp_oauth;
+
 pub const PLATFORM_SCHEMA_V1: &str = include_str!("../migrations/0001_platform.sql");
 pub const CI_RUNNER_AUTH_SOURCE_V1: &str = include_str!("worker_api/ci_runner.rs");
 pub const LISTENER_RELAY_SCHEMA_V5: &str = include_str!("../migrations/0005_listener_relay.sql");

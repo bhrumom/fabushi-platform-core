@@ -2280,7 +2280,7 @@ pub(super) async fn revoke_account_session(
     Ok(())
 }
 
-async fn ensure_bound_account_session_active(
+pub(super) async fn ensure_bound_account_session_active(
     env: &Env,
     user_id: &str,
     session_id: &str,

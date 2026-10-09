@@ -426,6 +426,7 @@ struct AuthenticatedAccount {
 }
 
 mod account;
+mod mcp_connections;
 mod ai_usage;
 mod ci_runner;
 mod commerce;
@@ -437,6 +438,7 @@ mod security;
 mod user_payment_proxy;
 
 use account::*;
+use mcp_connections::*;
 use ai_usage::*;
 use ci_runner::*;
 use commerce::*;
@@ -451,6 +453,14 @@ use user_payment_proxy::*;
 pub async fn main(request: Request, env: Env, _context: Context) -> Result<Response> {
     Router::new()
         .get("/health", |_, _| Response::from_json(&json!({"ok": true})))
+        .post_async("/api/mcp/oauth/start", mcp_oauth_start)
+        .get_async("/api/mcp/oauth/authorize", mcp_oauth_authorize)
+        .get_async("/api/mcp/oauth/callback", mcp_oauth_callback)
+        .post_async("/api/mcp/oauth/attempts/:attempt_id", mcp_oauth_poll)
+        .post_async("/api/mcp/oauth/attempts/:attempt_id/ack", mcp_oauth_ack)
+        .post_async("/api/mcp/oauth/attempts/:attempt_id/cancel", mcp_oauth_cancel)
+        .post_async("/api/mcp/connections/:connection_id/refresh", mcp_connection_refresh)
+        .post_async("/api/mcp/connections/:connection_id/revoke", mcp_connection_revoke)
         .post_async("/api/auth/login", password_login)
         .post_async("/api/auth/browser/start", browser_login_start)
         .get_async("/api/auth/browser/portal", browser_login_portal)
