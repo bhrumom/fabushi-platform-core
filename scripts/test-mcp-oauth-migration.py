@@ -30,4 +30,16 @@ class Migration(unittest.TestCase):
         self.assertEqual(self.db.execute('SELECT payload_ciphertext FROM account_mcp_oauth_attempts').fetchone(),(None,))
         with self.assertRaises(sqlite3.IntegrityError): self.db.execute("UPDATE account_mcp_oauth_attempts SET status='connected'")
         with self.assertRaises(sqlite3.IntegrityError): self.db.execute("INSERT INTO account_mcp_native_credentials VALUES ('missing','a','plugin','digest',NULL,1)")
+    def test_cleanup_retains_unprocessed_ready_grants(self):
+        self.db.execute("UPDATE account_mcp_oauth_attempts SET status='ready',payload_ciphertext='cipher'")
+        for n in range(150):
+            self.db.execute("INSERT INTO account_mcp_oauth_attempts VALUES (?,?,?,?,?,?,?,'ready','cipher',100,700)",(str(n),'user-a','session-a','plugin',f'state-{n}',f'ticket-{n}','encrypted'))
+        processed=self.db.execute("SELECT attempt_id FROM account_mcp_oauth_attempts WHERE expires_at<=800 AND status='ready' LIMIT 100").fetchall()
+        for (attempt,) in processed:
+            self.db.execute("UPDATE account_mcp_oauth_attempts SET status='expired',payload_ciphertext=NULL,verifier='' WHERE attempt_id=? AND status='ready' AND expires_at<=800",(attempt,))
+        self.db.execute("UPDATE account_mcp_oauth_attempts SET status='expired',payload_ciphertext=NULL,verifier='' WHERE expires_at<=800 AND status NOT IN ('ready','expired','cancelled','consumed')")
+        self.db.execute("DELETE FROM account_mcp_oauth_attempts WHERE expires_at<1000 AND status!='ready'")
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM account_mcp_oauth_attempts WHERE status='ready' AND payload_ciphertext='cipher'").fetchone(),(51,))
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM account_mcp_oauth_attempts").fetchone(),(51,))
 if __name__=='__main__': unittest.main()
+
