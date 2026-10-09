@@ -71,9 +71,10 @@ pub(super) async fn mcp_cleanup(env: &Env) -> Result<()> {
                 }
             }
         }
+        worker::query!(&db,"UPDATE account_mcp_oauth_attempts SET status='expired',payload_ciphertext=NULL,verifier='' WHERE attempt_id=?1 AND status='ready' AND expires_at<=?2",&row.attempt_id,now_seconds())?.run().await?;
     }
-    worker::query!(&db, "UPDATE account_mcp_oauth_attempts SET status='expired', payload_ciphertext=NULL, verifier='' WHERE expires_at<=?1 AND status NOT IN ('expired','cancelled','consumed')", now_seconds())?.run().await?;
-    worker::query!(&db, "DELETE FROM account_mcp_oauth_attempts WHERE expires_at<?1", now_seconds()-86400)?.run().await?;
+    worker::query!(&db, "UPDATE account_mcp_oauth_attempts SET status='expired', payload_ciphertext=NULL, verifier='' WHERE expires_at<=?1 AND status NOT IN ('ready','expired','cancelled','consumed')", now_seconds())?.run().await?;
+    worker::query!(&db, "DELETE FROM account_mcp_oauth_attempts WHERE expires_at<?1 AND status!='ready'", now_seconds()-86400)?.run().await?;
     Ok(())
 }
 
@@ -161,6 +162,7 @@ async fn complete_attempt(env: &Env, row: &Attempt, code: &str) -> Result<Value>
     let material = String::from_utf8(open(&key,&row.attempt_id,&row.verifier).map_err(|_| broker_error())?).map_err(|_| broker_error())?;
     let (verifier,_) = material.split_once('\n').ok_or_else(broker_error)?;
     let tokens = token_exchange(&provider,&[("code",code),("redirect_uri",callback_url()),("code_verifier",verifier),("grant_type","authorization_code")]).await?;
+    let completed: Result<Value> = async {
     let access = tokens["access_token"].as_str().ok_or_else(broker_error)?;
     let headers = Headers::new(); headers.set("Authorization",&format!("Bearer {access}"))?; headers.set("Accept","application/json")?; headers.set("User-Agent","Fabushi-MCP-Broker")?;
     let profile = provider_json(provider.userinfo_endpoint,Method::Get,headers,None).await?;
@@ -177,6 +179,9 @@ async fn complete_attempt(env: &Env, row: &Attempt, code: &str) -> Result<Value>
     let result = credential(&tokens,&actual.connection_id,None);
     worker::query!(&db,"INSERT INTO account_mcp_native_credentials (connection_id,user_id,plugin_id,access_digest,refresh_digest,version) VALUES (?1,?2,?3,?4,?5,1) ON CONFLICT(connection_id) DO UPDATE SET access_digest=excluded.access_digest,refresh_digest=excluded.refresh_digest,version=account_mcp_native_credentials.version+1",&actual.connection_id,&row.user_id,&row.plugin_id,digest(access),result.get("refreshToken").and_then(Value::as_str).map(digest))?.run().await?;
     Ok(result)
+    }.await;
+    if completed.is_err() { let _ = revoke_provider(&provider,&credential(&tokens,"",None)).await; }
+    completed
 }
 
 #[event(scheduled)]
