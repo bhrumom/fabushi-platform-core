@@ -120,10 +120,13 @@ pub(super) async fn mcp_oauth_authorize(request: Request, context: RouteContext<
     let (verifier,state) = material.split_once('\n').ok_or_else(broker_error)?;
     let mut authorize = build_authorization_url(&context.env,&provider,state,callback_url(),verifier).await?;
     if provider.id=="google" { authorize.query_pairs_mut().append_pair("access_type","offline").append_pair("prompt","consent select_account"); }
-    let mut response = Response::redirect(authorize)?;
-    response.headers_mut().set("Cache-Control","no-store")?;
-    response.headers_mut().set("Referrer-Policy","no-referrer")?;
-    Ok(response)
+    // Fetch redirect responses have immutable headers. Construct a fresh response
+    // so the provider Location and credential-link security headers share one guard.
+    let headers = Headers::new();
+    headers.set("Location", authorize.as_str())?;
+    headers.set("Cache-Control", "no-store")?;
+    headers.set("Referrer-Policy", "no-referrer")?;
+    Ok(Response::empty()?.with_status(302).with_headers(headers))
 }
 
 async fn provider_json(url: &str, method: Method, headers: Headers, body: Option<String>) -> Result<Value> {
