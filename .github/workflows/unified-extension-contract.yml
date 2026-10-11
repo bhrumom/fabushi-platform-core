@@ -1,19 +1,17 @@
 name: Unified Extension Contract
+
 on:
   push:
-    branches: [work/fpm-extension-contract-20261011]
+    branches:
+      - "work/fpm-extension-contract-20261011"
   pull_request:
-    branches: [main]
-    paths:
-      - "docs/specs/unified-extension-contract.md"
-      - "native/mahayana-messaging/src/extension.rs"
-      - "native/mahayana-messaging/src/lib.rs"
-      - "native/mahayana-messaging/Cargo.toml"
-      - "native/mahayana-messaging/Cargo.lock"
-      - ".github/workflows/unified-extension-contract.yml"
+    branches:
+      - main
   workflow_dispatch:
+
 permissions:
   contents: read
+
 jobs:
   extension-contract:
     runs-on: ubuntu-24.04
@@ -21,12 +19,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.97.1
-      - name: Test shared extension contract
-        run: cargo test --locked --manifest-path native/mahayana-messaging/Cargo.toml extension::
+      - name: Test shared contract crate
+        run: cargo test --locked --manifest-path native/mahayana-messaging/Cargo.toml
       - name: Compile shared contract crate
         run: cargo check --locked --manifest-path native/mahayana-messaging/Cargo.toml
       - name: Record exact source
