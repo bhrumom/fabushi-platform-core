@@ -63,3 +63,5 @@ All native clients and the Backend Registry must use equivalent serialized value
 ## Non-goals
 
 This slice does not implement registry persistence, publisher namespaces, signatures, downloads, install state, OAuth, MCP execution, Mini App sandboxing or Skills execution.
+
+Lockfile verification: `native/mahayana-messaging/Cargo.lock` is generated and validated only by GitHub Actions; exact-head acceptance still requires a later `--locked` test/check run.
