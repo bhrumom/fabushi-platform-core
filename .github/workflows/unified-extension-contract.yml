@@ -1,5 +1,7 @@
 name: Unified Extension Contract
 on:
+  push:
+    branches: [work/fpm-extension-contract-20261011]
   pull_request:
     branches: [main]
     paths:
