@@ -96,6 +96,8 @@ fn search_indexes_humans_bots_and_channels_without_transport_assumptions() {
         mention_count: 0,
         pinned_message_ids: Vec::new(),
         notification_settings: NotificationSettings::default(),
+        message_retention_seconds: None,
+        retention_revision: 0,
         permissions: ConversationPermissions::default(),
         history_visibility: HistoryVisibility::AllMembers,
         topics: Vec::new(),
