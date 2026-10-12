@@ -16,6 +16,7 @@ use crate::miniapp::{
     MiniAppSession,
 };
 use crate::payment::{CustomerInfo, Invoice, Money, PaymentOrder, PaymentStatus};
+use crate::retention::{ConversationMessageRetention, MessageRetentionError};
 use crate::story::{Story, StoryError, StoryId};
 use crate::wallet::{LedgerEntry, WalletAccountId, WalletError, WalletLedger};
 use serde::{Deserialize, Serialize};
@@ -71,6 +72,11 @@ pub enum Command {
     SetConversationNotifications {
         conversation_id: ConversationId,
         settings: NotificationSettings,
+    },
+    SetConversationMessageRetention {
+        conversation_id: ConversationId,
+        retention_seconds: Option<u32>,
+        expected_revision: u64,
     },
     UpsertFolder {
         folder: ConversationFolder,
@@ -339,6 +345,10 @@ pub enum Event {
         conversation_id: ConversationId,
         settings: NotificationSettings,
     },
+    ConversationMessageRetentionUpdated {
+        conversation_id: ConversationId,
+        retention: ConversationMessageRetention,
+    },
     FolderUpserted {
         folder: ConversationFolder,
     },
@@ -454,6 +464,7 @@ pub struct MessagingState {
     pub marked_unread_by_actor: BTreeMap<ConversationId, BTreeSet<ActorId>>,
     pub drafts: BTreeMap<ConversationId, BTreeMap<ActorId, ConversationDraft>>,
     pub topic_drafts: BTreeMap<ConversationId, BTreeMap<ActorId, BTreeMap<String, TopicDraft>>>,
+    pub message_retention: BTreeMap<ConversationId, ConversationMessageRetention>,
     pub invoices: BTreeMap<String, Invoice>,
     pub orders: BTreeMap<String, PaymentOrder>,
     pub wallet: WalletLedger,
@@ -506,6 +517,8 @@ pub enum EngineError {
     MediaSendPermissionDenied(ConversationId),
     #[error("conversation {0:?} does not allow sending polls")]
     PollSendPermissionDenied(ConversationId),
+    #[error(transparent)]
+    MessageRetention(#[from] MessageRetentionError),
     #[error("secret conversations must contain exactly two participants")]
     InvalidSecretConversation,
     #[error("secret conversations only accept encrypted secret content or service messages")]
@@ -938,6 +951,24 @@ impl MessagingEngine {
                 Ok(vec![Event::ConversationNotificationsUpdated {
                     conversation_id,
                     settings,
+                }])
+            }
+            Command::SetConversationMessageRetention {
+                conversation_id,
+                retention_seconds,
+                expected_revision,
+            } => {
+                self.require_conversation(&conversation_id)?;
+                let current = self
+                    .state
+                    .message_retention
+                    .get(&conversation_id)
+                    .copied()
+                    .unwrap_or_default();
+                let retention = current.change(retention_seconds, expected_revision)?;
+                Ok(vec![Event::ConversationMessageRetentionUpdated {
+                    conversation_id,
+                    retention,
                 }])
             }
             Command::UpsertFolder { folder } => Ok(vec![Event::FolderUpserted { folder }]),
@@ -2530,6 +2561,16 @@ impl MessagingEngine {
             } => {
                 if let Some(conversation) = self.state.conversations.get_mut(&conversation_id) {
                     conversation.notification_settings = settings;
+                }
+            }
+            Event::ConversationMessageRetentionUpdated {
+                conversation_id,
+                retention,
+            } => {
+                if retention.policy.is_none() && retention.revision == 0 {
+                    self.state.message_retention.remove(&conversation_id);
+                } else {
+                    self.state.message_retention.insert(conversation_id, retention);
                 }
             }
             Event::FolderUpserted { folder } => {
