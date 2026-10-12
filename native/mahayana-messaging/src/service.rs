@@ -2247,8 +2247,14 @@ impl<S: MessagingStateStore> MessagingService<S> {
             }
             ServerEvent::MessagesDeleted {
                 conversation_id, ..
+            } => {
+                // Expiry settlement may be triggered by an unrelated actor's next
+                // request. Deleted message identities are conversation-scoped and
+                // must never inherit that triggering actor into the journal audience.
+                audience.clear();
+                self.extend_conversation_id_audience(&mut audience, conversation_id);
             }
-            | ServerEvent::ConversationMessageRetentionChanged {
+            ServerEvent::ConversationMessageRetentionChanged {
                 conversation_id, ..
             }
             | ServerEvent::ReadChanged {
