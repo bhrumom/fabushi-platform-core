@@ -313,3 +313,114 @@ fn scheduled_message_expiry_starts_from_scheduled_send_time() {
         .expect("message added");
     assert_eq!(message.expires_at_ms, Some(160_000));
 }
+
+
+#[test]
+fn expiry_trigger_does_not_leak_deleted_message_ids_to_unrelated_actor() {
+    let owner_id = ActorId::new("human:audience-owner");
+    let outsider_id = ActorId::new("human:audience-outsider");
+    let conversation_id = ConversationId::new("chat:audience-retention");
+    let mut service = MessagingService::load(MemoryStateStore::default()).expect("load service");
+
+    for (actor_id, name) in [(&owner_id, "Owner"), (&outsider_id, "Outsider")] {
+        service
+            .handle(
+                envelope(
+                    actor_id,
+                    &format!("profile:{}", actor_id.0),
+                    ClientCommand::UpsertProfile {
+                        actor: Actor::human(actor_id.0.clone(), name),
+                    },
+                ),
+                1_000,
+            )
+            .expect("upsert actor");
+    }
+
+    let mut conversation = Conversation::direct(
+        conversation_id.0.clone(),
+        "Audience retention",
+        vec![owner_participant(&owner_id)],
+        1_000,
+    );
+    conversation.owner_id = Some(owner_id.clone());
+    service
+        .handle(
+            envelope(
+                &owner_id,
+                "conversation",
+                ClientCommand::CreateConversation { conversation },
+            ),
+            1_000,
+        )
+        .expect("create conversation");
+    service
+        .handle(
+            envelope(
+                &owner_id,
+                "retention",
+                ClientCommand::SetConversationMessageRetention {
+                    conversation_id: conversation_id.clone(),
+                    retention_seconds: Some(1),
+                    expected_revision: 0,
+                },
+            ),
+            1_100,
+        )
+        .expect("set retention");
+    service
+        .handle(
+            envelope(
+                &owner_id,
+                "send",
+                ClientCommand::SendMessage {
+                    conversation_id: conversation_id.clone(),
+                    client_message_id: ClientMessageId("client:audience:1".into()),
+                    content: MessageContent::Text {
+                        text: FormattedText::plain("private expiry"),
+                    },
+                    reply_to_message_id: None,
+                    thread_root_message_id: None,
+                    scheduled_at_ms: None,
+                    silent: false,
+                    protected_content: false,
+                },
+            ),
+            2_000,
+        )
+        .expect("send retained message");
+
+    let cursor_before_expiry = service.cursor();
+    service
+        .handle(
+            envelope(
+                &outsider_id,
+                "outsider-sync",
+                ClientCommand::Sync {
+                    cursor: None,
+                    limit: 100,
+                },
+            ),
+            3_000,
+        )
+        .expect("outsider sync may trigger global expiry settlement");
+
+    let store = service.into_store();
+    let journal = store
+        .load_event_journal_after(cursor_before_expiry, 100)
+        .expect("load journal")
+        .expect("memory journal");
+    let deletion = journal
+        .entries
+        .iter()
+        .find(|entry| matches!(
+            &entry.envelope.event,
+            ServerEvent::MessagesDeleted {
+                conversation_id: deleted_conversation,
+                ..
+            } if deleted_conversation == &conversation_id
+        ))
+        .expect("expiry deletion journal event");
+    assert!(deletion.audience.contains(&owner_id));
+    assert!(!deletion.audience.contains(&outsider_id));
+}
