@@ -67,6 +67,26 @@ pub fn next_retention_revision(
         .ok_or(MessageRetentionError::RevisionOverflow)
 }
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationMessageRetention {
+    pub policy: Option<MessageRetentionPolicy>,
+    pub revision: u64,
+}
+
+impl ConversationMessageRetention {
+    pub fn change(
+        self,
+        seconds: Option<u32>,
+        expected_revision: u64,
+    ) -> Result<Self, MessageRetentionError> {
+        let policy = seconds.map(MessageRetentionPolicy::new).transpose()?;
+        let revision = next_retention_revision(self.revision, expected_revision)?;
+        Ok(Self { policy, revision })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
