@@ -529,6 +529,23 @@ impl<S: MessagingStateStore> MessagingService<S> {
         let Some(existing) = existing else {
             return Ok(None);
         };
+        // Expired retention tombstones must not replay message content even when
+        // the client retries the exact idempotency key after reconnect/restart.
+        if existing.deleted
+            && existing
+                .expires_at_ms
+                .is_some_and(|expires_at_ms| expires_at_ms <= server_time_ms)
+        {
+            return Ok(Some(vec![ServerEnvelope {
+                protocol_version: FABUSHI_MESSAGING_PROTOCOL_VERSION,
+                cursor: Some(self.cursor.to_string()),
+                server_time_ms,
+                event: ServerEvent::MessagesDeleted {
+                    conversation_id: conversation_id.clone(),
+                    message_ids: vec![existing.id.clone()],
+                },
+            }]));
+        }
         // The stable/legacy lookup key already binds this replay to the authenticated
         // actor + client_message_id, without extending the canonical Message schema.
         if &existing.sender_id != actor_id
