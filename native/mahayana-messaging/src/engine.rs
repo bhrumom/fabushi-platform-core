@@ -16,7 +16,7 @@ use crate::miniapp::{
     MiniAppSession,
 };
 use crate::payment::{CustomerInfo, Invoice, Money, PaymentOrder, PaymentStatus};
-use crate::retention::{ConversationMessageRetention, MessageRetentionError};
+use crate::retention::{ConversationMessageRetention, MessageRetentionError, MessageRetentionPolicy};
 use crate::story::{Story, StoryError, StoryId};
 use crate::wallet::{LedgerEntry, WalletAccountId, WalletError, WalletLedger};
 use serde::{Deserialize, Serialize};
@@ -464,7 +464,6 @@ pub struct MessagingState {
     pub marked_unread_by_actor: BTreeMap<ConversationId, BTreeSet<ActorId>>,
     pub drafts: BTreeMap<ConversationId, BTreeMap<ActorId, ConversationDraft>>,
     pub topic_drafts: BTreeMap<ConversationId, BTreeMap<ActorId, BTreeMap<String, TopicDraft>>>,
-    pub message_retention: BTreeMap<ConversationId, ConversationMessageRetention>,
     pub invoices: BTreeMap<String, Invoice>,
     pub orders: BTreeMap<String, PaymentOrder>,
     pub wallet: WalletLedger,
@@ -959,12 +958,14 @@ impl MessagingEngine {
                 expected_revision,
             } => {
                 self.require_conversation(&conversation_id)?;
-                let current = self
-                    .state
-                    .message_retention
-                    .get(&conversation_id)
-                    .copied()
-                    .unwrap_or_default();
+                let conversation = self.require_conversation(&conversation_id)?;
+                let current = ConversationMessageRetention {
+                    policy: conversation
+                        .message_retention_seconds
+                        .map(MessageRetentionPolicy::new)
+                        .transpose()?,
+                    revision: conversation.retention_revision,
+                };
                 let retention = current.change(retention_seconds, expected_revision)?;
                 Ok(vec![Event::ConversationMessageRetentionUpdated {
                     conversation_id,
@@ -1161,6 +1162,13 @@ impl MessagingEngine {
                         message_id: local_message_id,
                     });
                 }
+                let expiry_base_ms = scheduled_at_ms.unwrap_or(created_at_ms);
+                let expires_at_ms = match conversation.message_retention_seconds {
+                    Some(seconds) => Some(
+                        MessageRetentionPolicy::new(seconds)?.expires_at_ms(expiry_base_ms)?
+                    ),
+                    None => None,
+                };
                 let message = Message {
                     id: local_message_id,
                     conversation_id,
@@ -1175,6 +1183,7 @@ impl MessagingEngine {
                     created_at_ms,
                     edited_at_ms: None,
                     scheduled_at_ms,
+                    expires_at_ms,
                     silent,
                     protected_content: protected_content || is_secret_content,
                     pinned: false,
@@ -1191,7 +1200,9 @@ impl MessagingEngine {
                 sender_id,
                 created_at_ms,
             } => {
-                self.require_conversation(&destination_conversation_id)?;
+                let destination_retention_seconds = self
+                    .require_conversation(&destination_conversation_id)?
+                    .message_retention_seconds;
                 self.require_actor(&sender_id)?;
                 if client_message_id.0.trim().is_empty() || client_message_id.0.len() > 200 {
                     return Err(EngineError::InvalidClientMessageId);
@@ -1223,6 +1234,12 @@ impl MessagingEngine {
                     .forward_origin
                     .clone()
                     .unwrap_or_else(|| format!("{}:{}", original.conversation_id.0, original.id.0));
+                let expires_at_ms = match destination_retention_seconds {
+                    Some(seconds) => Some(
+                        MessageRetentionPolicy::new(seconds)?.expires_at_ms(created_at_ms)?
+                    ),
+                    None => None,
+                };
                 let message = Message {
                     id: local_message_id,
                     conversation_id: destination_conversation_id,
@@ -1237,6 +1254,7 @@ impl MessagingEngine {
                     created_at_ms,
                     edited_at_ms: None,
                     scheduled_at_ms: None,
+                    expires_at_ms,
                     silent: false,
                     protected_content: original.protected_content,
                     pinned: false,
@@ -2567,10 +2585,10 @@ impl MessagingEngine {
                 conversation_id,
                 retention,
             } => {
-                if retention.policy.is_none() && retention.revision == 0 {
-                    self.state.message_retention.remove(&conversation_id);
-                } else {
-                    self.state.message_retention.insert(conversation_id, retention);
+                if let Some(conversation) = self.state.conversations.get_mut(&conversation_id) {
+                    conversation.message_retention_seconds =
+                        retention.policy.map(|policy| policy.seconds());
+                    conversation.retention_revision = retention.revision;
                 }
             }
             Event::FolderUpserted { folder } => {
