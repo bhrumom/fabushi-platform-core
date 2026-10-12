@@ -266,6 +266,8 @@ pub struct Message {
     pub created_at_ms: i64,
     pub edited_at_ms: Option<i64>,
     pub scheduled_at_ms: Option<i64>,
+    #[serde(default)]
+    pub expires_at_ms: Option<i64>,
     pub silent: bool,
     pub protected_content: bool,
     pub pinned: bool,
