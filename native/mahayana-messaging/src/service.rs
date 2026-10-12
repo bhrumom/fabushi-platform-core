@@ -133,6 +133,7 @@ impl<S: MessagingStateStore> MessagingService<S> {
         let actor_id = envelope.context.actor_id;
         let command = envelope.command;
         self.validate_command_authorization(&actor_id, &command)?;
+        self.settle_expired_messages(&actor_id, server_time_ms)?;
         match command {
             ClientCommand::BeginBlobUpload { metadata } => {
                 let status = self.blob_store()?.begin_upload(&metadata)?;
@@ -266,6 +267,51 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 Ok(responses)
             }
         }
+    }
+
+    fn settle_expired_messages(
+        &mut self,
+        initiator: &ActorId,
+        server_time_ms: i64,
+    ) -> Result<(), MessagingServiceError> {
+        let expired = self
+            .engine
+            .state()
+            .messages
+            .iter()
+            .filter_map(|(conversation_id, messages)| {
+                let ids = messages
+                    .values()
+                    .filter(|message| {
+                        !message.deleted
+                            && message
+                                .expires_at_ms
+                                .is_some_and(|expires_at_ms| expires_at_ms <= server_time_ms)
+                    })
+                    .map(|message| message.id.clone())
+                    .collect::<Vec<_>>();
+                (!ids.is_empty()).then(|| (conversation_id.clone(), ids))
+            })
+            .collect::<Vec<_>>();
+        if expired.is_empty() {
+            return Ok(());
+        }
+
+        let mut events = Vec::new();
+        for (conversation_id, message_ids) in expired {
+            events.extend(self.engine.execute(Command::DeleteMessages {
+                conversation_id,
+                message_ids,
+            })?);
+        }
+        self.cursor = self.cursor.saturating_add(events.len() as u64);
+        let responses = events
+            .into_iter()
+            .filter_map(|event| self.project_event(initiator, event, server_time_ms))
+            .collect::<Vec<_>>();
+        let journal = self.journal_entries(initiator, &responses);
+        self.persist_with_events(server_time_ms, &journal)?;
+        Ok(())
     }
 
     fn search_envelope(
@@ -1267,6 +1313,12 @@ impl<S: MessagingStateStore> MessagingService<S> {
                     .iter()
                     .filter_map(|id| state.messages.get(id))
                     .flat_map(|messages| messages.values())
+                    .filter(|message| {
+                        !(message.deleted
+                            && message
+                                .expires_at_ms
+                                .is_some_and(|expires_at_ms| expires_at_ms <= server_time_ms))
+                    })
                     .take(max_items)
                     .map(|message| self.project_message_for_actor(actor_id, message))
                     .collect(),
