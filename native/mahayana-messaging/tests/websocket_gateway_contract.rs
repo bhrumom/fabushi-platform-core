@@ -1,7 +1,9 @@
 use fabushi_messaging_core::{
-    AccessGrant, AccessScope, ActorId, AuthenticatedClientFrame, ClientCommand, ClientEnvelope,
-    FileAccessTokenStore, MessagingServerConfig, MessagingWebSocketGateway,
-    MessagingWebSocketGatewayConfig, RequestContext, ServerFrame,
+    AccessGrant, AccessScope, Actor, ActorId, AuthenticatedClientFrame, ClientCommand,
+    ClientEnvelope, ClientMessageId, Conversation, ConversationId, FileAccessTokenStore,
+    FormattedText, MessageContent, MessagingServerConfig, MessagingWebSocketGateway,
+    MessagingWebSocketGatewayConfig, Participant, ParticipantRole, RequestContext, ServerEvent,
+    ServerFrame,
 };
 use std::collections::BTreeSet;
 use std::fs;
@@ -119,6 +121,26 @@ fn connect(address: SocketAddr) -> WebSocket<TcpStream> {
     websocket
 }
 
+fn authenticated_command(
+    fixture: &Fixture,
+    request_id: &str,
+    command: ClientCommand,
+) -> AuthenticatedClientFrame {
+    AuthenticatedClientFrame {
+        access_token: fixture.access_token.clone(),
+        envelope: ClientEnvelope::new(
+            RequestContext {
+                request_id: request_id.into(),
+                device_id: fixture.device_id.clone(),
+                actor_id: fixture.actor_id.clone(),
+                session_id: fixture.session_id.clone(),
+                sent_at_ms: 0,
+            },
+            command,
+        ),
+    }
+}
+
 fn send_request(socket: &mut WebSocket<TcpStream>, request: &AuthenticatedClientFrame) {
     socket
         .send(Message::text(
@@ -223,4 +245,153 @@ fn websocket_gateway_rejects_binary_application_protocol_frames() {
 #[allow(dead_code)]
 fn assert_path_is_inside(root: &Path, child: &Path) {
     assert!(child.starts_with(root));
+}
+
+
+#[test]
+fn websocket_retention_survives_sqlite_restart_and_does_not_resurrect_expired_message() {
+    let fixture = Fixture::new("retention-restart");
+    let conversation_id = ConversationId::new("chat:websocket-retention");
+
+    let (address, first_handle) = start_gateway(&fixture, 500, 2_000, 8 * 1024 * 1024);
+    let mut first = connect(address);
+
+    send_request(
+        &mut first,
+        &authenticated_command(
+            &fixture,
+            "profile",
+            ClientCommand::UpsertProfile {
+                actor: Actor::human(fixture.actor_id.0.clone(), "Retention owner"),
+            },
+        ),
+    );
+    assert!(matches!(
+        read_server_frame(&mut first),
+        ServerFrame::Events { .. }
+    ));
+
+    let mut conversation = Conversation::direct(
+        conversation_id.0.clone(),
+        "WebSocket retention",
+        vec![Participant {
+            actor_id: fixture.actor_id.clone(),
+            role: ParticipantRole::Owner,
+            joined_at_ms: 1,
+            muted_until_ms: None,
+        }],
+        1,
+    );
+    conversation.owner_id = Some(fixture.actor_id.clone());
+    send_request(
+        &mut first,
+        &authenticated_command(
+            &fixture,
+            "conversation",
+            ClientCommand::CreateConversation { conversation },
+        ),
+    );
+    assert!(matches!(
+        read_server_frame(&mut first),
+        ServerFrame::Events { .. }
+    ));
+
+    send_request(
+        &mut first,
+        &authenticated_command(
+            &fixture,
+            "retention",
+            ClientCommand::SetConversationMessageRetention {
+                conversation_id: conversation_id.clone(),
+                retention_seconds: Some(1),
+                expected_revision: 0,
+            },
+        ),
+    );
+    let retention_frame = read_server_frame(&mut first);
+    assert!(matches!(
+        retention_frame,
+        ServerFrame::Events { ref events }
+            if events.iter().any(|event| matches!(
+                &event.event,
+                ServerEvent::ConversationMessageRetentionChanged {
+                    conversation_id: changed_id,
+                    retention_seconds: Some(1),
+                    revision: 1,
+                } if changed_id == &conversation_id
+            ))
+    ));
+
+    // Use an authority-defined scheduled send time in the distant past. This avoids
+    // wall-clock sleeps while still exercising the production expiry settlement path
+    // on the next authenticated request.
+    send_request(
+        &mut first,
+        &authenticated_command(
+            &fixture,
+            "send",
+            ClientCommand::SendMessage {
+                conversation_id: conversation_id.clone(),
+                client_message_id: ClientMessageId("client:websocket-retention:1".into()),
+                content: MessageContent::Text {
+                    text: FormattedText::plain("expire through gateway"),
+                },
+                reply_to_message_id: None,
+                thread_root_message_id: None,
+                scheduled_at_ms: Some(1),
+                silent: false,
+                protected_content: false,
+            },
+        ),
+    );
+    let sent_frame = read_server_frame(&mut first);
+    assert!(matches!(
+        sent_frame,
+        ServerFrame::Events { ref events }
+            if events.iter().any(|event| matches!(
+                &event.event,
+                ServerEvent::MessageAdded { message }
+                    if message.conversation_id == conversation_id
+                        && message.expires_at_ms == Some(1_001)
+                        && !message.deleted
+            ))
+    ));
+    close_and_join(first, first_handle);
+
+    // A new gateway instance loads the same SQLite authority and access registry.
+    // Its first sync settles the overdue message through canonical tombstones before
+    // projecting the snapshot, proving restart recovery without resurrection.
+    let (address, restart_handle) = start_gateway(&fixture, 500, 2_000, 8 * 1024 * 1024);
+    let mut restarted = connect(address);
+    send_request(
+        &mut restarted,
+        &authenticated_command(
+            &fixture,
+            "sync-after-restart",
+            ClientCommand::Sync {
+                cursor: None,
+                limit: 100,
+            },
+        ),
+    );
+    let frame = read_server_frame(&mut restarted);
+    assert!(matches!(
+        frame,
+        ServerFrame::Events { ref events }
+            if events.iter().any(|event| matches!(
+                &event.event,
+                ServerEvent::SyncBatch {
+                    conversations,
+                    messages,
+                    ..
+                } if conversations.iter().any(|conversation| {
+                    conversation.id == conversation_id
+                        && conversation.message_retention_seconds == Some(1)
+                        && conversation.retention_revision == 1
+                }) && messages.iter().all(|message| {
+                    message.conversation_id != conversation_id || message.expires_at_ms != Some(1_001)
+                })
+            ))
+    ));
+    close_and_join(restarted, restart_handle);
 }

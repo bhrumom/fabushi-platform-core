@@ -108,6 +108,10 @@ pub struct Conversation {
     pub mention_count: u32,
     pub pinned_message_ids: Vec<String>,
     pub notification_settings: NotificationSettings,
+    #[serde(default)]
+    pub message_retention_seconds: Option<u32>,
+    #[serde(default)]
+    pub retention_revision: u64,
     pub permissions: ConversationPermissions,
     pub history_visibility: HistoryVisibility,
     pub topics: Vec<Topic>,
@@ -140,6 +144,8 @@ impl Conversation {
             mention_count: 0,
             pinned_message_ids: Vec::new(),
             notification_settings: NotificationSettings::default(),
+            message_retention_seconds: None,
+            retention_revision: 0,
             permissions: ConversationPermissions::default(),
             history_visibility: HistoryVisibility::AllMembers,
             topics: Vec::new(),

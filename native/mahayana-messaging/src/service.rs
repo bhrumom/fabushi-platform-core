@@ -133,6 +133,7 @@ impl<S: MessagingStateStore> MessagingService<S> {
         let actor_id = envelope.context.actor_id;
         let command = envelope.command;
         self.validate_command_authorization(&actor_id, &command)?;
+        self.settle_expired_messages(&actor_id, server_time_ms)?;
         match command {
             ClientCommand::BeginBlobUpload { metadata } => {
                 let status = self.blob_store()?.begin_upload(&metadata)?;
@@ -266,6 +267,51 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 Ok(responses)
             }
         }
+    }
+
+    fn settle_expired_messages(
+        &mut self,
+        initiator: &ActorId,
+        server_time_ms: i64,
+    ) -> Result<(), MessagingServiceError> {
+        let expired = self
+            .engine
+            .state()
+            .messages
+            .iter()
+            .filter_map(|(conversation_id, messages)| {
+                let ids = messages
+                    .values()
+                    .filter(|message| {
+                        !message.deleted
+                            && message
+                                .expires_at_ms
+                                .is_some_and(|expires_at_ms| expires_at_ms <= server_time_ms)
+                    })
+                    .map(|message| message.id.clone())
+                    .collect::<Vec<_>>();
+                (!ids.is_empty()).then(|| (conversation_id.clone(), ids))
+            })
+            .collect::<Vec<_>>();
+        if expired.is_empty() {
+            return Ok(());
+        }
+
+        let mut events = Vec::new();
+        for (conversation_id, message_ids) in expired {
+            events.extend(self.engine.execute(Command::DeleteMessages {
+                conversation_id,
+                message_ids,
+            })?);
+        }
+        self.cursor = self.cursor.saturating_add(events.len() as u64);
+        let responses = events
+            .into_iter()
+            .filter_map(|event| self.project_event(initiator, event, server_time_ms))
+            .collect::<Vec<_>>();
+        let journal = self.journal_entries(initiator, &responses);
+        self.persist_with_events(server_time_ms, &journal)?;
+        Ok(())
     }
 
     fn search_envelope(
@@ -483,6 +529,23 @@ impl<S: MessagingStateStore> MessagingService<S> {
         let Some(existing) = existing else {
             return Ok(None);
         };
+        // Expired retention tombstones must not replay message content even when
+        // the client retries the exact idempotency key after reconnect/restart.
+        if existing.deleted
+            && existing
+                .expires_at_ms
+                .is_some_and(|expires_at_ms| expires_at_ms <= server_time_ms)
+        {
+            return Ok(Some(vec![ServerEnvelope {
+                protocol_version: FABUSHI_MESSAGING_PROTOCOL_VERSION,
+                cursor: Some(self.cursor.to_string()),
+                server_time_ms,
+                event: ServerEvent::MessagesDeleted {
+                    conversation_id: conversation_id.clone(),
+                    message_ids: vec![existing.id.clone()],
+                },
+            }]));
+        }
         // The stable/legacy lookup key already binds this replay to the authenticated
         // actor + client_message_id, without extending the canonical Message schema.
         if &existing.sender_id != actor_id
@@ -640,6 +703,9 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 self.authorized_community(actor_id, conversation_id)?;
             }
             ClientCommand::UpdateConversationInfo {
+                conversation_id, ..
+            }
+            | ClientCommand::SetConversationMessageRetention {
                 conversation_id, ..
             }
             | ClientCommand::SetConversationParticipant {
@@ -1264,6 +1330,12 @@ impl<S: MessagingStateStore> MessagingService<S> {
                     .iter()
                     .filter_map(|id| state.messages.get(id))
                     .flat_map(|messages| messages.values())
+                    .filter(|message| {
+                        !(message.deleted
+                            && message
+                                .expires_at_ms
+                                .is_some_and(|expires_at_ms| expires_at_ms <= server_time_ms))
+                    })
                     .take(max_items)
                     .map(|message| self.project_message_for_actor(actor_id, message))
                     .collect(),
@@ -1506,6 +1578,15 @@ impl<S: MessagingStateStore> MessagingService<S> {
             } => vec![Command::SetConversationNotifications {
                 conversation_id,
                 settings,
+            }],
+            ClientCommand::SetConversationMessageRetention {
+                conversation_id,
+                retention_seconds,
+                expected_revision,
+            } => vec![Command::SetConversationMessageRetention {
+                conversation_id,
+                retention_seconds,
+                expected_revision,
             }],
             ClientCommand::UpsertFolder { folder } => vec![Command::UpsertFolder { folder }],
             ClientCommand::DeleteFolder { folder_id } => vec![Command::DeleteFolder { folder_id }],
@@ -1924,6 +2005,14 @@ impl<S: MessagingStateStore> MessagingService<S> {
                         server_time_ms,
                     ),
                 })?,
+            Event::ConversationMessageRetentionUpdated {
+                conversation_id,
+                retention,
+            } => ServerEvent::ConversationMessageRetentionChanged {
+                conversation_id,
+                retention_seconds: retention.policy.map(|policy| policy.seconds()),
+                revision: retention.revision,
+            },
             Event::ConversationMarkedUnread {
                 conversation_id,
                 actor_id,
@@ -2174,6 +2263,15 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 self.extend_conversation_id_audience(&mut audience, &message.conversation_id);
             }
             ServerEvent::MessagesDeleted {
+                conversation_id, ..
+            } => {
+                // Expiry settlement may be triggered by an unrelated actor's next
+                // request. Deleted message identities are conversation-scoped and
+                // must never inherit that triggering actor into the journal audience.
+                audience.clear();
+                self.extend_conversation_id_audience(&mut audience, conversation_id);
+            }
+            ServerEvent::ConversationMessageRetentionChanged {
                 conversation_id, ..
             }
             | ServerEvent::ReadChanged {

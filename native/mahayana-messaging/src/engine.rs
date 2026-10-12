@@ -16,6 +16,7 @@ use crate::miniapp::{
     MiniAppSession,
 };
 use crate::payment::{CustomerInfo, Invoice, Money, PaymentOrder, PaymentStatus};
+use crate::retention::{ConversationMessageRetention, MessageRetentionError, MessageRetentionPolicy};
 use crate::story::{Story, StoryError, StoryId};
 use crate::wallet::{LedgerEntry, WalletAccountId, WalletError, WalletLedger};
 use serde::{Deserialize, Serialize};
@@ -71,6 +72,11 @@ pub enum Command {
     SetConversationNotifications {
         conversation_id: ConversationId,
         settings: NotificationSettings,
+    },
+    SetConversationMessageRetention {
+        conversation_id: ConversationId,
+        retention_seconds: Option<u32>,
+        expected_revision: u64,
     },
     UpsertFolder {
         folder: ConversationFolder,
@@ -339,6 +345,10 @@ pub enum Event {
         conversation_id: ConversationId,
         settings: NotificationSettings,
     },
+    ConversationMessageRetentionUpdated {
+        conversation_id: ConversationId,
+        retention: ConversationMessageRetention,
+    },
     FolderUpserted {
         folder: ConversationFolder,
     },
@@ -506,6 +516,8 @@ pub enum EngineError {
     MediaSendPermissionDenied(ConversationId),
     #[error("conversation {0:?} does not allow sending polls")]
     PollSendPermissionDenied(ConversationId),
+    #[error(transparent)]
+    MessageRetention(#[from] MessageRetentionError),
     #[error("secret conversations must contain exactly two participants")]
     InvalidSecretConversation,
     #[error("secret conversations only accept encrypted secret content or service messages")]
@@ -940,6 +952,26 @@ impl MessagingEngine {
                     settings,
                 }])
             }
+            Command::SetConversationMessageRetention {
+                conversation_id,
+                retention_seconds,
+                expected_revision,
+            } => {
+                self.require_conversation(&conversation_id)?;
+                let conversation = self.require_conversation(&conversation_id)?;
+                let current = ConversationMessageRetention {
+                    policy: conversation
+                        .message_retention_seconds
+                        .map(MessageRetentionPolicy::new)
+                        .transpose()?,
+                    revision: conversation.retention_revision,
+                };
+                let retention = current.change(retention_seconds, expected_revision)?;
+                Ok(vec![Event::ConversationMessageRetentionUpdated {
+                    conversation_id,
+                    retention,
+                }])
+            }
             Command::UpsertFolder { folder } => Ok(vec![Event::FolderUpserted { folder }]),
             Command::DeleteFolder { folder_id } => Ok(vec![Event::FolderDeleted { folder_id }]),
             Command::QueueMessage {
@@ -1130,6 +1162,13 @@ impl MessagingEngine {
                         message_id: local_message_id,
                     });
                 }
+                let expiry_base_ms = scheduled_at_ms.unwrap_or(created_at_ms);
+                let expires_at_ms = match conversation.message_retention_seconds {
+                    Some(seconds) => Some(
+                        MessageRetentionPolicy::new(seconds)?.expires_at_ms(expiry_base_ms)?
+                    ),
+                    None => None,
+                };
                 let message = Message {
                     id: local_message_id,
                     conversation_id,
@@ -1144,6 +1183,7 @@ impl MessagingEngine {
                     created_at_ms,
                     edited_at_ms: None,
                     scheduled_at_ms,
+                    expires_at_ms,
                     silent,
                     protected_content: protected_content || is_secret_content,
                     pinned: false,
@@ -1160,7 +1200,9 @@ impl MessagingEngine {
                 sender_id,
                 created_at_ms,
             } => {
-                self.require_conversation(&destination_conversation_id)?;
+                let destination_retention_seconds = self
+                    .require_conversation(&destination_conversation_id)?
+                    .message_retention_seconds;
                 self.require_actor(&sender_id)?;
                 if client_message_id.0.trim().is_empty() || client_message_id.0.len() > 200 {
                     return Err(EngineError::InvalidClientMessageId);
@@ -1192,6 +1234,12 @@ impl MessagingEngine {
                     .forward_origin
                     .clone()
                     .unwrap_or_else(|| format!("{}:{}", original.conversation_id.0, original.id.0));
+                let expires_at_ms = match destination_retention_seconds {
+                    Some(seconds) => Some(
+                        MessageRetentionPolicy::new(seconds)?.expires_at_ms(created_at_ms)?
+                    ),
+                    None => None,
+                };
                 let message = Message {
                     id: local_message_id,
                     conversation_id: destination_conversation_id,
@@ -1206,6 +1254,7 @@ impl MessagingEngine {
                     created_at_ms,
                     edited_at_ms: None,
                     scheduled_at_ms: None,
+                    expires_at_ms,
                     silent: false,
                     protected_content: original.protected_content,
                     pinned: false,
@@ -2530,6 +2579,16 @@ impl MessagingEngine {
             } => {
                 if let Some(conversation) = self.state.conversations.get_mut(&conversation_id) {
                     conversation.notification_settings = settings;
+                }
+            }
+            Event::ConversationMessageRetentionUpdated {
+                conversation_id,
+                retention,
+            } => {
+                if let Some(conversation) = self.state.conversations.get_mut(&conversation_id) {
+                    conversation.message_retention_seconds =
+                        retention.policy.map(|policy| policy.seconds());
+                    conversation.retention_revision = retention.revision;
                 }
             }
             Event::FolderUpserted { folder } => {
