@@ -232,6 +232,39 @@ fn retention_policy_is_revision_fenced_and_expiry_survives_restart_without_resur
     assert!(sync_messages(&after_restart)
         .iter()
         .all(|candidate| candidate.id != message.id));
+
+    let replayed_expired = restarted
+        .handle(
+            envelope(
+                &owner_id,
+                "send-replay-after-expiry",
+                ClientCommand::SendMessage {
+                    conversation_id: conversation_id.clone(),
+                    client_message_id: ClientMessageId("client:retention:1".into()),
+                    content: MessageContent::Text {
+                        text: FormattedText::plain("expires"),
+                    },
+                    reply_to_message_id: None,
+                    thread_root_message_id: None,
+                    scheduled_at_ms: None,
+                    silent: false,
+                    protected_content: false,
+                },
+            ),
+            4_100,
+        )
+        .expect("idempotent replay after expiry");
+    assert!(replayed_expired.iter().any(|event| matches!(
+        &event.event,
+        ServerEvent::MessagesDeleted {
+            conversation_id: deleted_conversation,
+            message_ids,
+        } if deleted_conversation == &conversation_id && message_ids == &vec![message.id.clone()]
+    )));
+    assert!(replayed_expired.iter().all(|event| !matches!(
+        &event.event,
+        ServerEvent::MessageAdded { .. } | ServerEvent::MessageChanged { .. }
+    )));
 }
 
 #[test]
