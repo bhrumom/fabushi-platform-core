@@ -642,6 +642,9 @@ impl<S: MessagingStateStore> MessagingService<S> {
             ClientCommand::UpdateConversationInfo {
                 conversation_id, ..
             }
+            | ClientCommand::SetConversationMessageRetention {
+                conversation_id, ..
+            }
             | ClientCommand::SetConversationParticipant {
                 conversation_id, ..
             }
@@ -1507,6 +1510,15 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 conversation_id,
                 settings,
             }],
+            ClientCommand::SetConversationMessageRetention {
+                conversation_id,
+                retention_seconds,
+                expected_revision,
+            } => vec![Command::SetConversationMessageRetention {
+                conversation_id,
+                retention_seconds,
+                expected_revision,
+            }],
             ClientCommand::UpsertFolder { folder } => vec![Command::UpsertFolder { folder }],
             ClientCommand::DeleteFolder { folder_id } => vec![Command::DeleteFolder { folder_id }],
             ClientCommand::SendMessage {
@@ -1924,6 +1936,14 @@ impl<S: MessagingStateStore> MessagingService<S> {
                         server_time_ms,
                     ),
                 })?,
+            Event::ConversationMessageRetentionUpdated {
+                conversation_id,
+                retention,
+            } => ServerEvent::ConversationMessageRetentionChanged {
+                conversation_id,
+                retention_seconds: retention.policy.map(|policy| policy.seconds()),
+                revision: retention.revision,
+            },
             Event::ConversationMarkedUnread {
                 conversation_id,
                 actor_id,
@@ -2174,6 +2194,9 @@ impl<S: MessagingStateStore> MessagingService<S> {
                 self.extend_conversation_id_audience(&mut audience, &message.conversation_id);
             }
             ServerEvent::MessagesDeleted {
+                conversation_id, ..
+            }
+            | ServerEvent::ConversationMessageRetentionChanged {
                 conversation_id, ..
             }
             | ServerEvent::ReadChanged {
