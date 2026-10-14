@@ -2464,7 +2464,7 @@ pub(super) async fn account_user_info(
     request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
+    let account = match authenticated_live_account(&request, &context.env).await {
         Ok(account) => account,
         Err(_) => return error_response(401, "unauthorized", "登录已过期，请重新登录"),
     };
@@ -2479,7 +2479,7 @@ pub(super) async fn account_logout(
     request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
+    let account = match authenticated_live_account(&request, &context.env).await {
         Ok(account) => account,
         Err(_) => return error_response(401, "unauthorized", "登录已过期，请重新登录"),
     };
@@ -3046,6 +3046,40 @@ pub(super) async fn authenticated_plugin_account(
         scopes: claims.scope,
         is_test_account: false,
     })
+}
+
+/// Account API authorization needs current server-side session state in
+/// addition to a cryptographically valid access token. Do not use the legacy
+/// privileged test identity for ordinary account lifecycle endpoints.
+pub(super) async fn authenticated_live_account(
+    request: &Request,
+    env: &Env,
+) -> Result<AuthenticatedAccount> {
+    let account = authenticated_account(request, env)?;
+    if account.is_test_account {
+        return Err(worker::Error::RustError("ordinary account session required".into()));
+    }
+    let session_id = account.session_id.as_deref().ok_or_else(|| {
+        worker::Error::RustError("ordinary account session required".into())
+    })?;
+    #[derive(Deserialize)]
+    struct LiveSessionRow {
+        expires_at: i64,
+    }
+    let database = env.d1(ACCOUNT_DATABASE_BINDING)?;
+    let row = worker::query!(
+        &database,
+        "SELECT expires_at FROM account_sessions
+         WHERE session_id = ?1 AND user_id = ?2 AND revoked_at IS NULL LIMIT 1",
+        session_id,
+        &account.user_id
+    )?
+    .first::<LiveSessionRow>(None)
+    .await?;
+    if !row.is_some_and(|session| session.expires_at > now_seconds()) {
+        return Err(worker::Error::RustError("account session is no longer active".into()));
+    }
+    Ok(account)
 }
 
 pub(super) fn authenticated_user(request: &Request, env: &Env) -> Result<String> {
