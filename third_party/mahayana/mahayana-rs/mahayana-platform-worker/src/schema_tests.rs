@@ -293,6 +293,147 @@ fn remote_computer_network_binding_is_authority_written_generation_fenced_and_se
 }
 
 #[test]
+fn network_enrollment_grants_are_target_issued_authority_redeemed_and_secret_safe() {
+    for required in [
+        "CREATE TABLE IF NOT EXISTS remote_computer_network_enrollment_grants",
+        "request_id TEXT NOT NULL CHECK (length(request_id) BETWEEN 16 AND 160)",
+        "secret_hash TEXT NOT NULL CHECK (length(secret_hash) = 43)",
+        "expires_at - created_at <= 300",
+        "remote_computer_network_enrollment_request_idx",
+        "remote_computer_network_enrollment_live_device_idx",
+        "remote network enrollment grant identity is immutable",
+        "remote network enrollment grant terminal state is immutable",
+    ] {
+        assert!(
+            REMOTE_COMPUTER_NETWORK_ENROLLMENT_GRANT_SCHEMA_V33.contains(required),
+            "missing network enrollment schema invariant: {required}"
+        );
+    }
+    for forbidden in [
+        "grant_secret TEXT",
+        "device_secret TEXT",
+        "access_token TEXT",
+        "refresh_token TEXT",
+        "client_token TEXT",
+        "mobile_token TEXT",
+        "private_key TEXT",
+        "headscale_key TEXT",
+    ] {
+        assert!(
+            !REMOTE_COMPUTER_NETWORK_ENROLLMENT_GRANT_SCHEMA_V33
+                .to_ascii_lowercase()
+                .contains(&forbidden.to_ascii_lowercase()),
+            "network enrollment must not persist raw protected credential: {forbidden}"
+        );
+    }
+
+    let issue_start = REMOTE_COMPUTER_WORKER_SOURCE
+        .find("pub(super) async fn remote_computer_network_enrollment_issue")
+        .expect("network enrollment issue handler");
+    let revoke_start = REMOTE_COMPUTER_WORKER_SOURCE[issue_start..]
+        .find("pub(super) async fn remote_computer_network_enrollment_revoke")
+        .map(|offset| issue_start + offset)
+        .expect("network enrollment revoke handler");
+    let redeem_start = REMOTE_COMPUTER_WORKER_SOURCE[revoke_start..]
+        .find("pub(super) async fn remote_computer_network_enrollment_redeem")
+        .map(|offset| revoke_start + offset)
+        .expect("network enrollment redeem handler");
+    let snapshot_start = REMOTE_COMPUTER_WORKER_SOURCE[redeem_start..]
+        .find("pub(super) async fn remote_computer_network_cell_snapshot")
+        .map(|offset| redeem_start + offset)
+        .expect("network cell snapshot handler");
+    let issue = &REMOTE_COMPUTER_WORKER_SOURCE[issue_start..revoke_start];
+    let revoke = &REMOTE_COMPUTER_WORKER_SOURCE[revoke_start..redeem_start];
+    let redeem = &REMOTE_COMPUTER_WORKER_SOURCE[redeem_start..snapshot_start];
+
+    for required in [
+        "authenticated_account(&request, &context.env)",
+        "remote_desktop_secret_matches",
+        "remote_network_cell_for_account(&account.user_id)",
+        "value.generation.saturating_add(1)",
+        "REMOTE_NETWORK_ENROLLMENT_SECONDS",
+        "recoverable_remote_network_enrollment_secret",
+        "remote_network_enrollment_secret_hash",
+        "network_enrollment_request_conflict",
+        "network_enrollment_generation_stale",
+        "SET revoked_at = ?1",
+    ] {
+        assert!(issue.contains(required), "missing target issue invariant: {required}");
+    }
+    for forbidden in [
+        "remote_network_authority_allowed(",
+        "authenticated_official_mcp_service",
+        "official_mcp_service_claims",
+        "input.cell_id",
+        "input.generation",
+        "input.node_id",
+    ] {
+        assert!(
+            !issue.contains(forbidden),
+            "target issue must not accept coordinator/service/self-reported network authority: {forbidden}"
+        );
+    }
+
+    for required in [
+        "authenticated_account(&request, &context.env)",
+        "remote_desktop_secret_matches",
+        "redeemed_at IS NULL AND revoked_at IS NULL",
+    ] {
+        assert!(revoke.contains(required), "missing target revoke invariant: {required}");
+    }
+
+    for required in [
+        "remote_network_authority_allowed(&request, &context.env)",
+        "remote_network_enrollment_secret_hash(&input.grant_secret)",
+        "constant_time_eq",
+        "SET redeemed_at = ?1",
+        "redeemed_at IS NULL AND revoked_at IS NULL AND expires_at > ?1",
+        "binding.generation >= remote_computer_network_enrollment_grants.generation",
+        r#""userId": row.user_id"#,
+        r#""deviceId": row.device_id"#,
+        r#""cellId": row.cell_id"#,
+        r#""generation": row.generation"#,
+    ] {
+        assert!(redeem.contains(required), "missing authority redeem invariant: {required}");
+    }
+    for forbidden in [
+        "authenticated_account(",
+        "authenticated_official_mcp_service",
+        "official_mcp_service_claims",
+        r#""grantSecret":"#,
+        r#""secretHash":"#,
+        r#""deviceSecret":"#,
+    ] {
+        assert!(
+            !redeem.contains(forbidden),
+            "network authority redeem must stay minimal and separate: {forbidden}"
+        );
+    }
+
+    for route in [
+        "/v1/computers/:device_id/network-enrollment-grants",
+        "/v1/computers/:device_id/network-enrollment-grants/:grant_id/revoke",
+        "/v1/internal/computers/network-enrollment-grants/redeem",
+    ] {
+        assert!(
+            WORKER_ROUTER_SOURCE.contains(route),
+            "network enrollment endpoint is not wired: {route}"
+        );
+    }
+    for required in [
+        "fabushi-fdn-cell-v1",
+        "fabushi-fdn-enrollment-secret-v1:a",
+        "fabushi-fdn-enrollment-secret-v1:b",
+        "fabushi-fdn-enrollment-secret-hash-v1",
+    ] {
+        assert!(
+            REMOTE_COMPUTER_WORKER_SOURCE.contains(required),
+            "network enrollment secret/cell derivation is not domain separated: {required}"
+        );
+    }
+}
+
+#[test]
 fn remote_computer_network_cell_snapshot_is_authority_only_live_minimal_and_bounded() {
     let start = REMOTE_COMPUTER_WORKER_SOURCE
         .find("pub(super) async fn remote_computer_network_cell_snapshot")
