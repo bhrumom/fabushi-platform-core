@@ -786,7 +786,6 @@ fn worker_router_rejects_duplicate_developer_commerce_regressions() {
     }
 }
 
-
 #[test]
 fn official_mcp_controller_network_route_is_service_only_minimal_and_live_bound() {
     let start = REMOTE_COMPUTER_WORKER_SOURCE
