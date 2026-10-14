@@ -35,6 +35,33 @@ struct RemoteComputerHeartbeatRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerNetworkBindingRequest {
+    device_id: String,
+    device_secret: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerNetworkBindingBindRequest {
+    user_id: String,
+    device_id: String,
+    cell_id: String,
+    node_id: String,
+    proof_sha256: String,
+    generation: i64,
+    expires_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerNetworkBindingRevokeRequest {
+    user_id: String,
+    device_id: String,
+    generation: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RemoteComputerPairRequest {
     pairing_code: String,
     label: String,
@@ -173,8 +200,21 @@ struct RemoteComputerRow {
     app_version: String,
     capabilities_json: String,
     active_session_count: i64,
+    network_generation: Option<i64>,
+    network_expires_at: Option<i64>,
     last_seen_at: i64,
     created_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerNetworkBindingRow {
+    cell_id: String,
+    node_id: String,
+    proof_sha256: String,
+    generation: i64,
+    bound_at: i64,
+    expires_at: i64,
+    revoked_at: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -287,6 +327,44 @@ struct RemoteComputerToolGrantRow {
     generation: i64,
     expires_at: i64,
     revoked_at: Option<i64>,
+}
+
+const REMOTE_NETWORK_BINDING_MAX_SECONDS: i64 = 24 * 60 * 60;
+
+fn remote_network_identifier(value: &str, min: usize, max: usize) -> Option<String> {
+    let value = value.trim();
+    (value.len() >= min
+        && value.len() <= max
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.')))
+    .then(|| value.to_string())
+}
+
+fn remote_network_sha256(value: &str) -> Option<String> {
+    let value = value.trim();
+    (value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')))
+    .then(|| value.to_string())
+}
+
+fn remote_network_authority_allowed(request: &Request, env: &Env) -> bool {
+    let supplied = request
+        .headers()
+        .get("X-Fabushi-Network-Authority")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let expected = env
+        .secret("FDN_NETWORK_AUTHORITY_TOKEN")
+        .ok()
+        .map(|secret| secret.to_string())
+        .unwrap_or_default();
+    supplied.len() >= 48
+        && expected.len() >= 48
+        && constant_time_eq(supplied.as_bytes(), expected.as_bytes())
 }
 
 fn remote_secret_hash(value: &str) -> String {
@@ -568,6 +646,16 @@ pub(super) async fn remote_computer_list(
                    AND session.device_id = computer.device_id
                    AND session.state = 'active'
                    AND session.expires_at > ?2) AS active_session_count,
+                (SELECT binding.generation FROM remote_computer_network_bindings binding
+                 WHERE binding.user_id = computer.user_id
+                   AND binding.device_id = computer.device_id
+                   AND binding.revoked_at IS NULL
+                   AND binding.expires_at > ?2) AS network_generation,
+                (SELECT binding.expires_at FROM remote_computer_network_bindings binding
+                 WHERE binding.user_id = computer.user_id
+                   AND binding.device_id = computer.device_id
+                   AND binding.revoked_at IS NULL
+                   AND binding.expires_at > ?2) AS network_expires_at,
                 computer.last_seen_at, computer.created_at
          FROM remote_computers computer
          WHERE computer.user_id = ?1 AND computer.revoked_at IS NULL
@@ -594,6 +682,9 @@ pub(super) async fn remote_computer_list(
                 "appVersion": row.app_version,
                 "capabilities": capabilities,
                 "activeSessionCount": row.active_session_count,
+                "networkBound": row.network_generation.is_some(),
+                "networkGeneration": row.network_generation,
+                "networkExpiresAt": row.network_expires_at,
                 "lastSeenAt": row.last_seen_at,
                 "createdAt": row.created_at,
                 "online": now.saturating_sub(row.last_seen_at) <= 45,
@@ -784,6 +875,257 @@ pub(super) async fn remote_computer_heartbeat(
         return error_response(404, "computer_not_found", "Computer is not registered.");
     }
     Ok(Response::from_json(&json!({"ok": true, "lastSeenAt": now}))?.with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_network_binding(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_account(&request, &context.env) {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let input: RemoteComputerNetworkBindingRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_network_binding_request",
+                "Network binding request must be valid JSON.",
+            );
+        }
+    };
+    if !valid_relay_identifier(&input.device_id, 128)
+        || input.device_secret.len() < 48
+        || input.device_secret.len() > 256
+    {
+        return error_response(
+            400,
+            "invalid_network_binding_request",
+            "Network binding device identity is invalid.",
+        );
+    }
+    let database = context.env.d1(DATABASE_BINDING)?;
+    if !remote_desktop_secret_matches(
+        &database,
+        &account.user_id,
+        &input.device_id,
+        &input.device_secret,
+    )
+    .await?
+    {
+        return error_response(
+            404,
+            "network_binding_not_found",
+            "No network binding is available for this computer.",
+        );
+    }
+    let row = worker::query!(
+        &database,
+        "SELECT cell_id, node_id, proof_sha256, generation, bound_at, expires_at, revoked_at
+         FROM remote_computer_network_bindings
+         WHERE user_id = ?1 AND device_id = ?2 LIMIT 1",
+        &account.user_id,
+        &input.device_id
+    )?
+    .first::<RemoteComputerNetworkBindingRow>(None)
+    .await?;
+    let Some(row) = row else {
+        return error_response(
+            404,
+            "network_binding_not_found",
+            "No network binding is available for this computer.",
+        );
+    };
+    let now = now_seconds();
+    let active = row.revoked_at.is_none() && row.expires_at > now;
+    Ok(Response::from_json(&json!({
+        "deviceId": input.device_id,
+        "cellId": row.cell_id,
+        "nodeId": row.node_id,
+        "proofSha256": row.proof_sha256,
+        "generation": row.generation,
+        "boundAt": row.bound_at,
+        "expiresAt": row.expires_at,
+        "revokedAt": row.revoked_at,
+        "active": active,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_network_binding_bind(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    if !remote_network_authority_allowed(&request, &context.env) {
+        return error_response(
+            401,
+            "network_authority_unauthorized",
+            "A valid network enrollment authority credential is required.",
+        );
+    }
+    let input: RemoteComputerNetworkBindingBindRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_network_binding",
+                "Network binding must be valid JSON.",
+            );
+        }
+    };
+    let Some(cell_id) = remote_network_identifier(&input.cell_id, 8, 128) else {
+        return error_response(400, "invalid_network_cell", "Network cellId is invalid.");
+    };
+    let Some(node_id) = remote_network_identifier(&input.node_id, 8, 160) else {
+        return error_response(400, "invalid_network_node", "Network nodeId is invalid.");
+    };
+    let Some(proof_sha256) = remote_network_sha256(&input.proof_sha256) else {
+        return error_response(400, "invalid_network_proof", "Network proof digest is invalid.");
+    };
+    if !valid_relay_identifier(&input.device_id, 128)
+        || input.user_id.trim().is_empty()
+        || input.user_id.len() > 160
+        || input.generation < 1
+    {
+        return error_response(
+            400,
+            "invalid_network_binding",
+            "Network binding identity or generation is invalid.",
+        );
+    }
+    let now = now_seconds();
+    if input.expires_at <= now
+        || input.expires_at.saturating_sub(now) > REMOTE_NETWORK_BINDING_MAX_SECONDS
+    {
+        return error_response(
+            400,
+            "invalid_network_binding_expiry",
+            "Network binding expiry is outside the allowed window.",
+        );
+    }
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let result = worker::query!(
+        &database,
+        "INSERT INTO remote_computer_network_bindings
+         (user_id, device_id, cell_id, node_id, proof_sha256, generation, bound_at, expires_at, revoked_at)
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL
+         FROM remote_computers computer
+         WHERE computer.user_id = ?1 AND computer.device_id = ?2 AND computer.revoked_at IS NULL
+         ON CONFLICT(user_id, device_id) DO UPDATE SET
+           cell_id = excluded.cell_id,
+           node_id = excluded.node_id,
+           proof_sha256 = excluded.proof_sha256,
+           generation = excluded.generation,
+           bound_at = excluded.bound_at,
+           expires_at = excluded.expires_at,
+           revoked_at = NULL
+         WHERE excluded.generation > remote_computer_network_bindings.generation",
+        &input.user_id,
+        &input.device_id,
+        &cell_id,
+        &node_id,
+        &proof_sha256,
+        input.generation,
+        now,
+        input.expires_at
+    )?
+    .run()
+    .await?;
+    if result.meta()?.and_then(|meta| meta.changes).unwrap_or(0) == 0 {
+        let device_exists = worker::query!(
+            &database,
+            "SELECT 1 AS ok FROM remote_computers
+             WHERE user_id = ?1 AND device_id = ?2 AND revoked_at IS NULL LIMIT 1",
+            &input.user_id,
+            &input.device_id
+        )?
+        .first::<RemoteComputerExistsRow>(None)
+        .await?
+        .is_some();
+        if !device_exists {
+            return error_response(
+                404,
+                "network_binding_device_not_found",
+                "The target Remote Computer is not registered for this account.",
+            );
+        }
+        return error_response(
+            409,
+            "network_binding_generation_conflict",
+            "Network binding generation must advance monotonically.",
+        );
+    }
+    Ok(Response::from_json(&json!({
+        "ok": true,
+        "userId": input.user_id,
+        "deviceId": input.device_id,
+        "generation": input.generation,
+        "expiresAt": input.expires_at,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_network_binding_revoke(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    if !remote_network_authority_allowed(&request, &context.env) {
+        return error_response(
+            401,
+            "network_authority_unauthorized",
+            "A valid network enrollment authority credential is required.",
+        );
+    }
+    let input: RemoteComputerNetworkBindingRevokeRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_network_binding_revoke",
+                "Network binding revoke request must be valid JSON.",
+            );
+        }
+    };
+    if !valid_relay_identifier(&input.device_id, 128)
+        || input.user_id.trim().is_empty()
+        || input.user_id.len() > 160
+        || input.generation < 1
+    {
+        return error_response(
+            400,
+            "invalid_network_binding_revoke",
+            "Network binding revoke identity is invalid.",
+        );
+    }
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    let result = worker::query!(
+        &database,
+        "UPDATE remote_computer_network_bindings SET revoked_at = ?1
+         WHERE user_id = ?2 AND device_id = ?3 AND generation = ?4 AND revoked_at IS NULL",
+        now,
+        &input.user_id,
+        &input.device_id,
+        input.generation
+    )?
+    .run()
+    .await?;
+    if result.meta()?.and_then(|meta| meta.changes).unwrap_or(0) == 0 {
+        return error_response(
+            404,
+            "network_binding_not_found",
+            "No live network binding matches this account, device, and generation.",
+        );
+    }
+    Ok(Response::from_json(&json!({
+        "ok": true,
+        "userId": input.user_id,
+        "deviceId": input.device_id,
+        "generation": input.generation,
+        "revokedAt": now,
+    }))?
+    .with_headers(auth_headers()))
 }
 
 pub(super) async fn remote_computer_pair(
