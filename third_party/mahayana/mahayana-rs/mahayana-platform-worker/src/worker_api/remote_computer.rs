@@ -228,6 +228,14 @@ struct RemoteComputerNetworkBindingRow {
 }
 
 #[derive(Debug, Deserialize)]
+struct RemoteComputerControllerNetworkRouteRow {
+    cell_id: String,
+    node_id: String,
+    generation: i64,
+    expires_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
 struct RemoteComputerPairRow {
     device_id: String,
     label: String,
@@ -974,8 +982,7 @@ pub(super) async fn remote_computer_controller_network_route(
     let now = now_seconds();
     let row = worker::query!(
         &database,
-        "SELECT binding.cell_id, binding.node_id, binding.proof_sha256,
-                binding.generation, binding.bound_at, binding.expires_at, binding.revoked_at
+        "SELECT binding.cell_id, binding.node_id, binding.generation, binding.expires_at
          FROM remote_computer_network_bindings binding
          JOIN remote_computers computer
            ON computer.user_id = binding.user_id
@@ -990,7 +997,7 @@ pub(super) async fn remote_computer_controller_network_route(
         &device_id,
         now
     )?
-    .first::<RemoteComputerNetworkBindingRow>(None)
+    .first::<RemoteComputerControllerNetworkRouteRow>(None)
     .await?;
     let Some(row) = row else {
         return error_response(
