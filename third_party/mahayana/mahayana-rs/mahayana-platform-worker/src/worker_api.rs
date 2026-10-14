@@ -672,6 +672,10 @@ pub async fn main(request: Request, env: Env, _context: Context) -> Result<Respo
             remote_computer_operation_claim,
         )
         .post_async(
+            "/v1/computers/:device_id/sessions/:session_id/operations/:request_id/access",
+            remote_computer_operation_access,
+        )
+        .post_async(
             "/v1/computers/:device_id/sessions/:session_id/operations/:request_id/result",
             remote_computer_operation_result,
         )

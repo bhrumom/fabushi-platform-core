@@ -633,15 +633,19 @@ fn official_mcp_controller_operations_keep_service_and_target_authority_separate
     let claim_start = REMOTE_COMPUTER_WORKER_SOURCE
         .find("pub(super) async fn remote_computer_operation_claim")
         .expect("operation claim source");
+    let access_start = REMOTE_COMPUTER_WORKER_SOURCE
+        .find("pub(super) async fn remote_computer_operation_access")
+        .expect("operation access source");
     let result_start = REMOTE_COMPUTER_WORKER_SOURCE
         .find("pub(super) async fn remote_computer_operation_result")
         .expect("operation result source");
     let activate_start = REMOTE_COMPUTER_WORKER_SOURCE
         .find("pub(super) async fn remote_computer_session_activate")
         .expect("session activate source");
-    let claim = &REMOTE_COMPUTER_WORKER_SOURCE[claim_start..result_start];
+    let claim = &REMOTE_COMPUTER_WORKER_SOURCE[claim_start..access_start];
+    let access = &REMOTE_COMPUTER_WORKER_SOURCE[access_start..result_start];
     let result = &REMOTE_COMPUTER_WORKER_SOURCE[result_start..activate_start];
-    for (name, section) in [("claim", claim), ("result", result)] {
+    for (name, section) in [("claim", claim), ("access", access), ("result", result)] {
         assert!(
             section.contains("authenticated_account(&request, &context.env)"),
             "target {name} must remain ordinary-account authenticated"
@@ -655,6 +659,43 @@ fn official_mcp_controller_operations_keep_service_and_target_authority_separate
             "service controller credential must not authorize target {name}"
         );
     }
+
+    for required in [
+        "operation.sensitive_result == 0",
+        "operation.state != \"completed\"",
+        "operation.client_id != client_id",
+        "remote_operation_tool_grant_generation(",
+        "!= Some(grant_generation)",
+        "\"tool_grant_stale\"",
+        "\"resultSha256\": result_sha256",
+        "\"requestSha256\": operation.request_sha256",
+        "\"grantGeneration\": grant_generation",
+    ] {
+        assert!(
+            access.contains(required),
+            "missing sensitive-result access fence: {required}"
+        );
+    }
+    for forbidden in [
+        "result_json",
+        "\"result\":",
+        "remote_controller_account",
+        "mobile_token",
+        "client_token",
+    ] {
+        assert!(
+            !access.contains(forbidden),
+            "target sensitive-result access must not expose controller/result secret material: {forbidden}"
+        );
+    }
+
+    let compact_router = WORKER_ROUTER_SOURCE.split_whitespace().collect::<String>();
+    assert!(
+        compact_router.contains(
+            r#".post_async("/v1/computers/:device_id/sessions/:session_id/operations/:request_id/access",remote_computer_operation_access,)"#
+        ),
+        "target operation access endpoint is not wired"
+    );
 }
 
 #[test]
