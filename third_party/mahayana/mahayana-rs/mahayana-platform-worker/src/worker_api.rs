@@ -603,6 +603,10 @@ pub async fn main(request: Request, env: Env, _context: Context) -> Result<Respo
             remote_computer_sessions,
         )
         .post_async(
+            "/v1/computers/:device_id/sessions/grant",
+            remote_computer_session_grant,
+        )
+        .post_async(
             "/v1/computers/:device_id/sessions",
             remote_computer_session_create,
         )
