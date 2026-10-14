@@ -1,115 +1,67 @@
-# FDN-001 Remote Computer session reconciliation — Specification
+# FDN-001 Remote Computer mobile session reconciliation — Core adoption
 
 Status: active  
 Owner: Platform Core Remote Computer worker  
-Last updated: 2026-10-14  
-Related: Fabushi Desktop FDN-001; Desktop PR #65 merged as 9fe57d7e23bc11d9a05e08519becc3761accf22e
+Last updated: 2026-10-14
 
-## 1. Context / problem
+## Context
 
-FDN-001 requires stable request identity and reconciliation for Remote Computer session creation. The current production request accepts only `clientId` and `clientToken` with `deny_unknown_fields`, creates a fresh session and mobile token on every accepted request, and therefore cannot safely recover when the create response is lost.
+Fabushi Desktop already accepted and implemented the Remote Computer mobile lost-response contract in PR #60, merged as `92fcc2b0f64b6b8f8f8829305b30874b558d6b35`. Platform Core is the canonical shared Worker owner, but Core main `e23abe4e7a616b3f7184cb14d9e7c7904888e0ba` still carried the exact pre-PR-#60 `remote_computer.rs` blob `931730bff5fb6ee484809233fddc614c5c29b485`.
 
-## 2. Goal
+This change ports that already-reviewed Desktop contract into the canonical Core owner rather than inventing a second reconciliation design.
 
-Add a backwards-compatible, account-scoped session creation contract with optional stable `requestId` and explicit `reconcile` recovery. A retried request must never create a second session for the same stable request identity. Recovery must keep session credentials separate from the paired-client credential.
+## Authority
 
-## 3. Non-goals / out of scope
+The detailed behavioral contract remains Desktop `docs/specs/remote-computer-mobile-session-reconciliation.md` at `92fcc2b0f64b6b8f8f8829305b30874b558d6b35`, requirements RCS-01 through RCS-10.
 
-This change does not implement the tsnet worker, Headscale, DERP, official MCP gateway, native computer control, or full FDN-001 operation journal. It does not weaken existing client pairing, device-secret, account, revocation, or session-state checks.
+Source provenance:
 
-## 4. Requirements
+- migration source: Desktop commit `8257b509f3a008541e438db12cf9ac17bf2ae3c8`;
+- production create/reconcile source: Desktop commit `f6bc72a8e7d27d2741d12a2c3547d8571205e0ba`;
+- router source: Desktop commit `98bb204d626823139b9636d3fc2ca737d0133a87`;
+- contract fixture source: Desktop commits `216ba64f847ef0a05626e90300847bb2b1da23a3` and `1d8bbbfe2d8e7a6cce12c1082ef9824a2608685e`.
 
-- FDN-CORE-R1: Accept optional `requestId` and optional `reconcile` while preserving legacy clients that omit both.
-- FDN-CORE-R2: When present, `requestId` is validated as a bounded relay identifier and is unique per authenticated Fabushi account.
-- FDN-CORE-R3: The same account/requestId cannot be reused for another device or client.
-- FDN-CORE-R4: A duplicate stable request does not insert a second session.
-- FDN-CORE-R5: Explicit `reconcile=true` on a live matching session returns the same `sessionId` and rotates/reissues a new mobile session credential; it does not derive that credential from `clientToken`.
-- FDN-CORE-R6: Reconciliation of a closed or expired session fails closed and does not silently create a replacement under the same requestId.
-- FDN-CORE-R7: A duplicate stable request without explicit reconcile returns a conflict directing the caller to explicit reconciliation and returns no session secret.
-- FDN-CORE-R8: Existing account/device/client revocation and possession checks remain required before creation or reconciliation.
+## Core requirements
 
-## 5. Current state
+- Preserve the exact RCS request identity, request hash and client-token-generation fencing semantics.
+- Persist no raw mobile token, paired-client token, or device secret in D1.
+- Require stable bounded `requestId` on new mobile session creation.
+- Duplicate creates for the same account/device/client/request identity converge on the same session and deterministic session-scoped mobile token.
+- Expose the dedicated `POST /v1/computers/:device_id/sessions/reconcile` route.
+- Reconcile re-authenticates the current paired client and rejects credential rotation, revocation, cross-account/device/client mismatch, closed sessions and expired sessions.
+- Keep activation, signaling, transport, grant and close semantics unchanged.
+- Do not create a second account, device registry, session authority or remote-control product.
 
-Canonical Core baseline: `e23abe4e7a616b3f7184cb14d9e7c7904888e0ba`.  
-`RemoteComputerSessionCreateRequest` currently contains only `client_id` and `client_token`; session insertion always generates a new UUID and mobile token.
+## Data model
 
-## 6. Target state
+Add migration `0027_remote_computer_mobile_session_reconcile.sql` with nullable legacy-compatible columns:
 
-Stable requests are persisted on `remote_computer_sessions.request_id` with an account-scoped partial unique index. Legacy rows remain valid with NULL request IDs. Explicit reconciliation authenticates the paired client again, checks device/client/request binding and live session state, rotates `mobile_token_hash`, and returns the same session.
+- `mobile_request_id`
+- `mobile_request_hash`
+- `client_token_hash_at_create`
 
-## 7. Architecture and ownership boundaries
+and a partial unique index on `(user_id, device_id, client_id, mobile_request_id)`.
 
-The existing Platform Core Remote Computer worker remains the session authority. No new device registry, account store, or parallel Remote Computer service is introduced.
+The migration number intentionally matches the already-shipped Desktop mirror provenance. A numeric gap in Core does not create a competing schema; migration runners order committed migration files lexicographically and this PR does not import unrelated Desktop migration 0026.
 
-## 8. Interfaces / contracts / schemas / data flow
+## Verification
 
-Request extension:
+All executable validation runs in GitHub Actions. The exact PR head must pass:
 
-```json
-{
-  "clientId": "existing-client-id",
-  "clientToken": "existing-possession-secret",
-  "requestId": "stable-request-id",
-  "reconcile": false
-}
-```
+- source formatting for files changed by this slice;
+- host schema/source-contract tests;
+- wasm Worker compilation;
+- existing Core broker and extension regressions.
 
-Legacy clients may omit `requestId` and `reconcile`. Reconciliation requires `requestId`.
+After merge, the same FDN workflow must run on canonical Core `main`; PR-head success is predecessor evidence only.
 
-Migration adds nullable `request_id TEXT` and a unique index on `(user_id, request_id)` where request_id is not null.
+## Acceptance
 
-## 9. Constraints and non-functional requirements
+This Core slice is complete only when:
 
-All executable verification runs in GitHub Actions. Secrets are never returned in conflict/error responses or persisted in plaintext. The request ID is not an authorization credential.
+1. migration and production source match the accepted Desktop RCS semantics;
+2. the reconcile route is wired in the current Core router without overwriting later Core work;
+3. exact-head Actions pass;
+4. the PR is merged and the merge/main SHA passes the post-merge workflow.
 
-## 10. Failure modes and edge cases
-
-- malformed requestId -> 400;
-- reconcile without requestId -> 400;
-- requestId already bound to another device/client -> 409;
-- matching live session + duplicate create without reconcile -> 409, no secret;
-- matching live session + reconcile -> same sessionId, rotated mobile token;
-- matching closed/expired session + reconcile -> 409, no replacement;
-- revoked client/device -> existing 403/404 behavior remains authoritative.
-
-## 11. Implementation strategy
-
-1. Add migration for request identity.
-2. Extend request/row types and session-create handler.
-3. Add schema invariants/tests.
-4. Run the repository's Actions workflow on the exact PR head.
-5. Only after exact-head green evidence, merge and re-read canonical main.
-
-## 12. Verification / test strategy
-
-Actions must at minimum compile/test the Worker crate and assert migration invariants. Contract tests must cover validation, duplicate conflict, binding conflict, live reconcile credential rotation, expired/closed refusal, and legacy request compatibility. Missing integration runner is blocked rather than pass.
-
-## 13. Acceptance criteria / Definition of Done
-
-- FDN-CORE-AC1: same requestId cannot create two sessions.
-- FDN-CORE-AC2: reconcile returns the original sessionId with a newly issued session credential after a simulated lost create response.
-- FDN-CORE-AC3: requestId payload drift across device/client is rejected.
-- FDN-CORE-AC4: closed/expired stable requests are tombstoned against silent recreation.
-- FDN-CORE-AC5: legacy requests without requestId remain accepted under prior semantics.
-- FDN-CORE-AC6: exact-head GitHub Actions are green for the applicable Core checks.
-
-## 14. Release / migration / rollback
-
-The schema change is additive. Rollback may stop sending stable request IDs but must not remove the unique index/column while deployed clients rely on reconciliation. Existing NULL rows are unchanged.
-
-## 15. Observability / evidence
-
-Evidence records repository, exact SHA, PR, workflow/run/job IDs, command, result, skips, and artifacts. This spec does not mark any FDN-A01–A16 item passed by itself.
-
-## 16. References / provenance
-
-- Fabushi Desktop `docs/specs/fabushi-same-account-device-network.md` at merge SHA `9fe57d7e23bc11d9a05e08519becc3761accf22e`.
-- Core `worker_api/remote_computer.rs` at `e23abe4e7a616b3f7184cb14d9e7c7904888e0ba`.
-- Core `AGENTS.md` and `docs/specs/spec-first-ai-development.md`.
-
-## 17. Spec compliance record
-
-| Requirement / AC | Status | Evidence / reason |
-| --- | --- | --- |
-| FDN-CORE-R1..R8 | pending | implementation and exact-head Actions required |
-| FDN-CORE-AC1..AC6 | pending | implementation and exact-head Actions required |
+This is only a Phase-1 FDN contract slice. It does not mark FDN-A01 through FDN-A16 complete and does not claim tsnet, Headscale, DERP, reverse WebSocket fallback, official MCP device calls, native device tools or packaged release acceptance.
