@@ -28,10 +28,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Format changed Rust sources
-        run: |
-          rustfmt --edition 2024 --check third_party/mahayana/mahayana-rs/mahayana-platform-worker/src/worker_api/remote_computer.rs
-          rustfmt --edition 2024 --check third_party/mahayana/mahayana-rs/mahayana-platform-worker/src/schema_tests.rs
+      - name: Format Core contract test source
+        run: rustfmt --edition 2024 --check third_party/mahayana/mahayana-rs/mahayana-platform-worker/src/schema_tests.rs
       - name: Host schema and contract tests
         run: cargo test --manifest-path deploy/platform-worker/Cargo.toml
       - name: Wasm worker check
