@@ -790,12 +790,17 @@ pub(super) async fn remote_computer_pair(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
-        Ok(account) => account,
-        Err(_) => {
-            return error_response(401, "unauthorized", "Sign in before pairing a computer.");
-        }
-    };
+    let (account, service_binding) =
+        match remote_controller_account(&request, &context.env).await {
+            Ok(actor) => actor,
+            Err(_) => {
+                return error_response(
+                    401,
+                    "unauthorized",
+                    "A Fabushi account or official MCP devices.control credential is required before pairing.",
+                );
+            }
+        };
     let input: RemoteComputerPairRequest = match request.json().await {
         Ok(input) => input,
         Err(_) => {
@@ -839,6 +844,29 @@ pub(super) async fn remote_computer_pair(
     let client_token = new_remote_client_token();
     let client_token_hash = remote_secret_hash(&client_token);
     let pairing_claim_hash = remote_secret_hash(&format!("pair-claim:{client_id}:{client_token}"));
+    if let Some((connection_id, _)) = service_binding.as_ref() {
+        let already_bound = worker::query!(
+            &database,
+            "SELECT 1 AS ok FROM remote_computer_clients
+             WHERE user_id = ?1 AND device_id = ?2 AND service_connection_id = ?3
+               AND revoked_at IS NULL LIMIT 1",
+            &account.user_id,
+            &computer.device_id,
+            connection_id
+        )?
+        .first::<RemoteComputerExistsRow>(None)
+        .await?
+        .is_some();
+        if already_bound {
+            return error_response(
+                409,
+                "service_client_already_paired",
+                "This official MCP connection already has a paired client for the computer.",
+            );
+        }
+    }
+    let service_connection_id = service_binding.as_ref().map(|binding| binding.0.as_str());
+    let service_delegation_id = service_binding.as_ref().map(|binding| binding.1.as_str());
     let results = database
         .batch(vec![
             worker::query!(
@@ -860,18 +888,21 @@ pub(super) async fn remote_computer_pair(
             worker::query!(
                 &database,
                 "INSERT INTO remote_computer_clients
-                 (client_id, device_id, user_id, label, paired_at, last_seen_at, revoked_at, client_token_hash)
-                 SELECT ?1, d.device_id, d.user_id, ?2, ?3, ?3, NULL, ?4
+                 (client_id, device_id, user_id, label, paired_at, last_seen_at, revoked_at, client_token_hash,
+                  service_connection_id, service_delegation_id)
+                 SELECT ?1, d.device_id, d.user_id, ?2, ?3, ?3, NULL, ?4, ?5, ?6
                  FROM remote_computers d
-                 WHERE d.device_id = ?5 AND d.user_id = ?6 AND d.pairing_code_hash = ?7
+                 WHERE d.device_id = ?7 AND d.user_id = ?8 AND d.pairing_code_hash = ?9
                    AND d.revoked_at IS NULL
                    AND (SELECT COUNT(*) FROM remote_computer_clients c
                         WHERE c.device_id = d.device_id AND c.user_id = d.user_id
-                          AND c.revoked_at IS NULL AND c.client_token_hash IS NOT NULL) < ?8",
+                          AND c.revoked_at IS NULL AND c.client_token_hash IS NOT NULL) < ?10",
                 &client_id,
                 &label,
                 now,
                 &client_token_hash,
+                service_connection_id,
+                service_delegation_id,
                 &computer.device_id,
                 &account.user_id,
                 &pairing_claim_hash,
@@ -949,6 +980,7 @@ pub(super) async fn remote_computer_pair(
         "clientToken": client_token,
         "clientLabel": label,
         "pairedAt": now,
+        "serviceBound": service_binding.is_some(),
     }))?
     .with_headers(auth_headers()))
 }
@@ -1196,6 +1228,56 @@ fn remote_mobile_session_response(
     .with_headers(auth_headers()))
 }
 
+async fn remote_controller_account(
+    request: &Request,
+    env: &Env,
+) -> Result<(AuthenticatedAccount, Option<(String, String)>)> {
+    if let Ok(account) = authenticated_account(request, env) {
+        return Ok((account, None));
+    }
+    let account = authenticated_official_mcp_service(request, env, "devices.control").await?;
+    let claims = official_mcp_service_claims(request, env)?;
+    Ok((account, Some((claims.connection_id, claims.delegation_id))))
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerClientServiceBindingRow {
+    service_connection_id: Option<String>,
+    service_delegation_id: Option<String>,
+}
+
+async fn remote_controller_client_binding_matches(
+    database: &worker::D1Database,
+    user_id: &str,
+    device_id: &str,
+    client_id: &str,
+    service_binding: Option<&(String, String)>,
+) -> Result<bool> {
+    let row = worker::query!(
+        database,
+        "SELECT service_connection_id, service_delegation_id
+         FROM remote_computer_clients
+         WHERE client_id = ?1 AND device_id = ?2 AND user_id = ?3
+           AND revoked_at IS NULL AND client_token_hash IS NOT NULL
+         LIMIT 1",
+        client_id,
+        device_id,
+        user_id
+    )?
+    .first::<RemoteComputerClientServiceBindingRow>(None)
+    .await?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    Ok(match service_binding {
+        None => row.service_connection_id.is_none() && row.service_delegation_id.is_none(),
+        Some((connection_id, delegation_id)) => {
+            row.service_connection_id.as_deref() == Some(connection_id.as_str())
+                && row.service_delegation_id.as_deref() == Some(delegation_id.as_str())
+        }
+    })
+}
+
 async fn authenticate_remote_mobile_client(
     database: &worker::D1Database,
     user_id: &str,
@@ -1236,10 +1318,17 @@ pub(super) async fn remote_computer_session_create(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
-        Ok(account) => account,
-        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
-    };
+    let (account, service_binding) =
+        match remote_controller_account(&request, &context.env).await {
+            Ok(actor) => actor,
+            Err(_) => {
+                return error_response(
+                    401,
+                    "unauthorized",
+                    "A valid Fabushi account or official MCP devices.control credential is required.",
+                );
+            }
+        };
     let device_id = route_identifier(&context, "device_id")?.to_string();
     let input: RemoteComputerSessionCreateRequest = match request.json().await {
         Ok(input) => input,
@@ -1277,9 +1366,24 @@ pub(super) async fn remote_computer_session_create(
         return error_response(
             403,
             "client_not_paired",
-            "This phone is not paired with the computer.",
+            "This controller is not paired with the computer.",
         );
     };
+    if !remote_controller_client_binding_matches(
+        &database,
+        &account.user_id,
+        &device_id,
+        &input.client_id,
+        service_binding.as_ref(),
+    )
+    .await?
+    {
+        return error_response(
+            403,
+            "client_service_binding_mismatch",
+            "The paired client belongs to another controller identity.",
+        );
+    }
 
     let now = now_seconds();
     worker::query!(
@@ -1347,13 +1451,16 @@ pub(super) async fn remote_computer_session_create(
                  WHERE c.client_id = ?3 AND c.device_id = ?2 AND c.user_id = ?4
                    AND c.client_token_hash = ?10 AND c.revoked_at IS NULL
                    AND d.revoked_at IS NULL
+                   AND ((?11 IS NULL AND ?12 IS NULL
+                         AND c.service_connection_id IS NULL AND c.service_delegation_id IS NULL)
+                        OR (c.service_connection_id = ?11 AND c.service_delegation_id = ?12))
                )
            AND (SELECT COUNT(*) FROM remote_computer_sessions
                 WHERE user_id = ?4 AND device_id = ?2 AND client_id = ?3
-                  AND state <> 'closed' AND expires_at > ?6) < ?11
+                  AND state <> 'closed' AND expires_at > ?6) < ?13
            AND (SELECT COUNT(*) FROM remote_computer_sessions
                 WHERE user_id = ?4 AND device_id = ?2
-                  AND state <> 'closed' AND expires_at > ?6) < ?12",
+                  AND state <> 'closed' AND expires_at > ?6) < ?14",
         &session_id,
         &device_id,
         &input.client_id,
@@ -1364,6 +1471,8 @@ pub(super) async fn remote_computer_session_create(
         &request_id,
         &request_hash,
         &candidate_hash,
+        service_binding.as_ref().map(|binding| binding.0.as_str()),
+        service_binding.as_ref().map(|binding| binding.1.as_str()),
         REMOTE_SESSION_MAX_PER_CLIENT,
         REMOTE_SESSION_MAX_PER_DEVICE
     )?
@@ -1438,10 +1547,17 @@ pub(super) async fn remote_computer_session_reconcile(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
-        Ok(account) => account,
-        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
-    };
+    let (account, service_binding) =
+        match remote_controller_account(&request, &context.env).await {
+            Ok(actor) => actor,
+            Err(_) => {
+                return error_response(
+                    401,
+                    "unauthorized",
+                    "A valid Fabushi account or official MCP devices.control credential is required.",
+                );
+            }
+        };
     let device_id = route_identifier(&context, "device_id")?.to_string();
     let input: RemoteComputerSessionCreateRequest = match request.json().await {
         Ok(input) => input,
@@ -1472,9 +1588,24 @@ pub(super) async fn remote_computer_session_reconcile(
         return error_response(
             403,
             "client_not_paired",
-            "This phone is not paired with the computer.",
+            "This controller is not paired with the computer.",
         );
     };
+    if !remote_controller_client_binding_matches(
+        &database,
+        &account.user_id,
+        &device_id,
+        &input.client_id,
+        service_binding.as_ref(),
+    )
+    .await?
+    {
+        return error_response(
+            403,
+            "client_service_binding_mismatch",
+            "The paired client belongs to another controller identity.",
+        );
+    }
     let now = now_seconds();
     worker::query!(
         &database,
