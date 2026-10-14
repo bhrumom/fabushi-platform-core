@@ -358,7 +358,10 @@ fn network_enrollment_grants_are_target_issued_authority_redeemed_and_secret_saf
         "network_enrollment_generation_stale",
         "SET revoked_at = ?1",
     ] {
-        assert!(issue.contains(required), "missing target issue invariant: {required}");
+        assert!(
+            issue.contains(required),
+            "missing target issue invariant: {required}"
+        );
     }
     for forbidden in [
         "remote_network_authority_allowed(",
@@ -379,7 +382,10 @@ fn network_enrollment_grants_are_target_issued_authority_redeemed_and_secret_saf
         "remote_desktop_secret_matches",
         "redeemed_at IS NULL AND revoked_at IS NULL",
     ] {
-        assert!(revoke.contains(required), "missing target revoke invariant: {required}");
+        assert!(
+            revoke.contains(required),
+            "missing target revoke invariant: {required}"
+        );
     }
 
     for required in [
@@ -394,7 +400,10 @@ fn network_enrollment_grants_are_target_issued_authority_redeemed_and_secret_saf
         r#""cellId": row.cell_id"#,
         r#""generation": row.generation"#,
     ] {
-        assert!(redeem.contains(required), "missing authority redeem invariant: {required}");
+        assert!(
+            redeem.contains(required),
+            "missing authority redeem invariant: {required}"
+        );
     }
     for forbidden in [
         "authenticated_account(",
