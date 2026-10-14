@@ -2250,7 +2250,7 @@ pub(super) async fn official_mcp_service_token_refresh(
     }))
 }
 
-fn official_mcp_service_claims(request: &Request, env: &Env) -> Result<ServiceAccessTokenClaims> {
+pub(super) fn official_mcp_service_claims(request: &Request, env: &Env) -> Result<ServiceAccessTokenClaims> {
     let authorization = request
         .headers()
         .get("Authorization")?
