@@ -45,6 +45,10 @@ struct RemoteComputerPairRequest {
 struct RemoteComputerSessionCreateRequest {
     client_id: String,
     client_token: String,
+    #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
+    reconcile: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -178,6 +182,16 @@ struct RemoteComputerSessionListRow {
     session_id: String,
     client_id: String,
     client_label: String,
+    state: String,
+    created_at: i64,
+    expires_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerSessionRequestRow {
+    session_id: String,
+    device_id: String,
+    client_id: String,
     state: String,
     created_at: i64,
     expires_at: i64,
@@ -961,6 +975,25 @@ pub(super) async fn remote_computer_session_create(
             "Paired client credential is invalid.",
         );
     }
+    let request_id = match input.request_id.as_deref() {
+        Some(value) if valid_relay_identifier(value, 160) => Some(value.to_string()),
+        Some(_) => {
+            return error_response(
+                400,
+                "invalid_request_id",
+                "requestId must be a valid stable request identifier.",
+            );
+        }
+        None if input.reconcile => {
+            return error_response(
+                400,
+                "request_id_required",
+                "reconcile requires a stable requestId.",
+            );
+        }
+        None => None,
+    };
+
     let database = context.env.d1(DATABASE_BINDING)?;
     let client = worker::query!(
         &database,
@@ -1000,10 +1033,88 @@ pub(super) async fn remote_computer_session_create(
     if computer.is_none() {
         return error_response(404, "computer_not_found", "Computer is not available.");
     }
+
+    let now = now_seconds();
+    if let Some(request_id) = request_id.as_deref() {
+        let existing = worker::query!(
+            &database,
+            "SELECT session_id, device_id, client_id, state, created_at, expires_at
+             FROM remote_computer_sessions
+             WHERE user_id = ?1 AND request_id = ?2
+             LIMIT 1",
+            &account.user_id,
+            request_id
+        )?
+        .first::<RemoteComputerSessionRequestRow>(None)
+        .await?;
+        if let Some(existing) = existing {
+            if existing.device_id != device_id || existing.client_id != input.client_id {
+                return error_response(
+                    409,
+                    "request_id_conflict",
+                    "requestId is already bound to a different remote-control request.",
+                );
+            }
+            if !input.reconcile {
+                return error_response(
+                    409,
+                    "control_session_exists",
+                    "A control session already exists for this requestId; retry with reconcile=true to recover it.",
+                );
+            }
+            if existing.state == "closed" || existing.expires_at <= now {
+                return error_response(
+                    409,
+                    "control_session_terminal",
+                    "The stable request belongs to a closed or expired control session and cannot be recreated.",
+                );
+            }
+            let mobile_token = new_remote_mobile_token();
+            let mobile_token_hash = remote_secret_hash(&mobile_token);
+            let updated = worker::query!(
+                &database,
+                "UPDATE remote_computer_sessions
+                 SET mobile_token_hash = ?1
+                 WHERE session_id = ?2 AND user_id = ?3 AND request_id = ?4
+                   AND device_id = ?5 AND client_id = ?6
+                   AND state <> 'closed' AND expires_at > ?7",
+                &mobile_token_hash,
+                &existing.session_id,
+                &account.user_id,
+                request_id,
+                &device_id,
+                &input.client_id,
+                now
+            )?
+            .run()
+            .await?;
+            if updated.meta()?.and_then(|meta| meta.changes).unwrap_or(0) == 0 {
+                return error_response(
+                    409,
+                    "control_session_unavailable",
+                    "The control session changed while it was being reconciled; refresh before retrying.",
+                );
+            }
+            return Ok(Response::from_json(&json!({
+                "sessionId": existing.session_id,
+                "deviceId": device_id,
+                "clientId": input.client_id,
+                "requestId": request_id,
+                "mobileToken": mobile_token,
+                "createdAt": existing.created_at,
+                "expiresAt": existing.expires_at,
+                "state": existing.state,
+                "reconciled": true,
+                "permissions": {"display": true, "input": true, "clipboard": false, "fileTransfer": false, "audio": false},
+                "iceServers": remote_ice_servers(&context.env),
+            }))?
+            .with_headers(auth_headers()));
+        }
+    }
+
     let session_id = format!("remote-session-{}", Uuid::new_v4());
     let mobile_token = new_remote_mobile_token();
     let mobile_token_hash = remote_secret_hash(&mobile_token);
-    let now = now_seconds();
     let expires_at = now + REMOTE_CONTROL_SESSION_SECONDS;
     worker::query!(
         &database,
@@ -1017,23 +1128,23 @@ pub(super) async fn remote_computer_session_create(
     .await?;
     let inserted = worker::query!(
         &database,
-        "INSERT INTO remote_computer_sessions
-         (session_id, device_id, client_id, user_id, mobile_token_hash, state, created_at, expires_at, closed_at)
-         SELECT ?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7, NULL
+        "INSERT OR IGNORE INTO remote_computer_sessions
+         (session_id, device_id, client_id, user_id, mobile_token_hash, state, created_at, expires_at, closed_at, request_id)
+         SELECT ?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7, NULL, ?8
          WHERE EXISTS (
                  SELECT 1 FROM remote_computer_clients c
                  JOIN remote_computers d
                    ON d.device_id = c.device_id AND d.user_id = c.user_id
                  WHERE c.client_id = ?3 AND c.device_id = ?2 AND c.user_id = ?4
-                   AND c.client_token_hash = ?10 AND c.revoked_at IS NULL
+                   AND c.client_token_hash = ?11 AND c.revoked_at IS NULL
                    AND d.revoked_at IS NULL
                )
            AND (SELECT COUNT(*) FROM remote_computer_sessions
                 WHERE user_id = ?4 AND device_id = ?2 AND client_id = ?3
-                  AND state <> 'closed' AND expires_at > ?6) < ?8
+                  AND state <> 'closed' AND expires_at > ?6) < ?9
            AND (SELECT COUNT(*) FROM remote_computer_sessions
                 WHERE user_id = ?4 AND device_id = ?2
-                  AND state <> 'closed' AND expires_at > ?6) < ?9",
+                  AND state <> 'closed' AND expires_at > ?6) < ?10",
         &session_id,
         &device_id,
         &input.client_id,
@@ -1041,6 +1152,7 @@ pub(super) async fn remote_computer_session_create(
         &mobile_token_hash,
         now,
         expires_at,
+        request_id.as_deref(),
         REMOTE_SESSION_MAX_PER_CLIENT,
         REMOTE_SESSION_MAX_PER_DEVICE,
         &candidate_hash
@@ -1048,6 +1160,33 @@ pub(super) async fn remote_computer_session_create(
     .run()
     .await?;
     if inserted.meta()?.and_then(|meta| meta.changes).unwrap_or(0) == 0 {
+        if let Some(request_id) = request_id.as_deref() {
+            let raced = worker::query!(
+                &database,
+                "SELECT session_id, device_id, client_id, state, created_at, expires_at
+                 FROM remote_computer_sessions
+                 WHERE user_id = ?1 AND request_id = ?2
+                 LIMIT 1",
+                &account.user_id,
+                request_id
+            )?
+            .first::<RemoteComputerSessionRequestRow>(None)
+            .await?;
+            if let Some(raced) = raced {
+                if raced.device_id != device_id || raced.client_id != input.client_id {
+                    return error_response(
+                        409,
+                        "request_id_conflict",
+                        "requestId is already bound to a different remote-control request.",
+                    );
+                }
+                return error_response(
+                    409,
+                    "control_session_exists",
+                    "A control session already exists for this requestId; retry with reconcile=true to recover it.",
+                );
+            }
+        }
         let still_paired = worker::query!(
             &database,
             "SELECT 1 AS ok FROM remote_computer_clients c
@@ -1081,10 +1220,12 @@ pub(super) async fn remote_computer_session_create(
         "sessionId": session_id,
         "deviceId": device_id,
         "clientId": input.client_id,
+        "requestId": request_id,
         "mobileToken": mobile_token,
         "createdAt": now,
         "expiresAt": expires_at,
         "state": "pending",
+        "reconciled": false,
         "permissions": {"display": true, "input": true, "clipboard": false, "fileTransfer": false, "audio": false},
         "iceServers": remote_ice_servers(&context.env),
     }))?
