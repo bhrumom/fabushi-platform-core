@@ -510,13 +510,22 @@ pub(super) async fn remote_computer_list(
 ) -> Result<Response> {
     let account = match authenticated_account(&request, &context.env) {
         Ok(account) => account,
-        Err(_) => {
-            return error_response(
-                401,
-                "unauthorized",
-                "A valid Mahayana account token is required to list computers.",
-            );
-        }
+        Err(_) => match authenticated_official_mcp_service(
+            &request,
+            &context.env,
+            "devices.read",
+        )
+        .await
+        {
+            Ok(account) => account,
+            Err(_) => {
+                return error_response(
+                    401,
+                    "unauthorized",
+                    "A valid Fabushi account or official MCP service credential is required to list computers.",
+                );
+            }
+        },
     };
     let database = context.env.d1(DATABASE_BINDING)?;
     let rows = worker::query!(
