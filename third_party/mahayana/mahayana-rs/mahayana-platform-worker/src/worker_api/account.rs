@@ -1829,7 +1829,7 @@ fn official_mcp_service_scopes(scopes: &[String]) -> Option<Vec<String>> {
     normalized.sort();
     normalized.dedup();
     if normalized.len() != scopes.len()
-        || normalized.first().map(String::as_str) != Some("devices.read")
+        || !normalized.iter().any(|scope| scope == "devices.read")
         || normalized
             .iter()
             .any(|scope| !matches!(scope.as_str(), "devices.read" | "devices.control"))
