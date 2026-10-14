@@ -221,6 +221,48 @@ fn remote_computer_exact_tool_grants_are_generation_bound_and_fail_closed() {
 }
 
 #[test]
+fn remote_computer_service_clients_are_connection_bound_and_secret_safe() {
+    for required in [
+        "ALTER TABLE remote_computer_clients ADD COLUMN service_connection_id TEXT",
+        "ALTER TABLE remote_computer_clients ADD COLUMN service_delegation_id TEXT",
+        "remote_computer_clients_service_connection_device_idx",
+        "service connection and delegation binding must be stored together",
+        "remote service client binding is immutable",
+    ] {
+        assert!(
+            REMOTE_COMPUTER_SERVICE_CLIENT_SCHEMA_V30.contains(required),
+            "missing service client schema invariant: {required}"
+        );
+    }
+    for forbidden in [
+        "client_token TEXT",
+        "mobile_token TEXT",
+        "device_secret TEXT",
+        "access_token TEXT",
+        "refresh_token TEXT",
+    ] {
+        assert!(
+            !REMOTE_COMPUTER_SERVICE_CLIENT_SCHEMA_V30.contains(forbidden),
+            "raw credential must not be persisted in service client binding: {forbidden}"
+        );
+    }
+
+    for required in [
+        "authenticated_official_mcp_service",
+        "official_mcp_service_claims",
+        "service_connection_id",
+        "service_delegation_id",
+        "remote_controller_client_binding_matches",
+        "client_service_binding_mismatch",
+    ] {
+        assert!(
+            REMOTE_COMPUTER_WORKER_SOURCE.contains(required),
+            "missing official MCP controller source invariant: {required}"
+        );
+    }
+}
+
+#[test]
 fn marketplace_account_install_migration_is_account_scoped_and_manifest_projected() {
     assert_eq!(
         validate_marketplace_account_install_schema(MARKETPLACE_ACCOUNT_INSTALL_SCHEMA_V18),

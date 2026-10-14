@@ -38,6 +38,8 @@ pub const REMOTE_COMPUTER_OPERATION_JOURNAL_SCHEMA_V28: &str =
     include_str!("../migrations/0028_remote_computer_operation_journal.sql");
 pub const REMOTE_COMPUTER_EXACT_TOOL_GRANTS_SCHEMA_V29: &str =
     include_str!("../migrations/0029_remote_computer_exact_tool_grants.sql");
+pub const REMOTE_COMPUTER_SERVICE_CLIENT_SCHEMA_V30: &str =
+    include_str!("../migrations/0030_remote_computer_service_clients.sql");
 pub const REMOTE_COMPUTER_WORKER_SOURCE: &str = include_str!("worker_api/remote_computer.rs");
 pub const ACCOUNT_WORKER_SOURCE: &str = include_str!("worker_api/account.rs");
 pub const WORKER_ROUTER_SOURCE: &str = include_str!("worker_api.rs");
