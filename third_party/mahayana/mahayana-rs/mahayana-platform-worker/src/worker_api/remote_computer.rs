@@ -4065,6 +4065,125 @@ pub(super) async fn remote_computer_operation_claim(
     Ok(Response::from_json(&remote_operation_json(&operation))?.with_headers(auth_headers()))
 }
 
+pub(super) async fn remote_computer_operation_access(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_account(&request, &context.env) {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let session_id = route_identifier(&context, "session_id")?.to_string();
+    let request_id = route_identifier(&context, "request_id")?.to_string();
+    let input: RemoteComputerOperationTargetRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_operation_access",
+                "Operation access validation must be valid JSON.",
+            );
+        }
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    let Some(client_id) = remote_operation_target_authorized(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &input.device_secret,
+        now,
+    )
+    .await?
+    else {
+        return error_response(
+            403,
+            "control_session_forbidden",
+            "This device cannot validate operation access.",
+        );
+    };
+    let Some(operation) = load_remote_operation(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+    )
+    .await?
+    else {
+        return error_response(404, "operation_not_found", "Remote operation was not found.");
+    };
+    if operation.client_id != client_id {
+        return error_response(
+            403,
+            "operation_forbidden",
+            "Remote operation belongs to another client.",
+        );
+    }
+    if operation.sensitive_result == 0 {
+        return error_response(
+            409,
+            "operation_not_sensitive",
+            "Only sensitive operation results require target access validation.",
+        );
+    }
+    if operation.state != "completed" {
+        return error_response(
+            409,
+            "operation_state_conflict",
+            "Sensitive result access requires a completed operation.",
+        );
+    }
+    let Some(grant_generation) = operation.grant_generation else {
+        return error_response(
+            403,
+            "tool_grant_forbidden",
+            "Operation has no exact tool grant generation.",
+        );
+    };
+    if remote_operation_tool_grant_generation(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &client_id,
+        &operation.tool_name,
+        now,
+    )
+    .await?
+        != Some(grant_generation)
+    {
+        return error_response(
+            403,
+            "tool_grant_stale",
+            "Exact tool grant was revoked, expired, or replaced.",
+        );
+    }
+    let Some(result_sha256) = operation.result_sha256.as_deref() else {
+        return error_response(
+            409,
+            "operation_result_unavailable",
+            "Completed sensitive operation has no result digest.",
+        );
+    };
+    Ok(Response::from_json(&json!({
+        "allowed": true,
+        "deviceId": device_id,
+        "sessionId": session_id,
+        "clientId": client_id,
+        "requestId": operation.request_id,
+        "toolName": operation.tool_name,
+        "requestSha256": operation.request_sha256,
+        "grantGeneration": grant_generation,
+        "sensitiveResult": true,
+        "state": operation.state,
+        "resultSha256": result_sha256,
+    }))?
+    .with_headers(auth_headers()))
+}
+
 pub(super) async fn remote_computer_operation_result(
     mut request: Request,
     context: RouteContext<()>,
