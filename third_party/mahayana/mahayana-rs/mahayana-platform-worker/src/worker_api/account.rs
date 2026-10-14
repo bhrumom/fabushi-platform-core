@@ -2333,6 +2333,93 @@ pub(super) async fn authenticated_session_account(
     Ok(account)
 }
 
+pub(super) async fn authenticated_official_mcp_service(
+    request: &Request,
+    env: &Env,
+    required_scope: &str,
+) -> Result<AuthenticatedAccount> {
+    if !matches!(required_scope, "devices.read" | "devices.control") {
+        return Err(worker::Error::RustError(
+            "invalid official MCP service scope".into(),
+        ));
+    }
+    let authorization = request
+        .headers()
+        .get("Authorization")?
+        .ok_or_else(|| worker::Error::RustError("missing Authorization header".into()))?;
+    let token = authorization
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| worker::Error::RustError("invalid Authorization scheme".into()))?;
+    let public_key = env.secret("ACCESS_TOKEN_PUBLIC_KEY_PEM")?.to_string();
+    let key = DecodingKey::from_rsa_pem(public_key.as_bytes()).map_err(jwt_error)?;
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_issuer(&[ACCESS_TOKEN_ISSUER]);
+    validation.set_audience(&["service:official-device-mcp"]);
+    let claims = decode::<ServiceAccessTokenClaims>(token, &key, &validation)
+        .map_err(jwt_error)?
+        .claims;
+    if claims.token_use != "service"
+        || claims.service_id != "official-device-mcp"
+        || claims.sub.trim().is_empty()
+        || claims.sid.trim().is_empty()
+        || claims.delegation_id.trim().is_empty()
+        || claims.connection_id.trim().is_empty()
+        || claims.external_client_id_hash.len() != 64
+        || !claims.scope.iter().any(|scope| scope == required_scope)
+        || claims
+            .scope
+            .iter()
+            .any(|scope| !matches!(scope.as_str(), "devices.read" | "devices.control"))
+    {
+        return Err(worker::Error::RustError(
+            "invalid official MCP service token claims".into(),
+        ));
+    }
+    ensure_bound_account_session_active(env, &claims.sub, &claims.sid).await?;
+    let database = env.d1(ACCOUNT_DATABASE_BINDING)?;
+    let row = worker::query!(
+        &database,
+        "SELECT delegation_id, user_id, parent_session_id, service_id, connection_id,
+                external_client_id_hash, resource, scopes_json, current_refresh_token_hash,
+                expires_at, revoked_at
+         FROM account_service_delegations
+         WHERE delegation_id = ?1 AND user_id = ?2 AND parent_session_id = ?3
+           AND service_id = 'official-device-mcp' AND connection_id = ?4
+         LIMIT 1",
+        &claims.delegation_id,
+        &claims.sub,
+        &claims.sid,
+        &claims.connection_id
+    )?
+    .first::<ServiceDelegationRow>(None)
+    .await?;
+    let Some(row) = row else {
+        return Err(worker::Error::RustError("service delegation not found".into()));
+    };
+    let now = now_seconds();
+    let scopes = serde_json::from_str::<Vec<String>>(&row.scopes_json).unwrap_or_default();
+    if row.revoked_at.is_some()
+        || row.expires_at <= now
+        || row.user_id != claims.sub
+        || row.parent_session_id != claims.sid
+        || row.service_id != claims.service_id
+        || row.connection_id != claims.connection_id
+        || row.external_client_id_hash != claims.external_client_id_hash
+        || row.resource != claims.resource
+        || scopes != claims.scope
+    {
+        return Err(worker::Error::RustError(
+            "service delegation is not active".into(),
+        ));
+    }
+    Ok(AuthenticatedAccount {
+        user_id: claims.sub,
+        session_id: Some(claims.sid),
+        scopes: claims.scope,
+        is_test_account: false,
+    })
+}
+
 pub(super) async fn authenticated_plugin_account(
     request: &Request,
     env: &Env,
