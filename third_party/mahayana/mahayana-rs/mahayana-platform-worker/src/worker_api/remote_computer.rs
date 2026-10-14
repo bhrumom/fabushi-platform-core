@@ -2341,10 +2341,17 @@ pub(super) async fn remote_computer_operation_create(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
-        Ok(account) => account,
-        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
-    };
+    let (account, service_binding) =
+        match remote_controller_account(&request, &context.env).await {
+            Ok(actor) => actor,
+            Err(_) => {
+                return error_response(
+                    401,
+                    "unauthorized",
+                    "A valid Fabushi account or official MCP devices.control credential is required.",
+                );
+            }
+        };
     let device_id = route_identifier(&context, "device_id")?.to_string();
     let session_id = route_identifier(&context, "session_id")?.to_string();
     let input: RemoteComputerOperationCreateRequest = match request.json().await {
@@ -2379,6 +2386,21 @@ pub(super) async fn remote_computer_operation_create(
     };
     let database = context.env.d1(DATABASE_BINDING)?;
     let now = now_seconds();
+    if !remote_controller_client_binding_matches(
+        &database,
+        &account.user_id,
+        &device_id,
+        &input.client_id,
+        service_binding.as_ref(),
+    )
+    .await?
+    {
+        return error_response(
+            403,
+            "client_service_binding_mismatch",
+            "The paired client belongs to another controller identity.",
+        );
+    }
     if !remote_operation_controller_authorized(
         &database,
         &account.user_id,
@@ -2469,10 +2491,17 @@ pub(super) async fn remote_computer_operation_query(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
-        Ok(account) => account,
-        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
-    };
+    let (account, service_binding) =
+        match remote_controller_account(&request, &context.env).await {
+            Ok(actor) => actor,
+            Err(_) => {
+                return error_response(
+                    401,
+                    "unauthorized",
+                    "A valid Fabushi account or official MCP devices.control credential is required.",
+                );
+            }
+        };
     let device_id = route_identifier(&context, "device_id")?.to_string();
     let session_id = route_identifier(&context, "session_id")?.to_string();
     let request_id = route_identifier(&context, "request_id")?.to_string();
@@ -2482,6 +2511,21 @@ pub(super) async fn remote_computer_operation_query(
     };
     let database = context.env.d1(DATABASE_BINDING)?;
     let now = now_seconds();
+    if !remote_controller_client_binding_matches(
+        &database,
+        &account.user_id,
+        &device_id,
+        &input.client_id,
+        service_binding.as_ref(),
+    )
+    .await?
+    {
+        return error_response(
+            403,
+            "client_service_binding_mismatch",
+            "The paired client belongs to another controller identity.",
+        );
+    }
     if !remote_operation_controller_authorized(
         &database,
         &account.user_id,
@@ -2520,10 +2564,17 @@ pub(super) async fn remote_computer_operation_outcome_unknown(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
-        Ok(account) => account,
-        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
-    };
+    let (account, service_binding) =
+        match remote_controller_account(&request, &context.env).await {
+            Ok(actor) => actor,
+            Err(_) => {
+                return error_response(
+                    401,
+                    "unauthorized",
+                    "A valid Fabushi account or official MCP devices.control credential is required.",
+                );
+            }
+        };
     let device_id = route_identifier(&context, "device_id")?.to_string();
     let session_id = route_identifier(&context, "session_id")?.to_string();
     let request_id = route_identifier(&context, "request_id")?.to_string();
@@ -2533,6 +2584,21 @@ pub(super) async fn remote_computer_operation_outcome_unknown(
     };
     let database = context.env.d1(DATABASE_BINDING)?;
     let now = now_seconds();
+    if !remote_controller_client_binding_matches(
+        &database,
+        &account.user_id,
+        &device_id,
+        &input.client_id,
+        service_binding.as_ref(),
+    )
+    .await?
+    {
+        return error_response(
+            403,
+            "client_service_binding_mismatch",
+            "The paired client belongs to another controller identity.",
+        );
+    }
     if !remote_operation_controller_authorized(
         &database,
         &account.user_id,
@@ -2589,10 +2655,17 @@ pub(super) async fn remote_computer_operation_cancel(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
-        Ok(account) => account,
-        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
-    };
+    let (account, service_binding) =
+        match remote_controller_account(&request, &context.env).await {
+            Ok(actor) => actor,
+            Err(_) => {
+                return error_response(
+                    401,
+                    "unauthorized",
+                    "A valid Fabushi account or official MCP devices.control credential is required.",
+                );
+            }
+        };
     let device_id = route_identifier(&context, "device_id")?.to_string();
     let session_id = route_identifier(&context, "session_id")?.to_string();
     let request_id = route_identifier(&context, "request_id")?.to_string();
@@ -2602,6 +2675,21 @@ pub(super) async fn remote_computer_operation_cancel(
     };
     let database = context.env.d1(DATABASE_BINDING)?;
     let now = now_seconds();
+    if !remote_controller_client_binding_matches(
+        &database,
+        &account.user_id,
+        &device_id,
+        &input.client_id,
+        service_binding.as_ref(),
+    )
+    .await?
+    {
+        return error_response(
+            403,
+            "client_service_binding_mismatch",
+            "The paired client belongs to another controller identity.",
+        );
+    }
     if !remote_operation_controller_authorized(
         &database,
         &account.user_id,
