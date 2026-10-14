@@ -221,6 +221,74 @@ fn remote_computer_exact_tool_grants_are_generation_bound_and_fail_closed() {
 }
 
 #[test]
+fn official_mcp_operation_controller_is_service_binding_fenced() {
+    for handler in [
+        "remote_computer_operation_create",
+        "remote_computer_operation_query",
+        "remote_computer_operation_cancel",
+        "remote_computer_operation_outcome_unknown",
+    ] {
+        let marker = format!("pub(super) async fn {handler}");
+        let start = REMOTE_COMPUTER_WORKER_SOURCE
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing operation controller handler {handler}"));
+        let tail = &REMOTE_COMPUTER_WORKER_SOURCE[start..];
+        let end = tail
+            .find("\npub(super) async fn ")
+            .map(|offset| start + offset)
+            .unwrap_or(REMOTE_COMPUTER_WORKER_SOURCE.len());
+        let handler_source = &REMOTE_COMPUTER_WORKER_SOURCE[start..end];
+        for required in [
+            "remote_controller_account",
+            "remote_controller_client_binding_matches",
+            "service_binding.as_ref()",
+            "remote_operation_controller_authorized",
+        ] {
+            assert!(
+                handler_source.contains(required),
+                "{handler} must keep service/controller fence {required}"
+            );
+        }
+        assert!(
+            !handler_source.contains("match authenticated_account(&request, &context.env)"),
+            "{handler} must not require an ordinary account token when a valid service delegation is present"
+        );
+    }
+
+    for target_handler in [
+        "remote_computer_operation_claim",
+        "remote_computer_operation_result",
+    ] {
+        let marker = format!("pub(super) async fn {target_handler}");
+        let start = REMOTE_COMPUTER_WORKER_SOURCE
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing target operation handler {target_handler}"));
+        let tail = &REMOTE_COMPUTER_WORKER_SOURCE[start..];
+        let end = tail
+            .find("\npub(super) async fn ")
+            .map(|offset| start + offset)
+            .unwrap_or(REMOTE_COMPUTER_WORKER_SOURCE.len());
+        let handler_source = &REMOTE_COMPUTER_WORKER_SOURCE[start..end];
+        assert!(
+            !handler_source.contains("remote_controller_account"),
+            "{target_handler} must not accept official MCP controller service authority"
+        );
+    }
+
+    for invariant in [
+        "remote_operation_tool_grant_generation",
+        "request_sha256",
+        "operation_request_conflict",
+        "outcome_unknown",
+    ] {
+        assert!(
+            REMOTE_COMPUTER_WORKER_SOURCE.contains(invariant),
+            "operation journal invariant disappeared: {invariant}"
+        );
+    }
+}
+
+#[test]
 fn remote_computer_network_binding_is_authority_written_generation_fenced_and_secret_safe() {
     for required in [
         "CREATE TABLE IF NOT EXISTS remote_computer_network_bindings",
