@@ -69,6 +69,16 @@ struct RemoteComputerPairRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerSessionGrantRequest {
+    device_secret: String,
+    connection_id: String,
+    delegation_id: String,
+    request_id: String,
+    label: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RemoteComputerSessionCreateRequest {
     client_id: String,
     client_token: String,
@@ -249,6 +259,14 @@ struct RemoteComputerClientRow {
 #[derive(Debug, Deserialize)]
 struct RemoteComputerClientAuthRow {
     client_token_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerTargetGrantClientRow {
+    client_id: String,
+    client_token_hash: String,
+    service_delegation_id: Option<String>,
+    target_grant_request_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -491,6 +509,50 @@ fn recoverable_remote_mobile_token(
 
 fn new_remote_client_token() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+fn recoverable_target_service_client_token(
+    device_secret: &str,
+    connection_id: &str,
+    delegation_id: &str,
+    request_id: &str,
+    client_id: &str,
+) -> String {
+    fn digest(
+        domain: &[u8],
+        device_secret: &str,
+        connection_id: &str,
+        delegation_id: &str,
+        request_id: &str,
+        client_id: &str,
+    ) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(domain);
+        for value in [device_secret, connection_id, delegation_id, request_id, client_id] {
+            hasher.update(value.as_bytes());
+            hasher.update([0]);
+        }
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
+    }
+    format!(
+        "rct_{}{}",
+        digest(
+            b"fabushi-remote-service-client-v1:a\0",
+            device_secret,
+            connection_id,
+            delegation_id,
+            request_id,
+            client_id,
+        ),
+        digest(
+            b"fabushi-remote-service-client-v1:b\0",
+            device_secret,
+            connection_id,
+            delegation_id,
+            request_id,
+            client_id,
+        ),
+    )
 }
 
 fn remote_label(value: &str) -> Option<String> {
