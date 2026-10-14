@@ -830,9 +830,10 @@ fn official_mcp_controller_network_route_is_service_only_minimal_and_live_bound(
             "controller route must not expose or read target-only secret material: {forbidden}"
         );
     }
+    let compact_router = WORKER_ROUTER_SOURCE.split_whitespace().collect::<String>();
     assert!(
-        WORKER_ROUTER_SOURCE.contains(
-            r#""/v1/computers/:device_id/network-route",\n            remote_computer_controller_network_route,"#
+        compact_router.contains(
+            r#".post_async("/v1/computers/:device_id/network-route",remote_computer_controller_network_route)"#
         ),
         "controller network-route endpoint is not wired"
     );
