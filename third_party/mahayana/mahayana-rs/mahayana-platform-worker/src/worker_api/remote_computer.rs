@@ -1708,6 +1708,7 @@ async fn remote_operation_controller_authorized(
     session_id: &str,
     client_id: &str,
     mobile_token: &str,
+    service_binding: Option<&(String, String)>,
     now: i64,
 ) -> Result<bool> {
     let Some(session) =
@@ -1723,6 +1724,17 @@ async fn remote_operation_controller_authorized(
         false,
         now,
     ) {
+        return Ok(false);
+    }
+    if !remote_controller_client_binding_matches(
+        database,
+        user_id,
+        device_id,
+        client_id,
+        service_binding,
+    )
+    .await?
+    {
         return Ok(false);
     }
     remote_operation_grant_active(
@@ -1999,10 +2011,17 @@ pub(super) async fn remote_computer_operation_create(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
-        Ok(account) => account,
-        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
-    };
+    let (account, service_binding) =
+        match remote_controller_account(&request, &context.env).await {
+            Ok(actor) => actor,
+            Err(_) => {
+                return error_response(
+                    401,
+                    "unauthorized",
+                    "A valid Fabushi account or official MCP devices.control credential is required.",
+                );
+            }
+        };
     let device_id = route_identifier(&context, "device_id")?.to_string();
     let session_id = route_identifier(&context, "session_id")?.to_string();
     let input: RemoteComputerOperationCreateRequest = match request.json().await {
@@ -2044,6 +2063,7 @@ pub(super) async fn remote_computer_operation_create(
         &session_id,
         &input.client_id,
         &input.mobile_token,
+        service_binding.as_ref(),
         now,
     )
     .await?
@@ -2127,10 +2147,17 @@ pub(super) async fn remote_computer_operation_query(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
-        Ok(account) => account,
-        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
-    };
+    let (account, service_binding) =
+        match remote_controller_account(&request, &context.env).await {
+            Ok(actor) => actor,
+            Err(_) => {
+                return error_response(
+                    401,
+                    "unauthorized",
+                    "A valid Fabushi account or official MCP devices.control credential is required.",
+                );
+            }
+        };
     let device_id = route_identifier(&context, "device_id")?.to_string();
     let session_id = route_identifier(&context, "session_id")?.to_string();
     let request_id = route_identifier(&context, "request_id")?.to_string();
@@ -2147,6 +2174,7 @@ pub(super) async fn remote_computer_operation_query(
         &session_id,
         &input.client_id,
         &input.mobile_token,
+        service_binding.as_ref(),
         now,
     )
     .await?
@@ -2178,10 +2206,17 @@ pub(super) async fn remote_computer_operation_outcome_unknown(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
-        Ok(account) => account,
-        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
-    };
+    let (account, service_binding) =
+        match remote_controller_account(&request, &context.env).await {
+            Ok(actor) => actor,
+            Err(_) => {
+                return error_response(
+                    401,
+                    "unauthorized",
+                    "A valid Fabushi account or official MCP devices.control credential is required.",
+                );
+            }
+        };
     let device_id = route_identifier(&context, "device_id")?.to_string();
     let session_id = route_identifier(&context, "session_id")?.to_string();
     let request_id = route_identifier(&context, "request_id")?.to_string();
@@ -2198,6 +2233,7 @@ pub(super) async fn remote_computer_operation_outcome_unknown(
         &session_id,
         &input.client_id,
         &input.mobile_token,
+        service_binding.as_ref(),
         now,
     )
     .await?
@@ -2247,10 +2283,17 @@ pub(super) async fn remote_computer_operation_cancel(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
-        Ok(account) => account,
-        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
-    };
+    let (account, service_binding) =
+        match remote_controller_account(&request, &context.env).await {
+            Ok(actor) => actor,
+            Err(_) => {
+                return error_response(
+                    401,
+                    "unauthorized",
+                    "A valid Fabushi account or official MCP devices.control credential is required.",
+                );
+            }
+        };
     let device_id = route_identifier(&context, "device_id")?.to_string();
     let session_id = route_identifier(&context, "session_id")?.to_string();
     let request_id = route_identifier(&context, "request_id")?.to_string();
@@ -2267,6 +2310,7 @@ pub(super) async fn remote_computer_operation_cancel(
         &session_id,
         &input.client_id,
         &input.mobile_token,
+        service_binding.as_ref(),
         now,
     )
     .await?
