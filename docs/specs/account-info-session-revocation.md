@@ -71,3 +71,27 @@ and account-migrations/0001_account_auth.sql; AGENTS.md spec-first policy.
 | ASR-1..3 / AC-1 | blocked | Actions compilation pending |
 | ASR-4 / AC-2 | blocked | Exact-Core runtime pending |
 | AC-3 | blocked | PR integration pending; no production deployment claimed |
+
+## Exact implementation evidence and criterion review (2026-10-15)
+
+Implementation source: a445d3a093c4c08159f6bd4132cb62a51e2ce05a.
+Core Actions 38593458566 executes 44 Rust tests (zero failed/ignored), locked wasm
+check and SQLite OAuth migration verification, all exit 0. Shared core and
+extension contracts also pass (runs 38593458628 / 38593458659).
+Backend actual Worker run 38598531188 compiles this exact Core source; 15 runtime
+assertions pass with wasm digest
+50bf5e2e97f20008a733a062a0dbcead9e4b057b155efa9082561363f6ac6aba.
+
+| Criterion | Status | Evidence / limit |
+| --- | --- | --- |
+| ASR-1 | passed | Real user-info accepts fresh session; expired and deleted session denies; account/session query binds both identities |
+| ASR-2 | passed | Real logout revokes exact session, subsequent old user-info/refresh denies |
+| ASR-3 | passed | Real browser-code registration, Argon2id login, RS256 issuance/refresh unchanged; A's second session remains usable |
+| ASR-4 | passed | Backend runtime 38598531188: fresh/other/expired/revoked/deleted session assertions, actual wasm and emulated D1 |
+| AC-1 | passed | Core Actions 38593458566 and related contracts, exact implementation SHA above |
+| AC-2 | passed | 15 actual runtime assertions, emulated D1; no deployed-cloud/device acceptance implied |
+| AC-3 | blocked | Protected integration/readback pending; production deployment is separate |
+
+PR: https://github.com/bhrumom/fabushi-platform-core/pull/21.
+Runtime: https://github.com/bhrumom/fabushi-backend/actions/runs/38598531188.
+This evidence update changes documentation only; the tested account.rs is unchanged.
