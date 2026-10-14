@@ -277,11 +277,19 @@ fn remote_computer_network_binding_is_authority_written_generation_fenced_and_se
             "network binding endpoint is not wired: {route}"
         );
     }
-    assert!(
-        !REMOTE_COMPUTER_WORKER_SOURCE.contains(""cellId": row.cell_id,
-                "nodeId": row.node_id"),
-        "public inventory must not expose network topology"
-    );
+    let list_start = REMOTE_COMPUTER_WORKER_SOURCE
+        .find("pub(super) async fn remote_computer_list")
+        .expect("remote computer list source");
+    let register_start = REMOTE_COMPUTER_WORKER_SOURCE
+        .find("pub(super) async fn remote_computer_register")
+        .expect("remote computer register source");
+    let public_inventory_source = &REMOTE_COMPUTER_WORKER_SOURCE[list_start..register_start];
+    for forbidden in ["\"cellId\"", "\"nodeId\"", "\"proofSha256\""] {
+        assert!(
+            !public_inventory_source.contains(forbidden),
+            "public inventory must not expose network topology field {forbidden}"
+        );
+    }
 }
 
 #[test]
