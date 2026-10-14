@@ -833,7 +833,7 @@ fn official_mcp_controller_network_route_is_service_only_minimal_and_live_bound(
     let compact_router = WORKER_ROUTER_SOURCE.split_whitespace().collect::<String>();
     assert!(
         compact_router.contains(
-            r#".post_async("/v1/computers/:device_id/network-route",remote_computer_controller_network_route)"#
+            r#".post_async("/v1/computers/:device_id/network-route",remote_computer_controller_network_route,)"#
         ),
         "controller network-route endpoint is not wired"
     );
