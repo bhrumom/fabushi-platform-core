@@ -49,6 +49,23 @@ fn remote_computer_migration_keeps_control_plane_separate_from_desktop_data() {
 }
 
 #[test]
+fn remote_computer_session_reconcile_migration_is_account_scoped_and_additive() {
+    for required in [
+        "ADD COLUMN request_id TEXT",
+        "ON remote_computer_sessions(user_id, request_id)",
+        "WHERE request_id IS NOT NULL",
+        "remote_computer_sessions_request_lookup_idx",
+    ] {
+        assert!(
+            REMOTE_COMPUTER_SESSION_RECONCILE_SCHEMA_V26.contains(required),
+            "missing {required}"
+        );
+    }
+    assert!(!REMOTE_COMPUTER_SESSION_RECONCILE_SCHEMA_V26.contains("client_token"));
+    assert!(!REMOTE_COMPUTER_SESSION_RECONCILE_SCHEMA_V26.contains("mobile_token TEXT"));
+}
+
+#[test]
 fn marketplace_account_install_migration_is_account_scoped_and_manifest_projected() {
     assert_eq!(
         validate_marketplace_account_install_schema(MARKETPLACE_ACCOUNT_INSTALL_SCHEMA_V18),
