@@ -165,6 +165,62 @@ fn remote_computer_operation_journal_is_idempotent_secret_safe_and_routed() {
 }
 
 #[test]
+fn remote_computer_exact_tool_grants_are_generation_bound_and_fail_closed() {
+    for required in [
+        "CREATE TABLE IF NOT EXISTS remote_computer_session_tool_grants",
+        "PRIMARY KEY (session_id, tool_name)",
+        "generation INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE remote_computer_operations ADD COLUMN grant_generation INTEGER",
+        "remote exact-tool grant binding or generation cannot move backwards",
+        "remote_computer_session_close_revoke_tool_grants",
+        "CREATE TABLE IF NOT EXISTS remote_computer_tool_grant_audit",
+    ] {
+        assert!(
+            REMOTE_COMPUTER_EXACT_TOOL_GRANTS_SCHEMA_V29.contains(required),
+            "missing exact-tool grant schema invariant: {required}"
+        );
+    }
+    for forbidden in [
+        "device_secret TEXT",
+        "mobile_token TEXT",
+        "client_token TEXT",
+        "arguments_json TEXT",
+        "password TEXT",
+        "otp TEXT",
+    ] {
+        assert!(
+            !REMOTE_COMPUTER_EXACT_TOOL_GRANTS_SCHEMA_V29.contains(forbidden),
+            "raw credential or tool input must not be persisted: {forbidden}"
+        );
+    }
+    for required in [
+        "remote_computer_tool_grant",
+        "remote_computer_tool_revoke",
+        "remote_operation_tool_grant_generation",
+        "tool_grant_forbidden",
+        "tool_grant_stale",
+        "grant_generation = ?7",
+        "g.tool_name = remote_computer_operations.tool_name",
+        "g.generation = remote_computer_operations.grant_generation",
+        "g.revoked_at IS NULL AND g.expires_at > ?1",
+    ] {
+        assert!(
+            REMOTE_COMPUTER_WORKER_SOURCE.contains(required),
+            "missing exact-tool grant source invariant: {required}"
+        );
+    }
+    for route in [
+        "/v1/computers/:device_id/sessions/:session_id/tool-grants/grant",
+        "/v1/computers/:device_id/sessions/:session_id/tool-grants/revoke",
+    ] {
+        assert!(
+            WORKER_ROUTER_SOURCE.contains(route),
+            "exact-tool grant endpoint is not wired: {route}"
+        );
+    }
+}
+
+#[test]
 fn marketplace_account_install_migration_is_account_scoped_and_manifest_projected() {
     assert_eq!(
         validate_marketplace_account_install_schema(MARKETPLACE_ACCOUNT_INSTALL_SCHEMA_V18),
