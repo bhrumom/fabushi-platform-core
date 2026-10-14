@@ -148,6 +148,23 @@ struct RemoteComputerOperationResultRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerToolGrantRequest {
+    device_secret: String,
+    client_id: String,
+    tool_name: String,
+    expires_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerToolRevokeRequest {
+    device_secret: String,
+    client_id: String,
+    tool_name: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct RemoteComputerRow {
     device_id: String,
     label: String,
@@ -169,6 +186,11 @@ struct RemoteComputerPairRow {
 #[derive(Debug, Deserialize)]
 struct RemoteComputerExistsRow {
     ok: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerGenerationRow {
+    generation: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -250,12 +272,21 @@ struct RemoteComputerOperationRow {
     client_id: String,
     tool_name: String,
     request_sha256: String,
+    grant_generation: Option<i64>,
     sensitive_result: i64,
     state: String,
     result_sha256: Option<String>,
     result_json: Option<String>,
     created_at: i64,
     updated_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerToolGrantRow {
+    tool_name: String,
+    generation: i64,
+    expires_at: i64,
+    revoked_at: Option<i64>,
 }
 
 fn remote_secret_hash(value: &str) -> String {
@@ -1503,6 +1534,33 @@ async fn remote_operation_grant_active(
     .is_some())
 }
 
+async fn remote_operation_tool_grant_generation(
+    database: &worker::D1Database,
+    user_id: &str,
+    device_id: &str,
+    session_id: &str,
+    client_id: &str,
+    tool_name: &str,
+    now: i64,
+) -> Result<Option<i64>> {
+    Ok(worker::query!(
+        database,
+        "SELECT generation FROM remote_computer_session_tool_grants
+         WHERE session_id = ?1 AND user_id = ?2 AND device_id = ?3 AND client_id = ?4
+           AND tool_name = ?5 AND revoked_at IS NULL AND expires_at > ?6
+         LIMIT 1",
+        session_id,
+        user_id,
+        device_id,
+        client_id,
+        tool_name,
+        now
+    )?
+    .first::<RemoteComputerGenerationRow>(None)
+    .await?
+    .map(|row| row.generation))
+}
+
 async fn remote_operation_controller_authorized(
     database: &worker::D1Database,
     user_id: &str,
@@ -1588,7 +1646,7 @@ async fn load_remote_operation(
     worker::query!(
         database,
         "SELECT operation_id, request_id, session_id, client_id, tool_name,
-                request_sha256, sensitive_result, state, result_sha256, result_json,
+                request_sha256, grant_generation, sensitive_result, state, result_sha256, result_json,
                 created_at, updated_at
          FROM remote_computer_operations
          WHERE user_id = ?1 AND device_id = ?2 AND session_id = ?3 AND request_id = ?4
@@ -1614,6 +1672,7 @@ fn remote_operation_json(row: &RemoteComputerOperationRow) -> Value {
         "clientId": row.client_id,
         "toolName": row.tool_name,
         "requestSha256": row.request_sha256,
+        "grantGeneration": row.grant_generation,
         "sensitiveResult": row.sensitive_result != 0,
         "state": row.state,
         "resultSha256": row.result_sha256,
@@ -1621,6 +1680,179 @@ fn remote_operation_json(row: &RemoteComputerOperationRow) -> Value {
         "createdAt": row.created_at,
         "updatedAt": row.updated_at,
     })
+}
+
+pub(super) async fn remote_computer_tool_grant(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_account(&request, &context.env) {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let session_id = route_identifier(&context, "session_id")?.to_string();
+    let input: RemoteComputerToolGrantRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => return error_response(400, "invalid_tool_grant", "Tool grant request must be valid JSON."),
+    };
+    if !valid_relay_identifier(&input.client_id, 160) {
+        return error_response(400, "invalid_client_id", "clientId is invalid.");
+    }
+    let Some(tool_name) = remote_operation_tool_name(&input.tool_name) else {
+        return error_response(400, "invalid_tool_name", "toolName is invalid.");
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    let Some(client_id) = remote_operation_target_authorized(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &input.device_secret,
+        now,
+    )
+    .await?
+    else {
+        return error_response(403, "control_session_forbidden", "This device cannot grant tools for the session.");
+    };
+    if client_id != input.client_id {
+        return error_response(403, "tool_grant_forbidden", "Tool grant belongs to another client.");
+    }
+    let Some(session) =
+        load_remote_control_session(&database, &account.user_id, &device_id, &session_id).await?
+    else {
+        return error_response(404, "control_session_not_found", "Control session was not found.");
+    };
+    if input.expires_at <= now || input.expires_at > session.expires_at {
+        return error_response(
+            400,
+            "invalid_tool_grant_expiry",
+            "Tool grant expiry must be in the future and may not outlive the session.",
+        );
+    }
+    worker::query!(
+        &database,
+        "INSERT INTO remote_computer_session_tool_grants
+           (session_id,user_id,device_id,client_id,tool_name,generation,granted_at,expires_at,revoked_at)
+         VALUES (?1,?2,?3,?4,?5,1,?6,?7,NULL)
+         ON CONFLICT(session_id,tool_name) DO UPDATE SET
+           generation = remote_computer_session_tool_grants.generation + 1,
+           granted_at = excluded.granted_at,
+           expires_at = excluded.expires_at,
+           revoked_at = NULL",
+        &session_id,
+        &account.user_id,
+        &device_id,
+        &client_id,
+        &tool_name,
+        now,
+        input.expires_at
+    )?
+    .run()
+    .await?;
+    let grant = worker::query!(
+        &database,
+        "SELECT tool_name,generation,expires_at,revoked_at
+         FROM remote_computer_session_tool_grants
+         WHERE session_id=?1 AND user_id=?2 AND device_id=?3 AND client_id=?4 AND tool_name=?5
+         LIMIT 1",
+        &session_id,
+        &account.user_id,
+        &device_id,
+        &client_id,
+        &tool_name
+    )?
+    .first::<RemoteComputerToolGrantRow>(None)
+    .await?;
+    let Some(grant) = grant else {
+        return error_response(500, "tool_grant_unavailable", "Tool grant was not persisted.");
+    };
+    Ok(Response::from_json(&json!({
+        "toolName": grant.tool_name,
+        "generation": grant.generation,
+        "expiresAt": grant.expires_at,
+        "revoked": grant.revoked_at.is_some(),
+    }))?.with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_tool_revoke(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_account(&request, &context.env) {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let session_id = route_identifier(&context, "session_id")?.to_string();
+    let input: RemoteComputerToolRevokeRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => return error_response(400, "invalid_tool_revoke", "Tool revoke request must be valid JSON."),
+    };
+    if !valid_relay_identifier(&input.client_id, 160) {
+        return error_response(400, "invalid_client_id", "clientId is invalid.");
+    }
+    let Some(tool_name) = remote_operation_tool_name(&input.tool_name) else {
+        return error_response(400, "invalid_tool_name", "toolName is invalid.");
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    let Some(client_id) = remote_operation_target_authorized(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &input.device_secret,
+        now,
+    )
+    .await?
+    else {
+        return error_response(403, "control_session_forbidden", "This device cannot revoke tools for the session.");
+    };
+    if client_id != input.client_id {
+        return error_response(403, "tool_grant_forbidden", "Tool grant belongs to another client.");
+    }
+    worker::query!(
+        &database,
+        "UPDATE remote_computer_session_tool_grants
+         SET revoked_at=COALESCE(revoked_at,?1)
+         WHERE session_id=?2 AND user_id=?3 AND device_id=?4 AND client_id=?5 AND tool_name=?6",
+        now,
+        &session_id,
+        &account.user_id,
+        &device_id,
+        &client_id,
+        &tool_name
+    )?
+    .run()
+    .await?;
+    let grant = worker::query!(
+        &database,
+        "SELECT tool_name,generation,expires_at,revoked_at
+         FROM remote_computer_session_tool_grants
+         WHERE session_id=?1 AND user_id=?2 AND device_id=?3 AND client_id=?4 AND tool_name=?5
+         LIMIT 1",
+        &session_id,
+        &account.user_id,
+        &device_id,
+        &client_id,
+        &tool_name
+    )?
+    .first::<RemoteComputerToolGrantRow>(None)
+    .await?;
+    Ok(Response::from_json(&match grant {
+        Some(grant) => json!({
+            "revoked": true,
+            "toolName": grant.tool_name,
+            "generation": grant.generation,
+            "expiresAt": grant.expires_at,
+        }),
+        None => json!({
+            "revoked": false,
+            "toolName": tool_name,
+        }),
+    })?.with_headers(auth_headers()))
 }
 
 pub(super) async fn remote_computer_operation_create(
@@ -1682,14 +1914,31 @@ pub(super) async fn remote_computer_operation_create(
             "This controller cannot create operations for the control session.",
         );
     }
+    let Some(grant_generation) = remote_operation_tool_grant_generation(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &input.client_id,
+        &tool_name,
+        now,
+    )
+    .await?
+    else {
+        return error_response(
+            403,
+            "tool_grant_forbidden",
+            "The exact tool is not granted for this control session.",
+        );
+    };
 
     let operation_id = format!("remote-operation-{}", Uuid::new_v4());
     worker::query!(
         &database,
         "INSERT OR IGNORE INTO remote_computer_operations
          (operation_id, request_id, session_id, user_id, device_id, client_id, tool_name,
-          request_sha256, sensitive_result, state, result_sha256, result_json, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', NULL, NULL, ?10, ?10)",
+          request_sha256, grant_generation, sensitive_result, state, result_sha256, result_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending', NULL, NULL, ?11, ?11)",
         &operation_id,
         &request_id,
         &session_id,
@@ -1698,6 +1947,7 @@ pub(super) async fn remote_computer_operation_create(
         &input.client_id,
         &tool_name,
         &request_sha256,
+        grant_generation,
         if input.sensitive_result { 1 } else { 0 },
         now
     )?
@@ -1951,18 +2201,60 @@ pub(super) async fn remote_computer_operation_claim(
     else {
         return error_response(403, "control_session_forbidden", "This device cannot claim the operation.");
     };
+    let Some(pending_operation) = load_remote_operation(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+    )
+    .await?
+    else {
+        return error_response(404, "operation_not_found", "Remote operation was not found.");
+    };
+    if pending_operation.client_id != client_id {
+        return error_response(403, "operation_forbidden", "Remote operation belongs to another client.");
+    }
+    let Some(grant_generation) = pending_operation.grant_generation else {
+        return error_response(403, "tool_grant_forbidden", "Operation has no exact tool grant generation.");
+    };
+    if remote_operation_tool_grant_generation(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &client_id,
+        &pending_operation.tool_name,
+        now,
+    )
+    .await?
+        != Some(grant_generation)
+    {
+        return error_response(403, "tool_grant_stale", "Exact tool grant was revoked, expired, or replaced.");
+    }
     worker::query!(
         &database,
         "UPDATE remote_computer_operations
          SET state = 'running', updated_at = ?1
          WHERE user_id = ?2 AND device_id = ?3 AND session_id = ?4 AND request_id = ?5
-           AND client_id = ?6 AND state = 'pending'",
+           AND client_id = ?6 AND state = 'pending' AND grant_generation = ?7
+           AND EXISTS (
+             SELECT 1 FROM remote_computer_session_tool_grants g
+             WHERE g.session_id = remote_computer_operations.session_id
+               AND g.user_id = remote_computer_operations.user_id
+               AND g.device_id = remote_computer_operations.device_id
+               AND g.client_id = remote_computer_operations.client_id
+               AND g.tool_name = remote_computer_operations.tool_name
+               AND g.generation = remote_computer_operations.grant_generation
+               AND g.revoked_at IS NULL AND g.expires_at > ?1
+           )",
         now,
         &account.user_id,
         &device_id,
         &session_id,
         &request_id,
-        &client_id
+        &client_id,
+        grant_generation
     )?
     .run()
     .await?;
