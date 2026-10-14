@@ -93,6 +93,12 @@ pub fn new_refresh_token() -> String {
     format!("mrt_{first}{second}")
 }
 
+pub fn new_service_refresh_token() -> String {
+    let first = Uuid::new_v4().simple().to_string();
+    let second = Uuid::new_v4().simple().to_string();
+    format!("msr_{first}{second}")
+}
+
 pub fn hash_refresh_token(token: &str) -> String {
     let digest = Sha256::digest(token.as_bytes());
     let mut output = String::with_capacity(digest.len() * 2);
@@ -166,6 +172,17 @@ mod tests {
         assert!(hash.starts_with("$argon2id$"));
         assert!(verify_argon2id("upgrade me", &hash));
         assert!(!verify_argon2id("wrong", &hash));
+    }
+
+    #[test]
+    fn service_refresh_tokens_are_opaque_and_domain_separated() {
+        let token = new_service_refresh_token();
+        assert!(token.starts_with("msr_"));
+        assert_eq!(token.len(), 68);
+        let hash = hash_refresh_token(&token);
+        assert_eq!(hash.len(), 64);
+        assert!(!hash.contains(&token));
+        assert!(!token.starts_with("mrt_"));
     }
 
     #[test]
