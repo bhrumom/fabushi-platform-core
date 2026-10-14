@@ -37,6 +37,7 @@ pub const REMOTE_COMPUTER_MOBILE_RECONCILE_SCHEMA_V27: &str =
 pub const REMOTE_COMPUTER_OPERATION_JOURNAL_SCHEMA_V28: &str =
     include_str!("../migrations/0028_remote_computer_operation_journal.sql");
 pub const REMOTE_COMPUTER_WORKER_SOURCE: &str = include_str!("worker_api/remote_computer.rs");
+pub const ACCOUNT_WORKER_SOURCE: &str = include_str!("worker_api/account.rs");
 pub const WORKER_ROUTER_SOURCE: &str = include_str!("worker_api.rs");
 pub const WORKSPACE_MESSAGING_SCHEMA_V7: &str =
     include_str!("../migrations/0007_workspace_messaging.sql");
@@ -51,6 +52,10 @@ pub const ACCOUNT_REGISTRATION_SCHEMA_V5: &str =
     include_str!("../account-migrations/0004_email_registration_challenges.sql");
 pub const ACCOUNT_PRINCIPAL_SCHEMA_V6: &str =
     include_str!("../account-migrations/0005_principals_connections.sql");
+pub const ACCOUNT_MCP_OAUTH_SCHEMA_V7: &str =
+    include_str!("../account-migrations/0006_mcp_connection_oauth.sql");
+pub const ACCOUNT_SERVICE_DELEGATION_SCHEMA_V8: &str =
+    include_str!("../account-migrations/0007_service_delegations.sql");
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SchemaError {
