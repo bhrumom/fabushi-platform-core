@@ -25,7 +25,7 @@ This change does not implement the tsnet worker, Headscale, DERP, official MCP g
 - FDN-CORE-R4: A duplicate stable request does not insert a second session.
 - FDN-CORE-R5: Explicit `reconcile=true` on a live matching session returns the same `sessionId` and rotates/reissues a new mobile session credential; it does not derive that credential from `clientToken`.
 - FDN-CORE-R6: Reconciliation of a closed or expired session fails closed and does not silently create a replacement under the same requestId.
-- FDN-CORE-R7: A duplicate stable request without explicit reconcile returns a conflict describing the existing session identity/state and no secret.
+- FDN-CORE-R7: A duplicate stable request without explicit reconcile returns a conflict directing the caller to explicit reconciliation and returns no session secret.
 - FDN-CORE-R8: Existing account/device/client revocation and possession checks remain required before creation or reconciliation.
 
 ## 5. Current state
