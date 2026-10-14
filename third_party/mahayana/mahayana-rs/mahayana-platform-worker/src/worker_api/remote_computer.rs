@@ -113,6 +113,41 @@ struct RemoteComputerTransportRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerOperationCreateRequest {
+    client_id: String,
+    mobile_token: String,
+    request_id: String,
+    tool_name: String,
+    request_sha256: String,
+    #[serde(default)]
+    sensitive_result: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerOperationControllerRequest {
+    client_id: String,
+    mobile_token: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerOperationTargetRequest {
+    device_secret: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerOperationResultRequest {
+    device_secret: String,
+    status: String,
+    result_sha256: String,
+    #[serde(default)]
+    result: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
 struct RemoteComputerRow {
     device_id: String,
     label: String,
@@ -207,6 +242,22 @@ struct RemoteComputerSignalRow {
     created_at: i64,
 }
 
+#[derive(Debug, Deserialize)]
+struct RemoteComputerOperationRow {
+    operation_id: String,
+    request_id: String,
+    session_id: String,
+    client_id: String,
+    tool_name: String,
+    request_sha256: String,
+    sensitive_result: i64,
+    state: String,
+    result_sha256: Option<String>,
+    result_json: Option<String>,
+    created_at: i64,
+    updated_at: i64,
+}
+
 fn remote_secret_hash(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"fabushi-remote-computer-v1\0");
@@ -255,6 +306,31 @@ fn remote_mobile_request_id(value: &str) -> Option<String> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.')))
     .then(|| value.to_string())
+}
+
+const REMOTE_OPERATION_MAX_RESULT_BYTES: usize = 256 * 1024;
+
+fn remote_operation_sha256(value: &str) -> Option<String> {
+    let value = value.trim();
+    (value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')))
+    .then(|| value.to_string())
+}
+
+fn remote_operation_tool_name(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.')
+        }))
+    .then(|| value.to_string())
+}
+
+fn remote_operation_result_status(value: &str) -> Option<String> {
+    matches!(value, "completed" | "failed").then(|| value.to_string())
 }
 
 fn remote_mobile_request_hash(
@@ -1402,6 +1478,637 @@ pub(super) async fn remote_computer_session_reconcile(
     remote_mobile_session_response(&existing, &token, &context.env)
 }
 
+
+async fn remote_operation_grant_active(
+    database: &worker::D1Database,
+    user_id: &str,
+    device_id: &str,
+    session_id: &str,
+    client_id: &str,
+    now: i64,
+) -> Result<bool> {
+    Ok(worker::query!(
+        database,
+        "SELECT 1 AS ok FROM remote_computer_session_grants
+         WHERE session_id = ?1 AND user_id = ?2 AND device_id = ?3 AND client_id = ?4
+           AND revoked_at IS NULL AND expires_at > ?5 LIMIT 1",
+        session_id,
+        user_id,
+        device_id,
+        client_id,
+        now
+    )?
+    .first::<RemoteComputerExistsRow>(None)
+    .await?
+    .is_some())
+}
+
+async fn remote_operation_controller_authorized(
+    database: &worker::D1Database,
+    user_id: &str,
+    device_id: &str,
+    session_id: &str,
+    client_id: &str,
+    mobile_token: &str,
+    now: i64,
+) -> Result<bool> {
+    let Some(session) =
+        load_remote_control_session(database, user_id, device_id, session_id).await?
+    else {
+        return Ok(false);
+    };
+    if !remote_session_actor_allowed(
+        &session,
+        "mobile",
+        Some(client_id),
+        Some(mobile_token),
+        false,
+        now,
+    ) {
+        return Ok(false);
+    }
+    remote_operation_grant_active(
+        database,
+        user_id,
+        device_id,
+        session_id,
+        client_id,
+        now,
+    )
+    .await
+}
+
+async fn remote_operation_target_authorized(
+    database: &worker::D1Database,
+    user_id: &str,
+    device_id: &str,
+    session_id: &str,
+    device_secret: &str,
+    now: i64,
+) -> Result<Option<String>> {
+    let Some(session) =
+        load_remote_control_session(database, user_id, device_id, session_id).await?
+    else {
+        return Ok(None);
+    };
+    let desktop_authorized =
+        remote_desktop_secret_matches(database, user_id, device_id, device_secret).await?;
+    if !remote_session_actor_allowed(
+        &session,
+        "desktop",
+        None,
+        None,
+        desktop_authorized,
+        now,
+    ) {
+        return Ok(None);
+    }
+    if !remote_operation_grant_active(
+        database,
+        user_id,
+        device_id,
+        session_id,
+        &session.client_id,
+        now,
+    )
+    .await?
+    {
+        return Ok(None);
+    }
+    Ok(Some(session.client_id))
+}
+
+async fn load_remote_operation(
+    database: &worker::D1Database,
+    user_id: &str,
+    device_id: &str,
+    session_id: &str,
+    request_id: &str,
+) -> Result<Option<RemoteComputerOperationRow>> {
+    worker::query!(
+        database,
+        "SELECT operation_id, request_id, session_id, client_id, tool_name,
+                request_sha256, sensitive_result, state, result_sha256, result_json,
+                created_at, updated_at
+         FROM remote_computer_operations
+         WHERE user_id = ?1 AND device_id = ?2 AND session_id = ?3 AND request_id = ?4
+         LIMIT 1",
+        user_id,
+        device_id,
+        session_id,
+        request_id
+    )?
+    .first::<RemoteComputerOperationRow>(None)
+    .await
+}
+
+fn remote_operation_json(row: &RemoteComputerOperationRow) -> Value {
+    let result = row
+        .result_json
+        .as_ref()
+        .and_then(|value| serde_json::from_str::<Value>(value).ok());
+    json!({
+        "operationId": row.operation_id,
+        "requestId": row.request_id,
+        "sessionId": row.session_id,
+        "clientId": row.client_id,
+        "toolName": row.tool_name,
+        "requestSha256": row.request_sha256,
+        "sensitiveResult": row.sensitive_result != 0,
+        "state": row.state,
+        "resultSha256": row.result_sha256,
+        "result": result,
+        "createdAt": row.created_at,
+        "updatedAt": row.updated_at,
+    })
+}
+
+pub(super) async fn remote_computer_operation_create(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_account(&request, &context.env) {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let session_id = route_identifier(&context, "session_id")?.to_string();
+    let input: RemoteComputerOperationCreateRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_remote_operation",
+                "Operation request must be valid JSON.",
+            );
+        }
+    };
+    if !valid_relay_identifier(&input.client_id, 160) {
+        return error_response(400, "invalid_client_id", "clientId is invalid.");
+    }
+    let Some(request_id) = remote_mobile_request_id(&input.request_id) else {
+        return error_response(
+            400,
+            "invalid_request_id",
+            "requestId must be a stable bounded operation identity.",
+        );
+    };
+    let Some(tool_name) = remote_operation_tool_name(&input.tool_name) else {
+        return error_response(400, "invalid_tool_name", "toolName is invalid.");
+    };
+    let Some(request_sha256) = remote_operation_sha256(&input.request_sha256) else {
+        return error_response(
+            400,
+            "invalid_request_digest",
+            "requestSha256 must be 64 lowercase hexadecimal characters.",
+        );
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    if !remote_operation_controller_authorized(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &input.client_id,
+        &input.mobile_token,
+        now,
+    )
+    .await?
+    {
+        return error_response(
+            403,
+            "control_session_forbidden",
+            "This controller cannot create operations for the control session.",
+        );
+    }
+
+    let operation_id = format!("remote-operation-{}", Uuid::new_v4());
+    worker::query!(
+        &database,
+        "INSERT OR IGNORE INTO remote_computer_operations
+         (operation_id, request_id, session_id, user_id, device_id, client_id, tool_name,
+          request_sha256, sensitive_result, state, result_sha256, result_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', NULL, NULL, ?10, ?10)",
+        &operation_id,
+        &request_id,
+        &session_id,
+        &account.user_id,
+        &device_id,
+        &input.client_id,
+        &tool_name,
+        &request_sha256,
+        if input.sensitive_result { 1 } else { 0 },
+        now
+    )?
+    .run()
+    .await?;
+
+    let Some(existing) = load_remote_operation(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+    )
+    .await?
+    else {
+        return error_response(
+            500,
+            "operation_journal_unavailable",
+            "Operation journal did not retain the request identity.",
+        );
+    };
+    if existing.client_id != input.client_id
+        || existing.tool_name != tool_name
+        || existing.request_sha256 != request_sha256
+        || (existing.sensitive_result != 0) != input.sensitive_result
+    {
+        return error_response(
+            409,
+            "operation_request_conflict",
+            "requestId is already bound to a different remote operation.",
+        );
+    }
+    Ok(Response::from_json(&remote_operation_json(&existing))?.with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_operation_query(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_account(&request, &context.env) {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let session_id = route_identifier(&context, "session_id")?.to_string();
+    let request_id = route_identifier(&context, "request_id")?.to_string();
+    let input: RemoteComputerOperationControllerRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => return error_response(400, "invalid_operation_query", "Operation query must be valid JSON."),
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    if !remote_operation_controller_authorized(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &input.client_id,
+        &input.mobile_token,
+        now,
+    )
+    .await?
+    {
+        return error_response(
+            403,
+            "control_session_forbidden",
+            "This controller cannot query operations for the control session.",
+        );
+    }
+    let Some(operation) = load_remote_operation(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+    )
+    .await?
+    else {
+        return error_response(404, "operation_not_found", "Remote operation was not found.");
+    };
+    if operation.client_id != input.client_id {
+        return error_response(403, "operation_forbidden", "Remote operation belongs to another client.");
+    }
+    Ok(Response::from_json(&remote_operation_json(&operation))?.with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_operation_outcome_unknown(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_account(&request, &context.env) {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let session_id = route_identifier(&context, "session_id")?.to_string();
+    let request_id = route_identifier(&context, "request_id")?.to_string();
+    let input: RemoteComputerOperationControllerRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => return error_response(400, "invalid_operation_update", "Operation update must be valid JSON."),
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    if !remote_operation_controller_authorized(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &input.client_id,
+        &input.mobile_token,
+        now,
+    )
+    .await?
+    {
+        return error_response(403, "control_session_forbidden", "This controller cannot update the operation.");
+    }
+    worker::query!(
+        &database,
+        "UPDATE remote_computer_operations
+         SET state = 'outcome_unknown', updated_at = ?1
+         WHERE user_id = ?2 AND device_id = ?3 AND session_id = ?4 AND request_id = ?5
+           AND client_id = ?6 AND state IN ('pending','running')",
+        now,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+        &input.client_id
+    )?
+    .run()
+    .await?;
+    let Some(operation) = load_remote_operation(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+    )
+    .await?
+    else {
+        return error_response(404, "operation_not_found", "Remote operation was not found.");
+    };
+    if operation.client_id != input.client_id {
+        return error_response(403, "operation_forbidden", "Remote operation belongs to another client.");
+    }
+    if operation.state != "outcome_unknown" {
+        return error_response(
+            409,
+            "operation_state_conflict",
+            "Only pending or running operations can become outcome_unknown.",
+        );
+    }
+    Ok(Response::from_json(&remote_operation_json(&operation))?.with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_operation_cancel(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_account(&request, &context.env) {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let session_id = route_identifier(&context, "session_id")?.to_string();
+    let request_id = route_identifier(&context, "request_id")?.to_string();
+    let input: RemoteComputerOperationControllerRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => return error_response(400, "invalid_operation_cancel", "Operation cancellation must be valid JSON."),
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    if !remote_operation_controller_authorized(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &input.client_id,
+        &input.mobile_token,
+        now,
+    )
+    .await?
+    {
+        return error_response(403, "control_session_forbidden", "This controller cannot cancel the operation.");
+    }
+    worker::query!(
+        &database,
+        "UPDATE remote_computer_operations
+         SET state = 'cancelled', updated_at = ?1
+         WHERE user_id = ?2 AND device_id = ?3 AND session_id = ?4 AND request_id = ?5
+           AND client_id = ?6 AND state = 'pending'",
+        now,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+        &input.client_id
+    )?
+    .run()
+    .await?;
+    let Some(operation) = load_remote_operation(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+    )
+    .await?
+    else {
+        return error_response(404, "operation_not_found", "Remote operation was not found.");
+    };
+    if operation.client_id != input.client_id {
+        return error_response(403, "operation_forbidden", "Remote operation belongs to another client.");
+    }
+    if operation.state != "cancelled" {
+        return error_response(
+            409,
+            "operation_state_conflict",
+            "Only pending operations can be cancelled.",
+        );
+    }
+    Ok(Response::from_json(&remote_operation_json(&operation))?.with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_operation_claim(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_account(&request, &context.env) {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let session_id = route_identifier(&context, "session_id")?.to_string();
+    let request_id = route_identifier(&context, "request_id")?.to_string();
+    let input: RemoteComputerOperationTargetRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => return error_response(400, "invalid_operation_claim", "Operation claim must be valid JSON."),
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    let Some(client_id) = remote_operation_target_authorized(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &input.device_secret,
+        now,
+    )
+    .await?
+    else {
+        return error_response(403, "control_session_forbidden", "This device cannot claim the operation.");
+    };
+    worker::query!(
+        &database,
+        "UPDATE remote_computer_operations
+         SET state = 'running', updated_at = ?1
+         WHERE user_id = ?2 AND device_id = ?3 AND session_id = ?4 AND request_id = ?5
+           AND client_id = ?6 AND state = 'pending'",
+        now,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+        &client_id
+    )?
+    .run()
+    .await?;
+    let Some(operation) = load_remote_operation(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+    )
+    .await?
+    else {
+        return error_response(404, "operation_not_found", "Remote operation was not found.");
+    };
+    if operation.client_id != client_id {
+        return error_response(403, "operation_forbidden", "Remote operation belongs to another client.");
+    }
+    if operation.state != "running" {
+        return error_response(
+            409,
+            "operation_state_conflict",
+            "Only pending operations can be claimed for execution.",
+        );
+    }
+    Ok(Response::from_json(&remote_operation_json(&operation))?.with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_operation_result(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_account(&request, &context.env) {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let session_id = route_identifier(&context, "session_id")?.to_string();
+    let request_id = route_identifier(&context, "request_id")?.to_string();
+    let input: RemoteComputerOperationResultRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => return error_response(400, "invalid_operation_result", "Operation result must be valid JSON."),
+    };
+    let Some(status) = remote_operation_result_status(&input.status) else {
+        return error_response(400, "invalid_operation_status", "Result status must be completed or failed.");
+    };
+    let Some(result_sha256) = remote_operation_sha256(&input.result_sha256) else {
+        return error_response(400, "invalid_result_digest", "resultSha256 must be 64 lowercase hexadecimal characters.");
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    let Some(client_id) = remote_operation_target_authorized(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &input.device_secret,
+        now,
+    )
+    .await?
+    else {
+        return error_response(403, "control_session_forbidden", "This device cannot publish operation results.");
+    };
+    let Some(existing) = load_remote_operation(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+    )
+    .await?
+    else {
+        return error_response(404, "operation_not_found", "Remote operation was not found.");
+    };
+    if existing.client_id != client_id {
+        return error_response(403, "operation_forbidden", "Remote operation belongs to another client.");
+    }
+    if existing.sensitive_result != 0 && input.result.is_some() {
+        return error_response(
+            400,
+            "sensitive_result_plaintext_forbidden",
+            "Sensitive operation results may only persist status and digest.",
+        );
+    }
+    let result_json = if existing.sensitive_result != 0 {
+        None
+    } else {
+        match input.result.as_ref() {
+            Some(value) => {
+                let value = serde_json::to_string(value)
+                    .map_err(|error| worker::Error::RustError(error.to_string()))?;
+                if value.as_bytes().len() > REMOTE_OPERATION_MAX_RESULT_BYTES {
+                    return error_response(
+                        413,
+                        "operation_result_too_large",
+                        "Operation result exceeds the durable reconciliation limit.",
+                    );
+                }
+                Some(value)
+            }
+            None => None,
+        }
+    };
+
+    worker::query!(
+        &database,
+        "UPDATE remote_computer_operations
+         SET state = ?1, result_sha256 = ?2, result_json = ?3, updated_at = ?4
+         WHERE user_id = ?5 AND device_id = ?6 AND session_id = ?7 AND request_id = ?8
+           AND client_id = ?9 AND state IN ('running','outcome_unknown')",
+        &status,
+        &result_sha256,
+        result_json.as_deref(),
+        now,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+        &client_id
+    )?
+    .run()
+    .await?;
+
+    let Some(operation) = load_remote_operation(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+    )
+    .await?
+    else {
+        return error_response(404, "operation_not_found", "Remote operation was not found.");
+    };
+    if matches!(operation.state.as_str(), "completed" | "failed")
+        && operation.state == status
+        && operation.result_sha256.as_deref() == Some(result_sha256.as_str())
+    {
+        return Ok(Response::from_json(&remote_operation_json(&operation))?.with_headers(auth_headers()));
+    }
+    error_response(
+        409,
+        "operation_result_conflict",
+        "Operation is not executable or a different terminal result is already recorded.",
+    )
+}
+
 pub(super) async fn remote_computer_session_activate(
     mut request: Request,
     context: RouteContext<()>,
@@ -2146,6 +2853,28 @@ mod remote_mobile_session_tests {
         ] {
             assert_ne!(base, changed);
         }
+    }
+
+    #[test]
+    fn operation_identifiers_and_digests_are_bounded() {
+        assert_eq!(
+            remote_operation_tool_name("browser.click").as_deref(),
+            Some("browser.click")
+        );
+        assert!(remote_operation_tool_name("contains space").is_none());
+        assert!(remote_operation_tool_name(&"x".repeat(129)).is_none());
+        assert!(remote_operation_sha256(&"a".repeat(64)).is_some());
+        assert!(remote_operation_sha256(&"A".repeat(64)).is_none());
+        assert!(remote_operation_sha256("abc").is_none());
+        assert_eq!(
+            remote_operation_result_status("completed").as_deref(),
+            Some("completed")
+        );
+        assert_eq!(
+            remote_operation_result_status("failed").as_deref(),
+            Some("failed")
+        );
+        assert!(remote_operation_result_status("pending").is_none());
     }
 
     #[test]

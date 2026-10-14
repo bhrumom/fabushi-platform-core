@@ -530,6 +530,30 @@ pub async fn main(request: Request, env: Env, _context: Context) -> Result<Respo
             remote_computer_session_reconcile,
         )
         .post_async(
+            "/v1/computers/:device_id/sessions/:session_id/operations",
+            remote_computer_operation_create,
+        )
+        .post_async(
+            "/v1/computers/:device_id/sessions/:session_id/operations/:request_id/query",
+            remote_computer_operation_query,
+        )
+        .post_async(
+            "/v1/computers/:device_id/sessions/:session_id/operations/:request_id/outcome-unknown",
+            remote_computer_operation_outcome_unknown,
+        )
+        .post_async(
+            "/v1/computers/:device_id/sessions/:session_id/operations/:request_id/cancel",
+            remote_computer_operation_cancel,
+        )
+        .post_async(
+            "/v1/computers/:device_id/sessions/:session_id/operations/:request_id/claim",
+            remote_computer_operation_claim,
+        )
+        .post_async(
+            "/v1/computers/:device_id/sessions/:session_id/operations/:request_id/result",
+            remote_computer_operation_result,
+        )
+        .post_async(
             "/v1/computers/:device_id/sessions/:session_id/activate",
             remote_computer_session_activate,
         )

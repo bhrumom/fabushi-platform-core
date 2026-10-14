@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - "docs/specs/fdn-001-remote-computer-session-reconciliation.md"
+      - "docs/specs/fdn-001-remote-computer-operation-journal.md"
+      - "docs/specs/fdn-001-remote-computer-operation-journal.md"
       - "third_party/mahayana/mahayana-rs/mahayana-platform-worker/**"
       - "deploy/platform-worker/**"
       - ".github/workflows/fdn-session-reconcile.yml"
@@ -25,6 +27,21 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+      - name: Bind exact tested HEAD
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            expected="${{ github.event.pull_request.head.sha }}"
+          else
+            expected="${{ github.sha }}"
+          fi
+          test "$actual" = "$expected"
+          echo "Exact tested HEAD: $actual" >> "$GITHUB_STEP_SUMMARY"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
