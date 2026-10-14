@@ -1043,3 +1043,115 @@ fn official_mcp_controller_network_route_is_service_only_minimal_and_live_bound(
         "controller network-route endpoint is not wired"
     );
 }
+
+#[test]
+fn remote_computer_target_network_ingress_is_authority_written_account_cell_fenced_and_secret_safe() {
+    for required in [
+        "CREATE TABLE IF NOT EXISTS remote_computer_network_ingress_bindings",
+        "PRIMARY KEY (user_id, cell_id, service_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS remote_computer_network_ingress_live_node_idx",
+        "generation INTEGER NOT NULL CHECK (generation >= 1)",
+        "remote network ingress identity or generation cannot move backwards",
+        "remote_computer_network_ingress_audit",
+        "'bound','rotated','revoked'",
+    ] {
+        assert!(
+            REMOTE_COMPUTER_NETWORK_INGRESS_SCHEMA_V34.contains(required),
+            "missing target ingress schema invariant: {required}"
+        );
+    }
+    for forbidden in [
+        "device_secret TEXT",
+        "client_token TEXT",
+        "mobile_token TEXT",
+        "access_token TEXT",
+        "refresh_token TEXT",
+        "auth_key TEXT",
+        "private_key TEXT",
+        "proof_sha256 TEXT",
+    ] {
+        assert!(
+            !REMOTE_COMPUTER_NETWORK_INGRESS_SCHEMA_V34
+                .to_ascii_lowercase()
+                .contains(&forbidden.to_ascii_lowercase()),
+            "target ingress projection must not persist protected credential material: {forbidden}"
+        );
+    }
+
+    let start = REMOTE_COMPUTER_WORKER_SOURCE
+        .find("pub(super) async fn remote_computer_network_ingress(")
+        .expect("target network ingress reader must exist");
+    let rest = &REMOTE_COMPUTER_WORKER_SOURCE[start..];
+    let end = rest
+        .find("pub(super) async fn remote_computer_network_ingress_bind(")
+        .expect("target network ingress reader must precede bind handler");
+    let target_read = &rest[..end];
+    for required in [
+        "authenticated_account(&request, &context.env)",
+        "remote_desktop_secret_matches(",
+        "remote_computer_network_bindings target",
+        "remote_computer_network_ingress_bindings ingress",
+        "ingress.user_id = target.user_id",
+        "ingress.cell_id = target.cell_id",
+        "target.revoked_at IS NULL",
+        "target.expires_at > ?3",
+        "ingress.revoked_at IS NULL",
+        "ingress.expires_at > ?3",
+        r#""targetGeneration": row.target_generation"#,
+        r#""nodeId": row.node_id"#,
+        r#""ingressGeneration": row.ingress_generation"#,
+    ] {
+        assert!(
+            target_read.contains(required),
+            "missing target ingress read fence: {required}"
+        );
+    }
+    for forbidden in [
+        "remote_network_authority_allowed(",
+        "proof_sha256",
+        "proofSha256",
+        "client_token",
+        "clientToken",
+        "mobile_token",
+        "mobileToken",
+        "authKey",
+    ] {
+        assert!(
+            !target_read.contains(forbidden),
+            "target ingress read must not expose unrelated authority or secret material: {forbidden}"
+        );
+    }
+
+    let bind_start = REMOTE_COMPUTER_WORKER_SOURCE
+        .find("pub(super) async fn remote_computer_network_ingress_bind(")
+        .expect("network ingress bind handler");
+    let bind_rest = &REMOTE_COMPUTER_WORKER_SOURCE[bind_start..];
+    let revoke_start = bind_rest
+        .find("pub(super) async fn remote_computer_network_ingress_revoke(")
+        .expect("network ingress revoke handler");
+    let bind = &bind_rest[..revoke_start];
+    let revoke_rest = &bind_rest[revoke_start..];
+    let revoke_end = revoke_rest
+        .find("pub(super) async fn remote_computer_network_enrollment_issue(")
+        .expect("network ingress revoke must precede enrollment issue");
+    let revoke = &revoke_rest[..revoke_end];
+    for source in [bind, revoke] {
+        assert!(source.contains("remote_network_authority_allowed(&request, &context.env)"));
+        assert!(source.contains("remote_network_service_id(&input.service_id)"));
+    }
+    assert!(bind.contains("excluded.generation > remote_computer_network_ingress_bindings.generation"));
+    assert!(bind.contains("network_ingress_generation_conflict"));
+    assert!(revoke.contains("generation = ?5 AND revoked_at IS NULL"));
+
+    for route in [
+        "/v1/computers/network-ingress",
+        "/v1/internal/computers/network-ingress/bind",
+        "/v1/internal/computers/network-ingress/revoke",
+    ] {
+        assert!(
+            WORKER_ROUTER_SOURCE.contains(route),
+            "target ingress endpoint is not wired: {route}"
+        );
+    }
+}
+
