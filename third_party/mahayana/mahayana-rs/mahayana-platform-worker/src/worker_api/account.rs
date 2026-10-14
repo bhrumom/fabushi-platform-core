@@ -1818,6 +1818,528 @@ fn browser_result_page_with_status(
     ))
 }
 
+fn official_mcp_service_scopes(scopes: &[String]) -> Option<Vec<String>> {
+    if scopes.is_empty() || scopes.len() > 2 {
+        return None;
+    }
+    let mut normalized = scopes
+        .iter()
+        .map(|scope| scope.trim().to_string())
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    if normalized.len() != scopes.len()
+        || normalized.first().map(String::as_str) != Some("devices.read")
+        || normalized
+            .iter()
+            .any(|scope| !matches!(scope.as_str(), "devices.read" | "devices.control"))
+    {
+        return None;
+    }
+    Some(normalized)
+}
+
+fn official_mcp_resource(value: &str) -> Option<String> {
+    let url = Url::parse(value.trim()).ok()?;
+    if url.scheme() != "https"
+        || url.host_str() != Some("api.ombhrum.com")
+        || url.username() != ""
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    Some(url.to_string())
+}
+
+fn external_client_hash(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 256
+        || value.bytes().any(|byte| byte.is_ascii_control())
+    {
+        return None;
+    }
+    Some(format!("{:x}", Sha256::digest(value.as_bytes())))
+}
+
+fn service_connection_id(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.len() < 8
+        || value.len() > 160
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.'))
+    {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn issue_official_mcp_service_access_token(
+    env: &Env,
+    user_id: &str,
+    parent_session_id: &str,
+    delegation_id: &str,
+    connection_id: &str,
+    external_client_id_hash: &str,
+    resource: &str,
+    scopes: Vec<String>,
+    now: i64,
+) -> Result<(String, i64)> {
+    let expires_at = now + SERVICE_ACCESS_TOKEN_SECONDS;
+    let claims = ServiceAccessTokenClaims {
+        iss: ACCESS_TOKEN_ISSUER.to_string(),
+        sub: user_id.to_string(),
+        aud: "service:official-device-mcp".to_string(),
+        scope: scopes,
+        service_id: "official-device-mcp".to_string(),
+        resource: resource.to_string(),
+        external_client_id_hash: external_client_id_hash.to_string(),
+        connection_id: connection_id.to_string(),
+        sid: parent_session_id.to_string(),
+        delegation_id: delegation_id.to_string(),
+        jti: Uuid::new_v4().to_string(),
+        iat: usize::try_from(now).unwrap_or_default(),
+        exp: usize::try_from(expires_at).unwrap_or(usize::MAX),
+        token_use: "service".to_string(),
+    };
+    let private_key = env.secret("ACCESS_TOKEN_PRIVATE_KEY_PEM")?.to_string();
+    let key = EncodingKey::from_rsa_pem(private_key.as_bytes()).map_err(jwt_error)?;
+    let mut header = Header::new(Algorithm::RS256);
+    header.typ = Some("JWT".to_string());
+    header.kid = Some(env.var("ACCESS_TOKEN_KEY_ID")?.to_string());
+    let token = encode(&header, &claims, &key).map_err(jwt_error)?;
+    Ok((token, expires_at))
+}
+
+pub(super) async fn official_mcp_service_token_create(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_session_account(&request, &context.env).await {
+        Ok(account) => account,
+        Err(_) => {
+            return error_response(
+                401,
+                "session_required",
+                "Active Fabushi session required for service delegation.",
+            );
+        }
+    };
+    let input: ServiceDelegationCreateRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_service_delegation",
+                "Invalid service delegation request.",
+            );
+        }
+    };
+    if input.service_id != "official-device-mcp" {
+        return error_response(
+            400,
+            "invalid_service_id",
+            "Only the Fabushi official device MCP may use this delegation surface.",
+        );
+    }
+    let Some(connection_id) = service_connection_id(&input.connection_id) else {
+        return error_response(400, "invalid_connection_id", "connectionId is invalid.");
+    };
+    let Some(client_hash) = external_client_hash(&input.external_client_id) else {
+        return error_response(
+            400,
+            "invalid_external_client",
+            "externalClientId is invalid.",
+        );
+    };
+    let Some(resource) = official_mcp_resource(&input.resource) else {
+        return error_response(
+            400,
+            "invalid_resource",
+            "Official MCP resource must use api.ombhrum.com HTTPS.",
+        );
+    };
+    let Some(scopes) = official_mcp_service_scopes(&input.scopes) else {
+        return error_response(
+            400,
+            "invalid_scope",
+            "Delegation requires devices.read and may additionally include devices.control.",
+        );
+    };
+    let Some(parent_session_id) = account.session_id.as_deref() else {
+        return error_response(401, "session_required", "Active Fabushi session required.");
+    };
+    #[derive(Debug, Deserialize)]
+    struct ParentSessionExpiryRow {
+        expires_at: i64,
+    }
+    let database = context.env.d1(ACCOUNT_DATABASE_BINDING)?;
+    let Some(parent) = worker::query!(
+        &database,
+        "SELECT expires_at FROM account_sessions
+         WHERE session_id = ?1 AND user_id = ?2 AND revoked_at IS NULL LIMIT 1",
+        parent_session_id,
+        &account.user_id
+    )?
+    .first::<ParentSessionExpiryRow>(None)
+    .await?
+    else {
+        return error_response(
+            401,
+            "session_required",
+            "Parent Fabushi session is no longer active.",
+        );
+    };
+    let now = now_seconds();
+    if parent.expires_at <= now {
+        return error_response(
+            401,
+            "session_required",
+            "Parent Fabushi session is expired.",
+        );
+    }
+
+    let delegation_id = format!("service-delegation-{}", Uuid::new_v4());
+    let refresh_token = new_service_refresh_token();
+    let refresh_hash = hash_refresh_token(&refresh_token);
+    let scopes_json = serde_json::to_string(&scopes)
+        .map_err(|error| worker::Error::RustError(error.to_string()))?;
+    let statements = vec![
+        worker::query!(
+            &database,
+            "INSERT INTO account_service_delegations
+             (delegation_id,user_id,parent_session_id,service_id,connection_id,
+              external_client_id_hash,resource,scopes_json,current_refresh_token_hash,
+              created_at,last_used_at,expires_at,revoked_at,revoked_reason)
+             VALUES (?1,?2,?3,'official-device-mcp',?4,?5,?6,?7,?8,?9,?9,?10,NULL,NULL)",
+            &delegation_id,
+            &account.user_id,
+            parent_session_id,
+            &connection_id,
+            &client_hash,
+            &resource,
+            &scopes_json,
+            &refresh_hash,
+            now,
+            parent.expires_at
+        )?,
+        worker::query!(
+            &database,
+            "INSERT INTO account_service_refresh_tokens
+             (token_hash,delegation_id,generation,state,issued_at,expires_at,used_at,replaced_by_hash)
+             VALUES (?1,?2,0,'active',?3,?4,NULL,NULL)",
+            &refresh_hash,
+            &delegation_id,
+            now,
+            parent.expires_at
+        )?,
+    ];
+    if database.batch(statements).await.is_err() {
+        return error_response(
+            409,
+            "service_delegation_conflict",
+            "This official MCP connection already has a delegation for the active Fabushi session.",
+        );
+    }
+    let (access_token, access_expires_at) = issue_official_mcp_service_access_token(
+        &context.env,
+        &account.user_id,
+        parent_session_id,
+        &delegation_id,
+        &connection_id,
+        &client_hash,
+        &resource,
+        scopes,
+        now,
+    )?;
+    Response::from_json(&json!({
+        "accessToken": access_token,
+        "refreshToken": refresh_token,
+        "tokenType": "Bearer",
+        "expiresIn": SERVICE_ACCESS_TOKEN_SECONDS,
+        "accessTokenExpiresAt": access_expires_at,
+        "refreshTokenExpiresAt": parent.expires_at,
+        "delegationId": delegation_id,
+    }))
+}
+
+pub(super) async fn official_mcp_service_token_refresh(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let input: ServiceDelegationRefreshRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_service_refresh",
+                "Invalid service refresh request.",
+            );
+        }
+    };
+    if !input.refresh_token.starts_with("msr_") || input.refresh_token.len() != 68 {
+        return error_response(
+            401,
+            "invalid_service_refresh",
+            "Service refresh credential is invalid.",
+        );
+    }
+    let Some(connection_id) = service_connection_id(&input.connection_id) else {
+        return error_response(400, "invalid_connection_id", "connectionId is invalid.");
+    };
+    let Some(client_hash) = external_client_hash(&input.external_client_id) else {
+        return error_response(
+            400,
+            "invalid_external_client",
+            "externalClientId is invalid.",
+        );
+    };
+    let Some(resource) = official_mcp_resource(&input.resource) else {
+        return error_response(400, "invalid_resource", "Official MCP resource is invalid.");
+    };
+
+    let database = context.env.d1(ACCOUNT_DATABASE_BINDING)?;
+    let token_hash = hash_refresh_token(&input.refresh_token);
+    let row = worker::query!(
+        &database,
+        "SELECT rt.token_hash,rt.delegation_id,rt.generation,rt.state,rt.expires_at,
+                d.user_id,d.parent_session_id,d.service_id,d.connection_id,
+                d.external_client_id_hash,d.resource,d.scopes_json,d.current_refresh_token_hash,
+                d.expires_at AS delegation_expires_at,d.revoked_at AS delegation_revoked_at,
+                s.expires_at AS parent_expires_at,s.revoked_at AS parent_revoked_at
+         FROM account_service_refresh_tokens rt
+         JOIN account_service_delegations d ON d.delegation_id = rt.delegation_id
+         JOIN account_sessions s ON s.session_id = d.parent_session_id
+         WHERE rt.token_hash = ?1 AND rt.delegation_id = ?2 LIMIT 1",
+        &token_hash,
+        &input.delegation_id
+    )?
+    .first::<ServiceDelegationRefreshRow>(None)
+    .await?;
+    let Some(row) = row else {
+        return error_response(
+            401,
+            "invalid_service_refresh",
+            "Service refresh credential is invalid.",
+        );
+    };
+    let now = now_seconds();
+    if row.state != "active" {
+        database
+            .batch(vec![
+                worker::query!(
+                    &database,
+                    "UPDATE account_service_delegations
+                     SET revoked_at=COALESCE(revoked_at,?1),
+                         revoked_reason=COALESCE(revoked_reason,'refresh_token_reuse')
+                     WHERE delegation_id=?2",
+                    now,
+                    &row.delegation_id
+                )?,
+                worker::query!(
+                    &database,
+                    "UPDATE account_service_refresh_tokens SET state='revoked'
+                     WHERE delegation_id=?1 AND state='active'",
+                    &row.delegation_id
+                )?,
+            ])
+            .await?;
+        return error_response(
+            401,
+            "service_refresh_reused",
+            "Service delegation was revoked after refresh credential reuse.",
+        );
+    }
+    if row.service_id != "official-device-mcp"
+        || row.connection_id != connection_id
+        || row.external_client_id_hash != client_hash
+        || row.resource != resource
+        || row.current_refresh_token_hash != token_hash
+    {
+        return error_response(
+            401,
+            "service_binding_mismatch",
+            "Service refresh credential binding does not match.",
+        );
+    }
+    if row.delegation_revoked_at.is_some()
+        || row.parent_revoked_at.is_some()
+        || row.expires_at <= now
+        || row.delegation_expires_at <= now
+        || row.parent_expires_at <= now
+    {
+        return error_response(
+            401,
+            "service_delegation_expired",
+            "Service delegation or its parent Fabushi session is no longer active.",
+        );
+    }
+    let scopes = serde_json::from_str::<Vec<String>>(&row.scopes_json).unwrap_or_default();
+    let Some(scopes) = official_mcp_service_scopes(&scopes) else {
+        return error_response(
+            401,
+            "service_scope_invalid",
+            "Stored service delegation scopes are invalid.",
+        );
+    };
+
+    let next_refresh = new_service_refresh_token();
+    let next_hash = hash_refresh_token(&next_refresh);
+    let next_generation = row.generation + 1;
+    let refresh_expires_at = row.parent_expires_at.min(row.delegation_expires_at);
+    let statements = vec![
+        worker::query!(
+            &database,
+            "UPDATE account_service_refresh_tokens
+             SET state='used',used_at=?1,replaced_by_hash=?2
+             WHERE token_hash=?3 AND state='active'",
+            now,
+            &next_hash,
+            &row.token_hash
+        )?,
+        worker::query!(
+            &database,
+            "INSERT INTO account_service_refresh_tokens
+             (token_hash,delegation_id,generation,state,issued_at,expires_at,used_at,replaced_by_hash)
+             VALUES (?1,?2,?3,'active',?4,?5,NULL,NULL)",
+            &next_hash,
+            &row.delegation_id,
+            next_generation,
+            now,
+            refresh_expires_at
+        )?,
+        worker::query!(
+            &database,
+            "UPDATE account_service_delegations
+             SET current_refresh_token_hash=?1,last_used_at=?2
+             WHERE delegation_id=?3 AND revoked_at IS NULL",
+            &next_hash,
+            now,
+            &row.delegation_id
+        )?,
+    ];
+    if database.batch(statements).await.is_err() {
+        return error_response(
+            409,
+            "service_refresh_conflict",
+            "Service refresh rotation conflicted; use the latest credential.",
+        );
+    }
+    let (access_token, access_expires_at) = issue_official_mcp_service_access_token(
+        &context.env,
+        &row.user_id,
+        &row.parent_session_id,
+        &row.delegation_id,
+        &row.connection_id,
+        &row.external_client_id_hash,
+        &row.resource,
+        scopes,
+        now,
+    )?;
+    Response::from_json(&json!({
+        "accessToken": access_token,
+        "refreshToken": next_refresh,
+        "tokenType": "Bearer",
+        "expiresIn": SERVICE_ACCESS_TOKEN_SECONDS,
+        "accessTokenExpiresAt": access_expires_at,
+        "refreshTokenExpiresAt": refresh_expires_at,
+        "delegationId": row.delegation_id,
+    }))
+}
+
+fn official_mcp_service_claims(request: &Request, env: &Env) -> Result<ServiceAccessTokenClaims> {
+    let authorization = request
+        .headers()
+        .get("Authorization")?
+        .ok_or_else(|| worker::Error::RustError("missing Authorization header".into()))?;
+    let token = authorization
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| worker::Error::RustError("invalid Authorization scheme".into()))?;
+    let public_key = env.secret("ACCESS_TOKEN_PUBLIC_KEY_PEM")?.to_string();
+    let key = DecodingKey::from_rsa_pem(public_key.as_bytes()).map_err(jwt_error)?;
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_issuer(&[ACCESS_TOKEN_ISSUER]);
+    validation.set_audience(&["service:official-device-mcp"]);
+    decode::<ServiceAccessTokenClaims>(token, &key, &validation)
+        .map(|decoded| decoded.claims)
+        .map_err(jwt_error)
+}
+
+pub(super) async fn official_mcp_service_token_revoke(
+    request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account =
+        match authenticated_official_mcp_service(&request, &context.env, "devices.read").await {
+            Ok(account) => account,
+            Err(_) => {
+                return error_response(
+                    401,
+                    "invalid_service_token",
+                    "Official MCP service credential is invalid.",
+                );
+            }
+        };
+    let claims = official_mcp_service_claims(&request, &context.env)?;
+    let database = context.env.d1(ACCOUNT_DATABASE_BINDING)?;
+    let now = now_seconds();
+    database
+        .batch(vec![
+            worker::query!(
+                &database,
+                "UPDATE account_service_delegations
+                 SET revoked_at=COALESCE(revoked_at,?1),
+                     revoked_reason=COALESCE(revoked_reason,'service_revoke')
+                 WHERE delegation_id=?2 AND user_id=?3",
+                now,
+                &claims.delegation_id,
+                &account.user_id
+            )?,
+            worker::query!(
+                &database,
+                "UPDATE account_service_refresh_tokens SET state='revoked'
+                 WHERE delegation_id=?1 AND state='active'",
+                &claims.delegation_id
+            )?,
+        ])
+        .await?;
+    Response::from_json(&json!({
+        "revoked": true,
+        "delegationId": claims.delegation_id,
+    }))
+}
+
+pub(super) async fn official_mcp_service_token_introspect(
+    request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account =
+        match authenticated_official_mcp_service(&request, &context.env, "devices.read").await {
+            Ok(account) => account,
+            Err(_) => {
+                return error_response(
+                    401,
+                    "invalid_service_token",
+                    "Official MCP service credential is invalid.",
+                );
+            }
+        };
+    let claims = official_mcp_service_claims(&request, &context.env)?;
+    Response::from_json(&json!({
+        "active": true,
+        "serviceId": claims.service_id,
+        "delegationId": claims.delegation_id,
+        "connectionId": claims.connection_id,
+        "resource": claims.resource,
+        "scopes": claims.scope,
+        "sessionBound": true,
+        "user": {"id": account.user_id},
+    }))
+}
+
 pub(super) async fn refresh_access_token(
     mut request: Request,
     context: RouteContext<()>,
