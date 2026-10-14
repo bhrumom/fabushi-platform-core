@@ -939,6 +939,79 @@ pub(super) async fn remote_computer_heartbeat(
     Ok(Response::from_json(&json!({"ok": true, "lastSeenAt": now}))?.with_headers(auth_headers()))
 }
 
+pub(super) async fn remote_computer_controller_network_route(
+    request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_official_mcp_service(
+        &request,
+        &context.env,
+        "devices.control",
+    )
+    .await
+    {
+        Ok(account) => account,
+        Err(_) => {
+            return error_response(
+                401,
+                "unauthorized",
+                "An official MCP devices.control service credential is required.",
+            );
+        }
+    };
+    let claims = match official_mcp_service_claims(&request, &context.env) {
+        Ok(claims) => claims,
+        Err(_) => {
+            return error_response(
+                401,
+                "unauthorized",
+                "Official MCP service binding claims are required.",
+            );
+        }
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    let row = worker::query!(
+        &database,
+        "SELECT binding.cell_id, binding.node_id, binding.proof_sha256,
+                binding.generation, binding.bound_at, binding.expires_at, binding.revoked_at
+         FROM remote_computer_network_bindings binding
+         JOIN remote_computers computer
+           ON computer.user_id = binding.user_id
+          AND computer.device_id = binding.device_id
+         WHERE binding.user_id = ?1
+           AND binding.device_id = ?2
+           AND binding.revoked_at IS NULL
+           AND binding.expires_at > ?3
+           AND computer.revoked_at IS NULL
+         LIMIT 1",
+        &account.user_id,
+        &device_id,
+        now
+    )?
+    .first::<RemoteComputerNetworkBindingRow>(None)
+    .await?;
+    let Some(row) = row else {
+        return error_response(
+            404,
+            "network_route_not_found",
+            "No live private network route is available for this computer.",
+        );
+    };
+    Ok(Response::from_json(&json!({
+        "deviceId": device_id,
+        "cellId": row.cell_id,
+        "nodeId": row.node_id,
+        "generation": row.generation,
+        "expiresAt": row.expires_at,
+        "connectionId": claims.connection_id,
+        "delegationId": claims.delegation_id,
+        "active": true,
+    }))?
+    .with_headers(auth_headers()))
+}
+
 pub(super) async fn remote_computer_network_binding(
     mut request: Request,
     context: RouteContext<()>,
