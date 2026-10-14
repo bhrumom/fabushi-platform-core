@@ -583,6 +583,15 @@ pub async fn main(request: Request, env: Env, _context: Context) -> Result<Respo
         .get_async("/v1/computers", remote_computer_list)
         .post_async("/v1/computers/register", remote_computer_register)
         .post_async("/v1/computers/heartbeat", remote_computer_heartbeat)
+        .post_async("/v1/computers/network-binding", remote_computer_network_binding)
+        .post_async(
+            "/v1/internal/computers/network-bindings/bind",
+            remote_computer_network_binding_bind,
+        )
+        .post_async(
+            "/v1/internal/computers/network-bindings/revoke",
+            remote_computer_network_binding_revoke,
+        )
         .post_async("/v1/computers/pair", remote_computer_pair)
         .get_async("/v1/computers/:device_id/clients", remote_computer_clients)
         .post_async(
