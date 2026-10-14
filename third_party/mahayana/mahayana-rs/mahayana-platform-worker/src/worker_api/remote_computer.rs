@@ -69,6 +69,16 @@ struct RemoteComputerPairRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerSessionGrantRequest {
+    device_secret: String,
+    connection_id: String,
+    delegation_id: String,
+    request_id: String,
+    label: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RemoteComputerSessionCreateRequest {
     client_id: String,
     client_token: String,
@@ -249,6 +259,14 @@ struct RemoteComputerClientRow {
 #[derive(Debug, Deserialize)]
 struct RemoteComputerClientAuthRow {
     client_token_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerTargetGrantClientRow {
+    client_id: String,
+    client_token_hash: String,
+    service_delegation_id: Option<String>,
+    target_grant_request_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -491,6 +509,50 @@ fn recoverable_remote_mobile_token(
 
 fn new_remote_client_token() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+fn recoverable_target_service_client_token(
+    device_secret: &str,
+    connection_id: &str,
+    delegation_id: &str,
+    request_id: &str,
+    client_id: &str,
+) -> String {
+    fn digest(
+        domain: &[u8],
+        device_secret: &str,
+        connection_id: &str,
+        delegation_id: &str,
+        request_id: &str,
+        client_id: &str,
+    ) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(domain);
+        for value in [device_secret, connection_id, delegation_id, request_id, client_id] {
+            hasher.update(value.as_bytes());
+            hasher.update([0]);
+        }
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
+    }
+    format!(
+        "rct_{}{}",
+        digest(
+            b"fabushi-remote-service-client-v1:a\0",
+            device_secret,
+            connection_id,
+            delegation_id,
+            request_id,
+            client_id,
+        ),
+        digest(
+            b"fabushi-remote-service-client-v1:b\0",
+            device_secret,
+            connection_id,
+            delegation_id,
+            request_id,
+            client_id,
+        ),
+    )
 }
 
 fn remote_label(value: &str) -> Option<String> {
@@ -1323,6 +1385,232 @@ pub(super) async fn remote_computer_pair(
         "clientLabel": label,
         "pairedAt": now,
         "serviceBound": service_binding.is_some(),
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_session_grant(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_account(&request, &context.env) {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let input: RemoteComputerSessionGrantRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_session_grant",
+                "Target session grant request must be valid JSON.",
+            );
+        }
+    };
+    if !valid_relay_identifier(&input.connection_id, 200)
+        || !valid_relay_identifier(&input.delegation_id, 200)
+    {
+        return error_response(
+            400,
+            "invalid_service_binding",
+            "Official MCP connection or delegation id is invalid.",
+        );
+    }
+    let Some(request_id) = remote_mobile_request_id(&input.request_id) else {
+        return error_response(
+            400,
+            "invalid_request_id",
+            "requestId must be a stable bounded target grant identity.",
+        );
+    };
+    let Some(label) = remote_label(&input.label) else {
+        return error_response(400, "invalid_client_label", "Client label is invalid.");
+    };
+
+    let database = context.env.d1(DATABASE_BINDING)?;
+    if !remote_desktop_secret_matches(
+        &database,
+        &account.user_id,
+        &device_id,
+        &input.device_secret,
+    )
+    .await?
+    {
+        return error_response(
+            403,
+            "target_device_forbidden",
+            "Target device authentication failed.",
+        );
+    }
+    if !active_official_mcp_service_binding(
+        &context.env,
+        &account.user_id,
+        &input.connection_id,
+        &input.delegation_id,
+        "devices.control",
+    )
+    .await?
+    {
+        return error_response(
+            403,
+            "service_binding_forbidden",
+            "Official MCP service binding is not active for this account.",
+        );
+    }
+
+    let recover_existing = |row: RemoteComputerTargetGrantClientRow| {
+        let token = recoverable_target_service_client_token(
+            &input.device_secret,
+            &input.connection_id,
+            &input.delegation_id,
+            &request_id,
+            &row.client_id,
+        );
+        let token_hash = remote_secret_hash(&token);
+        (row, token, token_hash)
+    };
+
+    if let Some(row) = worker::query!(
+        &database,
+        "SELECT client_id, client_token_hash, service_delegation_id, target_grant_request_id
+         FROM remote_computer_clients
+         WHERE user_id = ?1 AND device_id = ?2 AND service_connection_id = ?3
+           AND revoked_at IS NULL AND client_token_hash IS NOT NULL
+         LIMIT 1",
+        &account.user_id,
+        &device_id,
+        &input.connection_id
+    )?
+    .first::<RemoteComputerTargetGrantClientRow>(None)
+    .await?
+    {
+        if row.service_delegation_id.as_deref() != Some(input.delegation_id.as_str())
+            || row.target_grant_request_id.as_deref() != Some(request_id.as_str())
+        {
+            return error_response(
+                409,
+                "service_client_binding_conflict",
+                "This service connection is already bound by a different target grant.",
+            );
+        }
+        let (row, client_token, token_hash) = recover_existing(row);
+        if !constant_time_eq(token_hash.as_bytes(), row.client_token_hash.as_bytes()) {
+            return error_response(
+                409,
+                "service_client_recovery_conflict",
+                "The existing service-bound client credential cannot be recovered by this target grant.",
+            );
+        }
+        return Ok(Response::from_json(&json!({
+            "deviceId": device_id,
+            "clientId": row.client_id,
+            "clientToken": client_token,
+            "clientLabel": label,
+            "connectionId": input.connection_id,
+            "delegationId": input.delegation_id,
+            "requestId": request_id,
+            "serviceBound": true,
+            "targetGranted": true,
+            "reconciled": true,
+        }))?
+        .with_headers(auth_headers()));
+    }
+
+    let client_id = format!("remote-client-{}", Uuid::new_v4());
+    let client_token = recoverable_target_service_client_token(
+        &input.device_secret,
+        &input.connection_id,
+        &input.delegation_id,
+        &request_id,
+        &client_id,
+    );
+    let client_token_hash = remote_secret_hash(&client_token);
+    let now = now_seconds();
+    let inserted = worker::query!(
+        &database,
+        "INSERT OR IGNORE INTO remote_computer_clients
+         (client_id, device_id, user_id, label, paired_at, last_seen_at, revoked_at,
+          client_token_hash, service_connection_id, service_delegation_id, target_grant_request_id)
+         SELECT ?1, d.device_id, d.user_id, ?2, ?3, ?3, NULL, ?4, ?5, ?6, ?7
+         FROM remote_computers d
+         WHERE d.device_id = ?8 AND d.user_id = ?9 AND d.revoked_at IS NULL
+           AND (SELECT COUNT(*) FROM remote_computer_clients c
+                WHERE c.device_id = d.device_id AND c.user_id = d.user_id
+                  AND c.revoked_at IS NULL AND c.client_token_hash IS NOT NULL) < ?10",
+        &client_id,
+        &label,
+        now,
+        &client_token_hash,
+        &input.connection_id,
+        &input.delegation_id,
+        &request_id,
+        &device_id,
+        &account.user_id,
+        REMOTE_CLIENT_MAX_PER_DEVICE
+    )?
+    .run()
+    .await?;
+
+    if inserted.meta()?.and_then(|meta| meta.changes).unwrap_or(0) == 0 {
+        if let Some(row) = worker::query!(
+            &database,
+            "SELECT client_id, client_token_hash, service_delegation_id, target_grant_request_id
+             FROM remote_computer_clients
+             WHERE user_id = ?1 AND device_id = ?2 AND service_connection_id = ?3
+               AND revoked_at IS NULL AND client_token_hash IS NOT NULL
+             LIMIT 1",
+            &account.user_id,
+            &device_id,
+            &input.connection_id
+        )?
+        .first::<RemoteComputerTargetGrantClientRow>(None)
+        .await?
+        {
+            if row.service_delegation_id.as_deref() == Some(input.delegation_id.as_str())
+                && row.target_grant_request_id.as_deref() == Some(request_id.as_str())
+            {
+                let (row, recovered_token, recovered_hash) = recover_existing(row);
+                if constant_time_eq(recovered_hash.as_bytes(), row.client_token_hash.as_bytes()) {
+                    return Ok(Response::from_json(&json!({
+                        "deviceId": device_id,
+                        "clientId": row.client_id,
+                        "clientToken": recovered_token,
+                        "clientLabel": label,
+                        "connectionId": input.connection_id,
+                        "delegationId": input.delegation_id,
+                        "requestId": request_id,
+                        "serviceBound": true,
+                        "targetGranted": true,
+                        "reconciled": true,
+                    }))?
+                    .with_headers(auth_headers()));
+                }
+            }
+            return error_response(
+                409,
+                "service_client_binding_conflict",
+                "A concurrent or different target grant already owns this service connection.",
+            );
+        }
+        return error_response(
+            429,
+            "paired_client_limit",
+            "This computer has too many paired clients; revoke one before granting another controller.",
+        );
+    }
+
+    Ok(Response::from_json(&json!({
+        "deviceId": device_id,
+        "clientId": client_id,
+        "clientToken": client_token,
+        "clientLabel": label,
+        "connectionId": input.connection_id,
+        "delegationId": input.delegation_id,
+        "requestId": request_id,
+        "serviceBound": true,
+        "targetGranted": true,
+        "reconciled": false,
     }))?
     .with_headers(auth_headers()))
 }

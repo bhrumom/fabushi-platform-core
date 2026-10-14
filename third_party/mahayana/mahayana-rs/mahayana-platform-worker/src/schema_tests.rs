@@ -335,6 +335,79 @@ fn remote_computer_service_clients_are_connection_bound_and_secret_safe() {
 }
 
 #[test]
+fn target_service_session_grant_is_idempotent_secret_safe_and_target_only() {
+    for required in [
+        "ALTER TABLE remote_computer_clients ADD COLUMN target_grant_request_id TEXT",
+        "remote_computer_clients_target_grant_request_idx",
+        "service_connection_id",
+        "target_grant_request_id",
+    ] {
+        assert!(
+            REMOTE_COMPUTER_TARGET_SERVICE_GRANT_SCHEMA_V32.contains(required),
+            "missing target service grant schema invariant: {required}"
+        );
+    }
+    for forbidden in [
+        "client_token TEXT",
+        "device_secret TEXT",
+        "access_token TEXT",
+        "refresh_token TEXT",
+    ] {
+        assert!(
+            !REMOTE_COMPUTER_TARGET_SERVICE_GRANT_SCHEMA_V32.contains(forbidden),
+            "raw target grant secret must not be persisted: {forbidden}"
+        );
+    }
+
+    for required in [
+        "pub(super) async fn remote_computer_session_grant",
+        "authenticated_account(&request, &context.env)",
+        "remote_desktop_secret_matches",
+        "active_official_mcp_service_binding",
+        "recoverable_target_service_client_token",
+        "service_client_binding_conflict",
+        "service_client_recovery_conflict",
+        "target_grant_request_id",
+    ] {
+        assert!(
+            REMOTE_COMPUTER_WORKER_SOURCE.contains(required),
+            "missing target session grant source invariant: {required}"
+        );
+    }
+    let grant_start = REMOTE_COMPUTER_WORKER_SOURCE
+        .find("pub(super) async fn remote_computer_session_grant")
+        .expect("target grant source");
+    let clients_start = REMOTE_COMPUTER_WORKER_SOURCE[grant_start..]
+        .find("pub(super) async fn remote_computer_clients")
+        .map(|offset| grant_start + offset)
+        .expect("client list source");
+    let grant = &REMOTE_COMPUTER_WORKER_SOURCE[grant_start..clients_start];
+    assert!(
+        !grant.contains("remote_controller_account"),
+        "controller service token must not authorize target grant"
+    );
+    assert!(
+        !grant.contains("authenticated_official_mcp_service"),
+        "official MCP service access token must not authorize target grant"
+    );
+    for required in [
+        "account_service_delegations",
+        "service_id = 'official-device-mcp'",
+        "devices.control",
+        "ensure_bound_account_session_active",
+    ] {
+        assert!(
+            ACCOUNT_WORKER_SOURCE.contains(required),
+            "missing same-account active delegation fence: {required}"
+        );
+    }
+    assert!(
+        WORKER_ROUTER_SOURCE.contains("/v1/computers/:device_id/sessions/grant"),
+        "target session grant endpoint is not wired"
+    );
+}
+
+#[test]
 fn official_mcp_controller_operations_keep_service_and_target_authority_separate() {
     for required in [
         "pub(super) async fn remote_computer_operation_create",

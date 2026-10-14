@@ -2855,6 +2855,65 @@ pub(super) async fn authenticated_session_account(
     Ok(account)
 }
 
+pub(super) async fn active_official_mcp_service_binding(
+    env: &Env,
+    user_id: &str,
+    connection_id: &str,
+    delegation_id: &str,
+    required_scope: &str,
+) -> Result<bool> {
+    if user_id.trim().is_empty()
+        || !matches!(required_scope, "devices.read" | "devices.control")
+        || connection_id.trim().is_empty()
+        || connection_id.len() > 200
+        || delegation_id.trim().is_empty()
+        || delegation_id.len() > 200
+    {
+        return Ok(false);
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct TargetServiceDelegationRow {
+        parent_session_id: String,
+        scopes_json: String,
+        expires_at: i64,
+        revoked_at: Option<i64>,
+    }
+
+    let database = env.d1(ACCOUNT_DATABASE_BINDING)?;
+    let row = worker::query!(
+        &database,
+        "SELECT parent_session_id, scopes_json, expires_at, revoked_at
+         FROM account_service_delegations
+         WHERE delegation_id = ?1 AND user_id = ?2
+           AND service_id = 'official-device-mcp' AND connection_id = ?3
+         LIMIT 1",
+        delegation_id,
+        user_id,
+        connection_id
+    )?
+    .first::<TargetServiceDelegationRow>(None)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    if row.revoked_at.is_some() || row.expires_at <= now_seconds() {
+        return Ok(false);
+    }
+    let scopes = serde_json::from_str::<Vec<String>>(&row.scopes_json).unwrap_or_default();
+    if !scopes.iter().any(|scope| scope == required_scope)
+        || scopes
+            .iter()
+            .any(|scope| !matches!(scope.as_str(), "devices.read" | "devices.control"))
+    {
+        return Ok(false);
+    }
+    Ok(ensure_bound_account_session_active(env, user_id, &row.parent_session_id)
+        .await
+        .is_ok())
+}
+
 pub(super) async fn authenticated_official_mcp_service(
     request: &Request,
     env: &Env,
