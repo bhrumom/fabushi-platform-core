@@ -585,6 +585,10 @@ pub async fn main(request: Request, env: Env, _context: Context) -> Result<Respo
         .post_async("/v1/computers/heartbeat", remote_computer_heartbeat)
         .post_async("/v1/computers/network-binding", remote_computer_network_binding)
         .post_async(
+            "/v1/computers/:device_id/network-route",
+            remote_computer_controller_network_route,
+        )
+        .post_async(
             "/v1/internal/computers/network-bindings/bind",
             remote_computer_network_binding_bind,
         )
