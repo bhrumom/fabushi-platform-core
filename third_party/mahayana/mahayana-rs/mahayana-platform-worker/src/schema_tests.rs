@@ -293,6 +293,61 @@ fn remote_computer_network_binding_is_authority_written_generation_fenced_and_se
 }
 
 #[test]
+fn remote_computer_network_cell_snapshot_is_authority_only_live_minimal_and_bounded() {
+    let start = REMOTE_COMPUTER_WORKER_SOURCE
+        .find("pub(super) async fn remote_computer_network_cell_snapshot")
+        .expect("network cell snapshot handler must exist");
+    let rest = &REMOTE_COMPUTER_WORKER_SOURCE[start..];
+    let end = rest
+        .find("pub(super) async fn remote_computer_network_binding_bind")
+        .expect("cell snapshot must precede network bind handler");
+    let snapshot = &rest[..end];
+
+    for required in [
+        "remote_network_authority_allowed(&request, &context.env)",
+        "RemoteComputerNetworkCellSnapshotRequest",
+        "remote_network_identifier(&input.cell_id, 8, 128)",
+        "binding.cell_id = ?1",
+        "binding.revoked_at IS NULL",
+        "binding.expires_at > ?2",
+        "computer.revoked_at IS NULL",
+        "ORDER BY binding.device_id ASC",
+        "LIMIT 257",
+        "REMOTE_NETWORK_CELL_SNAPSHOT_MAX_BINDINGS",
+        "network_cell_snapshot_overflow",
+        r#""cellId": cell_id"#,
+        r#""generatedAt": now"#,
+        r#""bindings": rows"#,
+    ] {
+        assert!(
+            snapshot.contains(required),
+            "missing network cell snapshot invariant: {required}"
+        );
+    }
+    for forbidden in [
+        "proof_sha256",
+        "proofSha256",
+        "device_secret",
+        "deviceSecret",
+        "authenticated_account(",
+        "authenticated_official_mcp_service",
+        "official_mcp_service_claims",
+    ] {
+        assert!(
+            !snapshot.contains(forbidden),
+            "network cell snapshot must not use or expose non-authority secret/service material: {forbidden}"
+        );
+    }
+    let compact_router = WORKER_ROUTER_SOURCE.split_whitespace().collect::<String>();
+    assert!(
+        compact_router.contains(
+            r#".post_async("/v1/internal/computers/network-bindings/cell-snapshot",remote_computer_network_cell_snapshot,)"#
+        ),
+        "network cell snapshot endpoint is not wired"
+    );
+}
+
+#[test]
 fn remote_computer_service_clients_are_connection_bound_and_secret_safe() {
     for required in [
         "ALTER TABLE remote_computer_clients ADD COLUMN service_connection_id TEXT",

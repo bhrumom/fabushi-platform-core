@@ -62,6 +62,12 @@ struct RemoteComputerNetworkBindingRevokeRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerNetworkCellSnapshotRequest {
+    cell_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RemoteComputerPairRequest {
     pairing_code: String,
     label: String,
@@ -235,6 +241,17 @@ struct RemoteComputerControllerNetworkRouteRow {
     expires_at: i64,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteComputerNetworkCellSnapshotRow {
+    user_id: String,
+    device_id: String,
+    cell_id: String,
+    node_id: String,
+    generation: i64,
+    expires_at: i64,
+}
+
 #[derive(Debug, Deserialize)]
 struct RemoteComputerPairRow {
     device_id: String,
@@ -356,6 +373,7 @@ struct RemoteComputerToolGrantRow {
 }
 
 const REMOTE_NETWORK_BINDING_MAX_SECONDS: i64 = 24 * 60 * 60;
+const REMOTE_NETWORK_CELL_SNAPSHOT_MAX_BINDINGS: usize = 256;
 
 fn remote_network_identifier(value: &str, min: usize, max: usize) -> Option<String> {
     let value = value.trim();
@@ -1091,6 +1109,71 @@ pub(super) async fn remote_computer_network_binding(
         "expiresAt": row.expires_at,
         "revokedAt": row.revoked_at,
         "active": active,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_network_cell_snapshot(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    if !remote_network_authority_allowed(&request, &context.env) {
+        return error_response(
+            401,
+            "network_authority_unauthorized",
+            "A valid network enrollment authority credential is required.",
+        );
+    }
+    let input: RemoteComputerNetworkCellSnapshotRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_network_cell_snapshot",
+                "Network cell snapshot request must be valid JSON.",
+            );
+        }
+    };
+    let Some(cell_id) = remote_network_identifier(&input.cell_id, 8, 128) else {
+        return error_response(
+            400,
+            "invalid_network_cell_snapshot",
+            "Network cellId is invalid.",
+        );
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    let rows = worker::query!(
+        &database,
+        "SELECT binding.user_id, binding.device_id, binding.cell_id, binding.node_id,
+                binding.generation, binding.expires_at
+         FROM remote_computer_network_bindings binding
+         JOIN remote_computers computer
+           ON computer.user_id = binding.user_id
+          AND computer.device_id = binding.device_id
+         WHERE binding.cell_id = ?1
+           AND binding.revoked_at IS NULL
+           AND binding.expires_at > ?2
+           AND computer.revoked_at IS NULL
+         ORDER BY binding.device_id ASC
+         LIMIT 257",
+        &cell_id,
+        now
+    )?
+    .all()
+    .await?
+    .results::<RemoteComputerNetworkCellSnapshotRow>()?;
+    if rows.len() > REMOTE_NETWORK_CELL_SNAPSHOT_MAX_BINDINGS {
+        return error_response(
+            409,
+            "network_cell_snapshot_overflow",
+            "Network cell has more live bindings than can be projected safely.",
+        );
+    }
+    Ok(Response::from_json(&json!({
+        "cellId": cell_id,
+        "generatedAt": now,
+        "bindings": rows,
     }))?
     .with_headers(auth_headers()))
 }
