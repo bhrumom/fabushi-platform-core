@@ -346,6 +346,74 @@ fn principal_schema_keeps_profile_identity_and_connected_accounts_separate() {
 }
 
 #[test]
+fn official_mcp_service_delegation_is_session_bound_rotating_and_secret_free() {
+    for required in [
+        "CREATE TABLE IF NOT EXISTS account_service_delegations",
+        "CREATE TABLE IF NOT EXISTS account_service_refresh_tokens",
+        "parent_session_id TEXT NOT NULL",
+        "external_client_id_hash TEXT NOT NULL",
+        "current_refresh_token_hash TEXT NOT NULL UNIQUE",
+        "UNIQUE(user_id, parent_session_id, service_id, connection_id)",
+        "state TEXT NOT NULL CHECK(state IN ('active','used','revoked'))",
+    ] {
+        assert!(
+            ACCOUNT_SERVICE_DELEGATION_SCHEMA_V8.contains(required),
+            "missing service delegation invariant: {required}"
+        );
+    }
+    for forbidden in [
+        "access_token TEXT",
+        "refresh_token TEXT",
+        "fabushi_access_token",
+        "fabushi_refresh_token",
+        "device_secret",
+        "mobile_token",
+        "client_token",
+    ] {
+        assert!(
+            !ACCOUNT_SERVICE_DELEGATION_SCHEMA_V8
+                .to_ascii_lowercase()
+                .contains(&forbidden.to_ascii_lowercase()),
+            "service delegation state must not persist credential/plain control secret: {forbidden}"
+        );
+    }
+    for required in [
+        "authenticated_official_mcp_service",
+        "official_mcp_service_token_create",
+        "official_mcp_service_token_refresh",
+        "official_mcp_service_token_revoke",
+        "official_mcp_service_token_introspect",
+        "service:official-device-mcp",
+        "devices.read",
+        "devices.control",
+        "new_service_refresh_token",
+        "service_refresh_reused",
+    ] {
+        assert!(
+            ACCOUNT_WORKER_SOURCE.contains(required),
+            "missing service delegation source invariant: {required}"
+        );
+    }
+    for route in [
+        "/v1/auth/service-token",
+        "/v1/auth/service-token/refresh",
+        "/v1/auth/service-token/revoke",
+        "/v1/auth/service-token/introspect",
+    ] {
+        assert!(
+            WORKER_ROUTER_SOURCE.contains(route),
+            "service delegation endpoint is not wired: {route}"
+        );
+    }
+    assert!(
+        REMOTE_COMPUTER_WORKER_SOURCE.contains(
+            "authenticated_official_mcp_service(\n            &request,\n            &context.env,\n            \"devices.read\""
+        ),
+        "official MCP service credential must be explicitly scoped into device inventory"
+    );
+}
+
+#[test]
 fn workspace_schema_unifies_human_and_agent_messaging() {
     assert_eq!(
         validate_workspace_messaging_schema(WORKSPACE_MESSAGING_SCHEMA_V7),
