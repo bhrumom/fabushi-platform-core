@@ -33,6 +33,7 @@ Add a fail-closed Core projection for a trusted network-enrollment authority to 
 - R8: an authenticated device may read only its own binding projection by presenting the existing Fabushi account credential plus matching deviceSecret. Cross-account/device reads fail closed.
 - R9: the public computer inventory may expose only bounded network readiness metadata (bound/active generation/expiry), not proof material, private keys, or arbitrary network addresses.
 - R10: account switch/network revoke is representable immediately by revoking the old account/device binding; later asynchronous ACL cleanup is not treated as application authorization.
+- R11: the dedicated network authority may read a bounded snapshot of only live bindings for one validated cell so the Backend coordinator can derive deny-by-default policy. The snapshot must exclude proof material and all account/device/session credentials, must exclude revoked/expired devices, and must fail closed rather than silently truncate when the cell exceeds the supported bound.
 
 ## 5. Current state
 
@@ -56,6 +57,10 @@ Migration 0031 adds:
 Internal authority routes:
 - POST /v1/internal/computers/network-bindings/bind
 - POST /v1/internal/computers/network-bindings/revoke
+- POST /v1/internal/computers/network-bindings/cell-snapshot
+  - body: { cellId }
+  - returns only live { userId, deviceId, cellId, nodeId, generation, expiresAt } rows for that exact cell
+  - response is bounded and fails closed on overflow; it never returns proofSha256 or protected credentials
 
 Both require X-Fabushi-Network-Authority matching the secret FDN_NETWORK_AUTHORITY_TOKEN in constant time.
 
@@ -78,10 +83,10 @@ Unknown account/device, revoked device, authority-secret mismatch, cross-account
 
 1. Add migration 0031 and exported schema constant.
 2. Add strict request validators and internal authority authentication.
-3. Implement bind/revoke/read handlers in the existing Remote Computer owner.
+3. Implement bind/revoke/device-read and authority-only cell-snapshot handlers in the existing Remote Computer owner.
 4. Add routes in the existing worker router.
 5. Extend inventory output with coarse active network metadata only.
-6. Add schema/source contract tests; use GitHub Actions only.
+6. Add schema/source contract tests, including cell filtering, live-only selection, secret minimization, and overflow fail-closed behavior; use GitHub Actions only.
 
 ## 12. Verification / test strategy
 
@@ -94,6 +99,7 @@ GitHub Actions must prove migration constraints and source contracts, existing R
 - NB-A3: stale generation/replay and cross-account binding/read attempts fail closed.
 - NB-A4: revoke/expiry make the projection inactive without weakening application authorization.
 - NB-A5: no raw proof or protected credential is persisted or exposed.
+- NB-A6: the network authority can obtain a bounded live-only snapshot for exactly one cell, while ordinary account/service/device credentials cannot use that internal projection and overflow fails closed.
 
 ## 14. Release / migration / rollback
 
@@ -113,5 +119,5 @@ Evidence is exact-head GitHub Actions run/job output plus migration/source commi
 
 | Requirement / AC | Status | Evidence / reason |
 | --- | --- | --- |
-| R1-R10 | pending | implementation and exact-head Actions required |
-| NB-A1-NB-A5 | pending | implementation and exact-head Actions required |
+| R1-R11 | pending | implementation and exact-head Actions required |
+| NB-A1-NB-A6 | pending | implementation and exact-head Actions required |
