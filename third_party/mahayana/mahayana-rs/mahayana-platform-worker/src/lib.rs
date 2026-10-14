@@ -32,6 +32,10 @@ pub const REMOTE_COMPUTER_TRANSPORT_AUDIT_SCHEMA_V24: &str =
     include_str!("../migrations/0024_remote_computer_transport_audit.sql");
 pub const REMOTE_COMPUTER_AUDIT_GRANTS_SCHEMA_V25: &str =
     include_str!("../migrations/0025_remote_computer_audit_grants.sql");
+pub const REMOTE_COMPUTER_MOBILE_RECONCILE_SCHEMA_V27: &str =
+    include_str!("../migrations/0027_remote_computer_mobile_session_reconcile.sql");
+pub const REMOTE_COMPUTER_WORKER_SOURCE: &str = include_str!("worker_api/remote_computer.rs");
+pub const WORKER_ROUTER_SOURCE: &str = include_str!("worker_api.rs");
 pub const WORKSPACE_MESSAGING_SCHEMA_V7: &str =
     include_str!("../migrations/0007_workspace_messaging.sql");
 pub const FABUSHI_PAY_SCHEMA_V7: &str = include_str!("../migrations/0007_fabushi_pay.sql");

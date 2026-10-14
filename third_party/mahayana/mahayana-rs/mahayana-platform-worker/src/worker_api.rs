@@ -526,6 +526,10 @@ pub async fn main(request: Request, env: Env, _context: Context) -> Result<Respo
             remote_computer_session_create,
         )
         .post_async(
+            "/v1/computers/:device_id/sessions/reconcile",
+            remote_computer_session_reconcile,
+        )
+        .post_async(
             "/v1/computers/:device_id/sessions/:session_id/activate",
             remote_computer_session_activate,
         )

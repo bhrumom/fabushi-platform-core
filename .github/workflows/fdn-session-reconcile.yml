@@ -1,0 +1,38 @@
+name: FDN Remote Computer Session Reconcile
+
+on:
+  pull_request:
+    paths:
+      - "docs/specs/fdn-001-remote-computer-session-reconciliation.md"
+      - "third_party/mahayana/mahayana-rs/mahayana-platform-worker/**"
+      - "deploy/platform-worker/**"
+      - ".github/workflows/fdn-session-reconcile.yml"
+  push:
+    branches: [main]
+    paths:
+      - "docs/specs/fdn-001-remote-computer-session-reconciliation.md"
+      - "third_party/mahayana/mahayana-rs/mahayana-platform-worker/**"
+      - "deploy/platform-worker/**"
+      - ".github/workflows/fdn-session-reconcile.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format Core contract test source
+        run: rustfmt --edition 2024 --check third_party/mahayana/mahayana-rs/mahayana-platform-worker/src/schema_tests.rs
+      - name: Host schema and contract tests
+        run: cargo test --manifest-path deploy/platform-worker/Cargo.toml
+      - name: Wasm worker check
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo check --manifest-path deploy/platform-worker/Cargo.toml --target wasm32-unknown-unknown

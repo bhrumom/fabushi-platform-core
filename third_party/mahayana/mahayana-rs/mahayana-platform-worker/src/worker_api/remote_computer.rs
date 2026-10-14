@@ -45,6 +45,7 @@ struct RemoteComputerPairRequest {
 struct RemoteComputerSessionCreateRequest {
     client_id: String,
     client_token: String,
+    request_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -184,6 +185,20 @@ struct RemoteComputerSessionListRow {
 }
 
 #[derive(Debug, Deserialize)]
+struct RemoteComputerRecoverableSessionRow {
+    session_id: String,
+    device_id: String,
+    client_id: String,
+    mobile_token_hash: String,
+    state: String,
+    created_at: i64,
+    expires_at: i64,
+    mobile_request_id: Option<String>,
+    mobile_request_hash: Option<String>,
+    client_token_hash_at_create: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct RemoteComputerSignalRow {
     signal_id: i64,
     sender_role: String,
@@ -232,8 +247,61 @@ fn new_remote_pairing_code() -> String {
     raw[..12].to_ascii_uppercase()
 }
 
-fn new_remote_mobile_token() -> String {
-    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+fn remote_mobile_request_id(value: &str) -> Option<String> {
+    let value = value.trim();
+    (value.len() >= 16
+        && value.len() <= 160
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.')))
+    .then(|| value.to_string())
+}
+
+fn remote_mobile_request_hash(
+    user_id: &str,
+    device_id: &str,
+    client_id: &str,
+    request_id: &str,
+    client_token_hash: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"fabushi-remote-mobile-create-v1\0");
+    for value in [user_id, device_id, client_id, request_id, client_token_hash] {
+        hasher.update(value.as_bytes());
+        hasher.update([0]);
+    }
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
+}
+
+fn recoverable_remote_mobile_token(
+    client_token: &str,
+    request_id: &str,
+    session_id: &str,
+) -> String {
+    fn digest(domain: &[u8], client_token: &str, request_id: &str, session_id: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(domain);
+        for value in [client_token, request_id, session_id] {
+            hasher.update(value.as_bytes());
+            hasher.update([0]);
+        }
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
+    }
+    format!(
+        "rmt_{}{}",
+        digest(
+            b"fabushi-remote-mobile-token-v1:a\0",
+            client_token,
+            request_id,
+            session_id,
+        ),
+        digest(
+            b"fabushi-remote-mobile-token-v1:b\0",
+            client_token,
+            request_id,
+            session_id,
+        )
+    )
 }
 
 fn new_remote_client_token() -> String {
@@ -932,6 +1000,122 @@ pub(super) async fn remote_computer_sessions(
     .with_headers(auth_headers()))
 }
 
+async fn load_remote_mobile_request_session(
+    database: &worker::D1Database,
+    user_id: &str,
+    device_id: &str,
+    client_id: &str,
+    request_id: &str,
+) -> Result<Option<RemoteComputerRecoverableSessionRow>> {
+    worker::query!(
+        database,
+        "SELECT session_id, device_id, client_id, mobile_token_hash, state, created_at, expires_at,
+                mobile_request_id, mobile_request_hash, client_token_hash_at_create
+         FROM remote_computer_sessions
+         WHERE user_id = ?1 AND device_id = ?2 AND client_id = ?3 AND mobile_request_id = ?4
+         LIMIT 1",
+        user_id,
+        device_id,
+        client_id,
+        request_id
+    )?
+    .first::<RemoteComputerRecoverableSessionRow>(None)
+    .await
+}
+
+fn validate_remote_mobile_recovery(
+    row: &RemoteComputerRecoverableSessionRow,
+    user_id: &str,
+    client_token: &str,
+    client_token_hash: &str,
+    request_id: &str,
+    now: i64,
+) -> std::result::Result<String, (&'static str, &'static str)> {
+    if row.mobile_request_id.as_deref() != Some(request_id) {
+        return Err(("control_session_request_conflict", "Control session request identity does not match."));
+    }
+    let expected_request_hash = remote_mobile_request_hash(
+        user_id,
+        &row.device_id,
+        &row.client_id,
+        request_id,
+        client_token_hash,
+    );
+    if row.mobile_request_hash.as_deref() != Some(expected_request_hash.as_str()) {
+        return Err(("control_session_request_conflict", "Control session request identity is bound to different credentials."));
+    }
+    if row.client_token_hash_at_create.as_deref() != Some(client_token_hash) {
+        return Err(("control_session_client_rotated", "The paired client credential changed after this session was created."));
+    }
+    if row.state == "closed" {
+        return Err(("control_session_closed", "The control session is already closed."));
+    }
+    if row.expires_at <= now {
+        return Err(("control_session_expired", "The control session has expired."));
+    }
+    let token = recoverable_remote_mobile_token(client_token, request_id, &row.session_id);
+    let token_hash = remote_secret_hash(&token);
+    if !constant_time_eq(token_hash.as_bytes(), row.mobile_token_hash.as_bytes()) {
+        return Err(("control_session_recovery_mismatch", "The control session credential cannot be recovered safely."));
+    }
+    Ok(token)
+}
+
+fn remote_mobile_session_response(
+    row: &RemoteComputerRecoverableSessionRow,
+    mobile_token: &str,
+    env: &Env,
+) -> Result<Response> {
+    Ok(Response::from_json(&json!({
+        "sessionId": row.session_id,
+        "deviceId": row.device_id,
+        "clientId": row.client_id,
+        "mobileToken": mobile_token,
+        "createdAt": row.created_at,
+        "expiresAt": row.expires_at,
+        "state": row.state,
+        "permissions": {"display": true, "input": true, "clipboard": false, "fileTransfer": false, "audio": false},
+        "iceServers": remote_ice_servers(env),
+    }))?
+    .with_headers(auth_headers()))
+}
+
+async fn authenticate_remote_mobile_client(
+    database: &worker::D1Database,
+    user_id: &str,
+    device_id: &str,
+    client_id: &str,
+    client_token: &str,
+) -> Result<Option<String>> {
+    if !valid_relay_identifier(client_id, 160) || client_token.len() < 48 || client_token.len() > 256 {
+        return Ok(None);
+    }
+    let client = worker::query!(
+        database,
+        "SELECT client_token_hash
+         FROM remote_computer_clients
+         WHERE client_id = ?1 AND device_id = ?2 AND user_id = ?3
+           AND revoked_at IS NULL AND client_token_hash IS NOT NULL
+           AND EXISTS (SELECT 1 FROM remote_computers d
+                       WHERE d.device_id = ?2 AND d.user_id = ?3 AND d.revoked_at IS NULL)
+         LIMIT 1",
+        client_id,
+        device_id,
+        user_id
+    )?
+    .first::<RemoteComputerClientAuthRow>(None)
+    .await?;
+    let candidate_hash = remote_secret_hash(client_token);
+    Ok(client
+        .filter(|client| {
+            constant_time_eq(
+                candidate_hash.as_bytes(),
+                client.client_token_hash.as_bytes(),
+            )
+        })
+        .map(|_| candidate_hash))
+}
+
 pub(super) async fn remote_computer_session_create(
     mut request: Request,
     context: RouteContext<()>,
@@ -954,6 +1138,9 @@ pub(super) async fn remote_computer_session_create(
     if !valid_relay_identifier(&input.client_id, 160) {
         return error_response(400, "invalid_client_id", "clientId is invalid.");
     }
+    let Some(request_id) = remote_mobile_request_id(&input.request_id) else {
+        return error_response(400, "invalid_request_id", "requestId must be a stable bounded mobile request identity.");
+    };
     if input.client_token.len() < 48 || input.client_token.len() > 256 {
         return error_response(
             400,
@@ -962,49 +1149,23 @@ pub(super) async fn remote_computer_session_create(
         );
     }
     let database = context.env.d1(DATABASE_BINDING)?;
-    let client = worker::query!(
+    let Some(candidate_hash) = authenticate_remote_mobile_client(
         &database,
-        "SELECT client_token_hash
-         FROM remote_computer_clients
-         WHERE client_id = ?1 AND device_id = ?2 AND user_id = ?3
-           AND revoked_at IS NULL AND client_token_hash IS NOT NULL
-         LIMIT 1",
-        &input.client_id,
+        &account.user_id,
         &device_id,
-        &account.user_id
-    )?
-    .first::<RemoteComputerClientAuthRow>(None)
-    .await?;
-    let candidate_hash = remote_secret_hash(&input.client_token);
-    if !client.is_some_and(|client| {
-        constant_time_eq(
-            candidate_hash.as_bytes(),
-            client.client_token_hash.as_bytes(),
-        )
-    }) {
+        &input.client_id,
+        &input.client_token,
+    )
+    .await?
+    else {
         return error_response(
             403,
             "client_not_paired",
             "This phone is not paired with the computer.",
         );
-    }
-    let computer = worker::query!(
-        &database,
-        "SELECT device_id, label FROM remote_computers
-         WHERE device_id = ?1 AND user_id = ?2 AND revoked_at IS NULL LIMIT 1",
-        &device_id,
-        &account.user_id
-    )?
-    .first::<RemoteComputerPairRow>(None)
-    .await?;
-    if computer.is_none() {
-        return error_response(404, "computer_not_found", "Computer is not available.");
-    }
-    let session_id = format!("remote-session-{}", Uuid::new_v4());
-    let mobile_token = new_remote_mobile_token();
-    let mobile_token_hash = remote_secret_hash(&mobile_token);
+    };
+
     let now = now_seconds();
-    let expires_at = now + REMOTE_CONTROL_SESSION_SECONDS;
     worker::query!(
         &database,
         "UPDATE remote_computer_sessions SET state = 'closed', closed_at = ?1
@@ -1015,11 +1176,54 @@ pub(super) async fn remote_computer_session_create(
     )?
     .run()
     .await?;
+
+    if let Some(existing) = load_remote_mobile_request_session(
+        &database,
+        &account.user_id,
+        &device_id,
+        &input.client_id,
+        &request_id,
+    )
+    .await?
+    {
+        let token = match validate_remote_mobile_recovery(
+            &existing,
+            &account.user_id,
+            &input.client_token,
+            &candidate_hash,
+            &request_id,
+            now,
+        ) {
+            Ok(token) => token,
+            Err(("control_session_expired", message)) => {
+                return error_response(410, "control_session_expired", message);
+            }
+            Err((code, message)) => return error_response(409, code, message),
+        };
+        return remote_mobile_session_response(&existing, &token, &context.env);
+    }
+
+    let session_id = format!("remote-session-{}", Uuid::new_v4());
+    let mobile_token = recoverable_remote_mobile_token(
+        &input.client_token,
+        &request_id,
+        &session_id,
+    );
+    let mobile_token_hash = remote_secret_hash(&mobile_token);
+    let request_hash = remote_mobile_request_hash(
+        &account.user_id,
+        &device_id,
+        &input.client_id,
+        &request_id,
+        &candidate_hash,
+    );
+    let expires_at = now + REMOTE_CONTROL_SESSION_SECONDS;
     let inserted = worker::query!(
         &database,
-        "INSERT INTO remote_computer_sessions
-         (session_id, device_id, client_id, user_id, mobile_token_hash, state, created_at, expires_at, closed_at)
-         SELECT ?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7, NULL
+        "INSERT OR IGNORE INTO remote_computer_sessions
+         (session_id, device_id, client_id, user_id, mobile_token_hash, state, created_at, expires_at, closed_at,
+          mobile_request_id, mobile_request_hash, client_token_hash_at_create)
+         SELECT ?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7, NULL, ?8, ?9, ?10
          WHERE EXISTS (
                  SELECT 1 FROM remote_computer_clients c
                  JOIN remote_computers d
@@ -1030,10 +1234,10 @@ pub(super) async fn remote_computer_session_create(
                )
            AND (SELECT COUNT(*) FROM remote_computer_sessions
                 WHERE user_id = ?4 AND device_id = ?2 AND client_id = ?3
-                  AND state <> 'closed' AND expires_at > ?6) < ?8
+                  AND state <> 'closed' AND expires_at > ?6) < ?11
            AND (SELECT COUNT(*) FROM remote_computer_sessions
                 WHERE user_id = ?4 AND device_id = ?2
-                  AND state <> 'closed' AND expires_at > ?6) < ?9",
+                  AND state <> 'closed' AND expires_at > ?6) < ?12",
         &session_id,
         &device_id,
         &input.client_id,
@@ -1041,27 +1245,48 @@ pub(super) async fn remote_computer_session_create(
         &mobile_token_hash,
         now,
         expires_at,
+        &request_id,
+        &request_hash,
+        &candidate_hash,
         REMOTE_SESSION_MAX_PER_CLIENT,
-        REMOTE_SESSION_MAX_PER_DEVICE,
-        &candidate_hash
+        REMOTE_SESSION_MAX_PER_DEVICE
     )?
     .run()
     .await?;
+
     if inserted.meta()?.and_then(|meta| meta.changes).unwrap_or(0) == 0 {
-        let still_paired = worker::query!(
+        if let Some(existing) = load_remote_mobile_request_session(
             &database,
-            "SELECT 1 AS ok FROM remote_computer_clients c
-             JOIN remote_computers d
-               ON d.device_id = c.device_id AND d.user_id = c.user_id
-             WHERE c.client_id = ?1 AND c.device_id = ?2 AND c.user_id = ?3
-               AND c.client_token_hash = ?4 AND c.revoked_at IS NULL
-               AND d.revoked_at IS NULL LIMIT 1",
-            &input.client_id,
-            &device_id,
             &account.user_id,
-            &candidate_hash
-        )?
-        .first::<RemoteComputerExistsRow>(None)
+            &device_id,
+            &input.client_id,
+            &request_id,
+        )
+        .await?
+        {
+            let token = match validate_remote_mobile_recovery(
+                &existing,
+                &account.user_id,
+                &input.client_token,
+                &candidate_hash,
+                &request_id,
+                now,
+            ) {
+                Ok(token) => token,
+                Err(("control_session_expired", message)) => {
+                    return error_response(410, "control_session_expired", message);
+                }
+                Err((code, message)) => return error_response(409, code, message),
+            };
+            return remote_mobile_session_response(&existing, &token, &context.env);
+        }
+        let still_paired = authenticate_remote_mobile_client(
+            &database,
+            &account.user_id,
+            &device_id,
+            &input.client_id,
+            &input.client_token,
+        )
         .await?
         .is_some();
         if !still_paired {
@@ -1077,18 +1302,104 @@ pub(super) async fn remote_computer_session_create(
             "Too many pending control sessions exist for this paired client.",
         );
     }
-    Ok(Response::from_json(&json!({
-        "sessionId": session_id,
-        "deviceId": device_id,
-        "clientId": input.client_id,
-        "mobileToken": mobile_token,
-        "createdAt": now,
-        "expiresAt": expires_at,
-        "state": "pending",
-        "permissions": {"display": true, "input": true, "clipboard": false, "fileTransfer": false, "audio": false},
-        "iceServers": remote_ice_servers(&context.env),
-    }))?
-    .with_headers(auth_headers()))
+
+    let created = RemoteComputerRecoverableSessionRow {
+        session_id,
+        device_id,
+        client_id: input.client_id,
+        mobile_token_hash,
+        state: "pending".to_string(),
+        created_at: now,
+        expires_at,
+        mobile_request_id: Some(request_id),
+        mobile_request_hash: Some(request_hash),
+        client_token_hash_at_create: Some(candidate_hash),
+    };
+    remote_mobile_session_response(&created, &mobile_token, &context.env)
+}
+
+pub(super) async fn remote_computer_session_reconcile(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_account(&request, &context.env) {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let input: RemoteComputerSessionCreateRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_control_session_reconcile",
+                "Session reconcile request must be valid JSON.",
+            );
+        }
+    };
+    if !valid_relay_identifier(&input.client_id, 160) {
+        return error_response(400, "invalid_client_id", "clientId is invalid.");
+    }
+    let Some(request_id) = remote_mobile_request_id(&input.request_id) else {
+        return error_response(400, "invalid_request_id", "requestId must be a stable bounded mobile request identity.");
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let Some(candidate_hash) = authenticate_remote_mobile_client(
+        &database,
+        &account.user_id,
+        &device_id,
+        &input.client_id,
+        &input.client_token,
+    )
+    .await?
+    else {
+        return error_response(
+            403,
+            "client_not_paired",
+            "This phone is not paired with the computer.",
+        );
+    };
+    let now = now_seconds();
+    worker::query!(
+        &database,
+        "UPDATE remote_computer_sessions SET state = 'closed', closed_at = ?1
+         WHERE user_id = ?2 AND device_id = ?3 AND state <> 'closed' AND expires_at <= ?1",
+        now,
+        &account.user_id,
+        &device_id
+    )?
+    .run()
+    .await?;
+    let Some(existing) = load_remote_mobile_request_session(
+        &database,
+        &account.user_id,
+        &device_id,
+        &input.client_id,
+        &request_id,
+    )
+    .await?
+    else {
+        return error_response(
+            404,
+            "control_session_request_not_found",
+            "No control session exists for this mobile request identity.",
+        );
+    };
+    let token = match validate_remote_mobile_recovery(
+        &existing,
+        &account.user_id,
+        &input.client_token,
+        &candidate_hash,
+        &request_id,
+        now,
+    ) {
+        Ok(token) => token,
+        Err(("control_session_expired", message)) => {
+            return error_response(410, "control_session_expired", message);
+        }
+        Err((code, message)) => return error_response(409, code, message),
+    };
+    remote_mobile_session_response(&existing, &token, &context.env)
 }
 
 pub(super) async fn remote_computer_session_activate(
@@ -1767,4 +2078,150 @@ pub(super) async fn remote_computer_signal_drain(
         "lastSignalId": last_signal_id,
     }))?
     .with_headers(auth_headers()))
+}
+
+
+#[cfg(test)]
+mod remote_mobile_session_tests {
+    use super::*;
+
+    #[test]
+    fn request_identity_validation_is_bounded_and_opaque() {
+        assert_eq!(
+            remote_mobile_request_id("mobile-request-0123456789").as_deref(),
+            Some("mobile-request-0123456789")
+        );
+        assert!(remote_mobile_request_id("short").is_none());
+        assert!(remote_mobile_request_id("contains space 0123456789").is_none());
+        assert!(remote_mobile_request_id(&"x".repeat(161)).is_none());
+    }
+
+    #[test]
+    fn recoverable_token_is_stable_for_duplicate_and_lost_response() {
+        let token_a = recoverable_remote_mobile_token(
+            "client-token-secret-that-is-long-enough-for-production-0123456789",
+            "mobile-request-0123456789",
+            "remote-session-a",
+        );
+        let token_b = recoverable_remote_mobile_token(
+            "client-token-secret-that-is-long-enough-for-production-0123456789",
+            "mobile-request-0123456789",
+            "remote-session-a",
+        );
+        assert_eq!(token_a, token_b);
+        assert!(token_a.len() >= 48);
+        assert_ne!(
+            token_a,
+            recoverable_remote_mobile_token(
+                "rotated-client-token-secret-that-is-long-enough-9876543210",
+                "mobile-request-0123456789",
+                "remote-session-a",
+            )
+        );
+        assert_ne!(
+            token_a,
+            recoverable_remote_mobile_token(
+                "client-token-secret-that-is-long-enough-for-production-0123456789",
+                "mobile-request-different-9876543210",
+                "remote-session-a",
+            )
+        );
+    }
+
+    #[test]
+    fn request_hash_fences_account_device_client_and_token_generation() {
+        let base = remote_mobile_request_hash(
+            "account-a",
+            "device-a",
+            "client-a",
+            "mobile-request-0123456789",
+            "client-token-hash-a",
+        );
+        for changed in [
+            remote_mobile_request_hash("account-b", "device-a", "client-a", "mobile-request-0123456789", "client-token-hash-a"),
+            remote_mobile_request_hash("account-a", "device-b", "client-a", "mobile-request-0123456789", "client-token-hash-a"),
+            remote_mobile_request_hash("account-a", "device-a", "client-b", "mobile-request-0123456789", "client-token-hash-a"),
+            remote_mobile_request_hash("account-a", "device-a", "client-a", "mobile-request-different-9876543210", "client-token-hash-a"),
+            remote_mobile_request_hash("account-a", "device-a", "client-a", "mobile-request-0123456789", "client-token-hash-b"),
+        ] {
+            assert_ne!(base, changed);
+        }
+    }
+
+    #[test]
+    fn recovery_rejects_rotation_expiry_close_and_hash_mismatch() {
+        let client_token = "client-token-secret-that-is-long-enough-for-production-0123456789";
+        let client_hash = remote_secret_hash(client_token);
+        let request_id = "mobile-request-0123456789";
+        let session_id = "remote-session-a";
+        let mobile_token = recoverable_remote_mobile_token(client_token, request_id, session_id);
+        let request_hash = remote_mobile_request_hash(
+            "account-a",
+            "device-a",
+            "client-a",
+            request_id,
+            &client_hash,
+        );
+        let mut row = RemoteComputerRecoverableSessionRow {
+            session_id: session_id.to_string(),
+            device_id: "device-a".to_string(),
+            client_id: "client-a".to_string(),
+            mobile_token_hash: remote_secret_hash(&mobile_token),
+            state: "pending".to_string(),
+            created_at: 100,
+            expires_at: 200,
+            mobile_request_id: Some(request_id.to_string()),
+            mobile_request_hash: Some(request_hash),
+            client_token_hash_at_create: Some(client_hash.clone()),
+        };
+        assert_eq!(
+            validate_remote_mobile_recovery(
+                &row,
+                "account-a",
+                client_token,
+                &client_hash,
+                request_id,
+                150,
+            )
+            .unwrap(),
+            mobile_token
+        );
+
+        assert_eq!(
+            validate_remote_mobile_recovery(
+                &row,
+                "account-a",
+                "rotated-client-token-secret-that-is-long-enough-9876543210",
+                "rotated-hash",
+                request_id,
+                150,
+            )
+            .unwrap_err()
+            .0,
+            "control_session_request_conflict"
+        );
+
+        row.state = "closed".to_string();
+        assert_eq!(
+            validate_remote_mobile_recovery(&row, "account-a", client_token, &client_hash, request_id, 150)
+                .unwrap_err()
+                .0,
+            "control_session_closed"
+        );
+        row.state = "active".to_string();
+        assert_eq!(
+            validate_remote_mobile_recovery(&row, "account-a", client_token, &client_hash, request_id, 201)
+                .unwrap_err()
+                .0,
+            "control_session_expired"
+        );
+        row.expires_at = 300;
+        row.mobile_token_hash = "tampered".to_string();
+        assert_eq!(
+            validate_remote_mobile_recovery(&row, "account-a", client_token, &client_hash, request_id, 150)
+                .unwrap_err()
+                .0,
+            "control_session_recovery_mismatch"
+        );
+    }
 }

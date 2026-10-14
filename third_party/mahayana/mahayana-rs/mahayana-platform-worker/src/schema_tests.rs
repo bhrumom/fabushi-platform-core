@@ -49,6 +49,57 @@ fn remote_computer_migration_keeps_control_plane_separate_from_desktop_data() {
 }
 
 #[test]
+fn remote_computer_mobile_session_reconcile_contract_is_idempotent_and_secret_safe() {
+    for required in [
+        "mobile_request_id TEXT",
+        "mobile_request_hash TEXT",
+        "client_token_hash_at_create TEXT",
+        "CREATE UNIQUE INDEX IF NOT EXISTS remote_computer_sessions_mobile_request_identity_idx",
+        "ON remote_computer_sessions(user_id, device_id, client_id, mobile_request_id)",
+        "WHERE mobile_request_id IS NOT NULL",
+    ] {
+        assert!(
+            REMOTE_COMPUTER_MOBILE_RECONCILE_SCHEMA_V27.contains(required),
+            "missing remote reconcile schema invariant: {required}"
+        );
+    }
+    for forbidden in [
+        "mobile_token TEXT",
+        "client_token TEXT",
+        "device_secret TEXT",
+    ] {
+        assert!(
+            !REMOTE_COMPUTER_MOBILE_RECONCILE_SCHEMA_V27.contains(forbidden),
+            "raw remote secret must not be persisted: {forbidden}"
+        );
+    }
+
+    for required in [
+        "request_id: String",
+        "remote_mobile_request_hash(",
+        "recoverable_remote_mobile_token(",
+        "client_token_hash_at_create",
+        "INSERT OR IGNORE INTO remote_computer_sessions",
+        "load_remote_mobile_request_session(",
+        "control_session_client_rotated",
+        "control_session_recovery_mismatch",
+        "control_session_expired",
+        "remote_computer_session_reconcile",
+    ] {
+        assert!(
+            REMOTE_COMPUTER_WORKER_SOURCE.contains(required),
+            "missing remote reconcile source invariant: {required}"
+        );
+    }
+    assert!(!REMOTE_COMPUTER_WORKER_SOURCE.contains("mobile_token, mobile_request_id"));
+    assert!(
+        WORKER_ROUTER_SOURCE
+            .contains(".post_async(\n            \"/v1/computers/:device_id/sessions/reconcile\","),
+        "mobile reconcile endpoint is not wired into the Worker router"
+    );
+}
+
+#[test]
 fn marketplace_account_install_migration_is_account_scoped_and_manifest_projected() {
     assert_eq!(
         validate_marketplace_account_install_schema(MARKETPLACE_ACCOUNT_INSTALL_SCHEMA_V18),
