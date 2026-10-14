@@ -35,6 +35,7 @@ pub use identity::HostPlatform;
 pub use identity::PluginAccessTokenClaims;
 pub use identity::PluginContext;
 pub use identity::ProfileSummary;
+pub use identity::ServiceAccessTokenClaims;
 pub use miniapp_identity::MiniAppIdentityError;
 pub use miniapp_identity::canonical_repository_source;
 pub use miniapp_identity::legacy_official_conversation_id;
