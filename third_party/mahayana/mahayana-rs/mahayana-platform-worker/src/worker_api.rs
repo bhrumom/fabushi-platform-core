@@ -530,6 +530,14 @@ pub async fn main(request: Request, env: Env, _context: Context) -> Result<Respo
             remote_computer_session_reconcile,
         )
         .post_async(
+            "/v1/computers/:device_id/sessions/:session_id/tool-grants/grant",
+            remote_computer_tool_grant,
+        )
+        .post_async(
+            "/v1/computers/:device_id/sessions/:session_id/tool-grants/revoke",
+            remote_computer_tool_revoke,
+        )
+        .post_async(
             "/v1/computers/:device_id/sessions/:session_id/operations",
             remote_computer_operation_create,
         )
