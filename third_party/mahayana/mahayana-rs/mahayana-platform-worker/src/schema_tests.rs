@@ -63,7 +63,11 @@ fn remote_computer_mobile_session_reconcile_contract_is_idempotent_and_secret_sa
             "missing remote reconcile schema invariant: {required}"
         );
     }
-    for forbidden in ["mobile_token TEXT", "client_token TEXT", "device_secret TEXT"] {
+    for forbidden in [
+        "mobile_token TEXT",
+        "client_token TEXT",
+        "device_secret TEXT",
+    ] {
         assert!(
             !REMOTE_COMPUTER_MOBILE_RECONCILE_SCHEMA_V27.contains(forbidden),
             "raw remote secret must not be persisted: {forbidden}"
@@ -89,9 +93,8 @@ fn remote_computer_mobile_session_reconcile_contract_is_idempotent_and_secret_sa
     }
     assert!(!REMOTE_COMPUTER_WORKER_SOURCE.contains("mobile_token, mobile_request_id"));
     assert!(
-        WORKER_ROUTER_SOURCE.contains(
-            ".post_async(\n            \"/v1/computers/:device_id/sessions/reconcile\","
-        ),
+        WORKER_ROUTER_SOURCE
+            .contains(".post_async(\n            \"/v1/computers/:device_id/sessions/reconcile\","),
         "mobile reconcile endpoint is not wired into the Worker router"
     );
 }
