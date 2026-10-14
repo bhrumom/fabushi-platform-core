@@ -71,3 +71,21 @@ pub struct DelegatedTokenRequest {
     pub device_id: String,
     pub scopes: Vec<String>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceAccessTokenClaims {
+    pub iss: String,
+    pub sub: String,
+    pub aud: String,
+    pub scope: Vec<String>,
+    pub service_id: String,
+    pub resource: String,
+    pub external_client_id_hash: String,
+    pub connection_id: String,
+    pub sid: String,
+    pub delegation_id: String,
+    pub jti: String,
+    pub iat: usize,
+    pub exp: usize,
+    pub token_use: String,
+}
