@@ -1045,7 +1045,8 @@ fn official_mcp_controller_network_route_is_service_only_minimal_and_live_bound(
 }
 
 #[test]
-fn remote_computer_target_network_ingress_is_authority_written_account_cell_fenced_and_secret_safe() {
+fn remote_computer_target_network_ingress_is_authority_written_account_cell_fenced_and_secret_safe()
+{
     for required in [
         "CREATE TABLE IF NOT EXISTS remote_computer_network_ingress_bindings",
         "PRIMARY KEY (user_id, cell_id, service_id)",
@@ -1139,7 +1140,9 @@ fn remote_computer_target_network_ingress_is_authority_written_account_cell_fenc
         assert!(source.contains("remote_network_authority_allowed(&request, &context.env)"));
         assert!(source.contains("remote_network_service_id(&input.service_id)"));
     }
-    assert!(bind.contains("excluded.generation > remote_computer_network_ingress_bindings.generation"));
+    assert!(
+        bind.contains("excluded.generation > remote_computer_network_ingress_bindings.generation")
+    );
     assert!(bind.contains("network_ingress_generation_conflict"));
     assert!(revoke.contains("generation = ?5 AND revoked_at IS NULL"));
 
@@ -1154,4 +1157,3 @@ fn remote_computer_target_network_ingress_is_authority_written_account_cell_fenc
         );
     }
 }
-
