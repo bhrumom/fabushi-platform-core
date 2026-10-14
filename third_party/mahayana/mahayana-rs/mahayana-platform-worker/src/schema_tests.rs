@@ -785,3 +785,56 @@ fn worker_router_rejects_duplicate_developer_commerce_regressions() {
         );
     }
 }
+
+
+#[test]
+fn official_mcp_controller_network_route_is_service_only_minimal_and_live_bound() {
+    let start = REMOTE_COMPUTER_WORKER_SOURCE
+        .find("pub(super) async fn remote_computer_controller_network_route")
+        .expect("controller network route handler must exist");
+    let rest = &REMOTE_COMPUTER_WORKER_SOURCE[start..];
+    let end = rest
+        .find("pub(super) async fn remote_computer_network_binding")
+        .expect("controller network route must precede the target binding handler");
+    let route = &rest[..end];
+
+    for required in [
+        "authenticated_official_mcp_service(",
+        ""devices.control"",
+        "official_mcp_service_claims(",
+        "binding.user_id = ?1",
+        "binding.device_id = ?2",
+        "binding.revoked_at IS NULL",
+        "binding.expires_at > ?3",
+        "computer.revoked_at IS NULL",
+        ""cellId": row.cell_id",
+        ""nodeId": row.node_id",
+        ""generation": row.generation",
+        ""expiresAt": row.expires_at",
+        ""connectionId": claims.connection_id",
+        ""delegationId": claims.delegation_id",
+    ] {
+        assert!(
+            route.contains(required),
+            "missing service-bound controller network-route invariant: {required}"
+        );
+    }
+    for forbidden in [
+        "authenticated_account(",
+        "proof_sha256",
+        "proofSha256",
+        "device_secret",
+        "deviceSecret",
+    ] {
+        assert!(
+            !route.contains(forbidden),
+            "controller route must not expose or read target-only secret material: {forbidden}"
+        );
+    }
+    assert!(
+        WORKER_ROUTER_SOURCE.contains(
+            ""/v1/computers/:device_id/network-route",\n            remote_computer_controller_network_route,"
+        ),
+        "controller network-route endpoint is not wired"
+    );
+}
