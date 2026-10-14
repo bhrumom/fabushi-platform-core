@@ -100,6 +100,71 @@ fn remote_computer_mobile_session_reconcile_contract_is_idempotent_and_secret_sa
 }
 
 #[test]
+fn remote_computer_operation_journal_is_idempotent_secret_safe_and_routed() {
+    for required in [
+        "CREATE TABLE IF NOT EXISTS remote_computer_operations",
+        "UNIQUE(user_id, device_id, session_id, request_id)",
+        "request_sha256 TEXT NOT NULL",
+        "sensitive_result INTEGER NOT NULL",
+        "CHECK (sensitive_result = 0 OR result_json IS NULL)",
+        "terminal remote operation state is immutable",
+        "invalid remote operation state transition",
+        "CREATE TABLE IF NOT EXISTS remote_computer_operation_audit",
+    ] {
+        assert!(
+            REMOTE_COMPUTER_OPERATION_JOURNAL_SCHEMA_V28.contains(required),
+            "missing operation journal schema invariant: {required}"
+        );
+    }
+    for forbidden in [
+        "mobile_token TEXT",
+        "client_token TEXT",
+        "device_secret TEXT",
+        "arguments_json TEXT",
+        "password TEXT",
+        "otp TEXT",
+    ] {
+        assert!(
+            !REMOTE_COMPUTER_OPERATION_JOURNAL_SCHEMA_V28.contains(forbidden),
+            "raw operation secret/input must not be persisted: {forbidden}"
+        );
+    }
+
+    for required in [
+        "remote_computer_operation_create",
+        "remote_computer_operation_query",
+        "remote_computer_operation_outcome_unknown",
+        "remote_computer_operation_cancel",
+        "remote_computer_operation_claim",
+        "remote_computer_operation_result",
+        "remote_operation_controller_authorized",
+        "remote_operation_target_authorized",
+        "REMOTE_OPERATION_MAX_RESULT_BYTES",
+        "sensitive_result_plaintext_forbidden",
+        "operation_request_conflict",
+    ] {
+        assert!(
+            REMOTE_COMPUTER_WORKER_SOURCE.contains(required),
+            "missing operation journal source invariant: {required}"
+        );
+    }
+
+    for route in [
+        "/v1/computers/:device_id/sessions/:session_id/operations",
+        "/v1/computers/:device_id/sessions/:session_id/operations/:request_id/query",
+        "/v1/computers/:device_id/sessions/:session_id/operations/:request_id/outcome-unknown",
+        "/v1/computers/:device_id/sessions/:session_id/operations/:request_id/cancel",
+        "/v1/computers/:device_id/sessions/:session_id/operations/:request_id/claim",
+        "/v1/computers/:device_id/sessions/:session_id/operations/:request_id/result",
+    ] {
+        assert!(
+            WORKER_ROUTER_SOURCE.contains(route),
+            "operation journal endpoint is not wired: {route}"
+        );
+    }
+}
+
+#[test]
 fn marketplace_account_install_migration_is_account_scoped_and_manifest_projected() {
     assert_eq!(
         validate_marketplace_account_install_schema(MARKETPLACE_ACCOUNT_INSTALL_SCHEMA_V18),
