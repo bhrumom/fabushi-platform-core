@@ -589,6 +589,10 @@ pub async fn main(request: Request, env: Env, _context: Context) -> Result<Respo
             remote_computer_controller_network_route,
         )
         .post_async(
+            "/v1/internal/computers/network-bindings/cell-snapshot",
+            remote_computer_network_cell_snapshot,
+        )
+        .post_async(
             "/v1/internal/computers/network-bindings/bind",
             remote_computer_network_binding_bind,
         )
