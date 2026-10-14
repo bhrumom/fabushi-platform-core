@@ -2,6 +2,7 @@ use crate::auth::hash_password_argon2id;
 use crate::auth::hash_refresh_token;
 use crate::auth::new_password_salt;
 use crate::auth::new_refresh_token;
+use crate::auth::new_service_refresh_token;
 use crate::auth::verify_argon2id;
 use crate::auth::verify_pbkdf2_sha256;
 use crate::identity_auth::IdentityProviderConfig as OAuthProviderConfig;
@@ -28,6 +29,7 @@ use mahayana_platform_core::DelegatedTokenRequest;
 use mahayana_platform_core::Entitlement;
 use mahayana_platform_core::EntitlementStatus;
 use mahayana_platform_core::PluginAccessTokenClaims;
+use mahayana_platform_core::ServiceAccessTokenClaims;
 use mahayana_platform_core::PurchaseRequest;
 use mahayana_platform_core::Quote;
 use mahayana_platform_core::UsageCaptureRequest;
@@ -63,6 +65,7 @@ const ACCOUNT_DATABASE_BINDING: &str = "ACCOUNT_DB";
 const ACCESS_TOKEN_ISSUER: &str = "https://api.ombhrum.com";
 const ACCESS_TOKEN_AUDIENCE: &str = "mahayana-platform";
 const ACCESS_TOKEN_SECONDS: i64 = 15 * 60;
+const SERVICE_ACCESS_TOKEN_SECONDS: i64 = 5 * 60;
 const REFRESH_TOKEN_SECONDS: i64 = 30 * 24 * 60 * 60;
 const LOGIN_FAILURE_WINDOW_SECONDS: i64 = 15 * 60;
 const MAX_ACCOUNT_LOGIN_FAILURES: i64 = 10;
@@ -364,6 +367,62 @@ struct RefreshAccessRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ServiceDelegationCreateRequest {
+    service_id: String,
+    connection_id: String,
+    external_client_id: String,
+    resource: String,
+    scopes: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ServiceDelegationRefreshRequest {
+    delegation_id: String,
+    refresh_token: String,
+    connection_id: String,
+    external_client_id: String,
+    resource: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServiceDelegationRow {
+    delegation_id: String,
+    user_id: String,
+    parent_session_id: String,
+    service_id: String,
+    connection_id: String,
+    external_client_id_hash: String,
+    resource: String,
+    scopes_json: String,
+    current_refresh_token_hash: String,
+    expires_at: i64,
+    revoked_at: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServiceDelegationRefreshRow {
+    token_hash: String,
+    delegation_id: String,
+    generation: i64,
+    state: String,
+    expires_at: i64,
+    user_id: String,
+    parent_session_id: String,
+    service_id: String,
+    connection_id: String,
+    external_client_id_hash: String,
+    resource: String,
+    scopes_json: String,
+    current_refresh_token_hash: String,
+    delegation_expires_at: i64,
+    delegation_revoked_at: Option<i64>,
+    parent_expires_at: i64,
+    parent_revoked_at: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
 struct RefreshTokenRow {
     token_hash: String,
     session_id: String,
@@ -489,6 +548,19 @@ pub async fn main(request: Request, env: Env, _context: Context) -> Result<Respo
             let jwks = context.env.secret("ACCESS_TOKEN_JWKS")?.to_string();
             Ok(Response::ok(jwks)?.with_headers(json_headers()))
         })
+        .post_async("/v1/auth/service-token", official_mcp_service_token_create)
+        .post_async(
+            "/v1/auth/service-token/refresh",
+            official_mcp_service_token_refresh,
+        )
+        .post_async(
+            "/v1/auth/service-token/revoke",
+            official_mcp_service_token_revoke,
+        )
+        .post_async(
+            "/v1/auth/service-token/introspect",
+            official_mcp_service_token_introspect,
+        )
         .post_async("/v1/auth/plugin-token", delegated_plugin_token)
         .post_async(
             "/v1/auth/plugin-token/introspect",
