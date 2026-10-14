@@ -68,6 +68,26 @@ struct RemoteComputerNetworkCellSnapshotRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerNetworkEnrollmentIssueRequest {
+    device_secret: String,
+    request_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerNetworkEnrollmentRevokeRequest {
+    device_secret: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerNetworkEnrollmentRedeemRequest {
+    grant_id: String,
+    grant_secret: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RemoteComputerPairRequest {
     pairing_code: String,
     label: String,
@@ -253,6 +273,30 @@ struct RemoteComputerNetworkCellSnapshotRow {
 }
 
 #[derive(Debug, Deserialize)]
+struct RemoteComputerNetworkEnrollmentGrantRow {
+    grant_id: String,
+    request_id: String,
+    cell_id: String,
+    generation: i64,
+    secret_hash: String,
+    expires_at: i64,
+    redeemed_at: Option<i64>,
+    revoked_at: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerNetworkEnrollmentRedeemRow {
+    user_id: String,
+    device_id: String,
+    cell_id: String,
+    generation: i64,
+    secret_hash: String,
+    expires_at: i64,
+    redeemed_at: Option<i64>,
+    revoked_at: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
 struct RemoteComputerPairRow {
     device_id: String,
     label: String,
@@ -374,6 +418,7 @@ struct RemoteComputerToolGrantRow {
 
 const REMOTE_NETWORK_BINDING_MAX_SECONDS: i64 = 24 * 60 * 60;
 const REMOTE_NETWORK_CELL_SNAPSHOT_MAX_BINDINGS: usize = 256;
+const REMOTE_NETWORK_ENROLLMENT_SECONDS: i64 = 5 * 60;
 
 fn remote_network_identifier(value: &str, min: usize, max: usize) -> Option<String> {
     let value = value.trim();
@@ -409,6 +454,52 @@ fn remote_network_authority_allowed(request: &Request, env: &Env) -> bool {
     supplied.len() >= 48
         && expected.len() >= 48
         && constant_time_eq(supplied.as_bytes(), expected.as_bytes())
+}
+
+fn remote_network_cell_for_account(user_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"fabushi-fdn-cell-v1\0");
+    hasher.update(user_id.as_bytes());
+    let digest = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
+    format!("cell-{}", &digest[..32])
+}
+
+fn remote_network_enrollment_secret_hash(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"fabushi-fdn-enrollment-secret-hash-v1\0");
+    hasher.update(value.as_bytes());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
+}
+
+fn recoverable_remote_network_enrollment_secret(
+    device_secret: &str,
+    request_id: &str,
+    grant_id: &str,
+) -> String {
+    fn digest(domain: &[u8], device_secret: &str, request_id: &str, grant_id: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(domain);
+        for value in [device_secret, request_id, grant_id] {
+            hasher.update(value.as_bytes());
+            hasher.update([0]);
+        }
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
+    }
+    format!(
+        "fne_{}{}",
+        digest(
+            b"fabushi-fdn-enrollment-secret-v1:a\0",
+            device_secret,
+            request_id,
+            grant_id,
+        ),
+        digest(
+            b"fabushi-fdn-enrollment-secret-v1:b\0",
+            device_secret,
+            request_id,
+            grant_id,
+        ),
+    )
 }
 
 fn remote_secret_hash(value: &str) -> String {
@@ -1109,6 +1200,356 @@ pub(super) async fn remote_computer_network_binding(
         "expiresAt": row.expires_at,
         "revokedAt": row.revoked_at,
         "active": active,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_network_enrollment_issue(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_account(&request, &context.env) {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let input: RemoteComputerNetworkEnrollmentIssueRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_network_enrollment_request",
+                "Network enrollment grant request must be valid JSON.",
+            );
+        }
+    };
+    let Some(request_id) = remote_mobile_request_id(&input.request_id) else {
+        return error_response(
+            400,
+            "invalid_request_id",
+            "requestId must be a stable bounded enrollment identity.",
+        );
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    if !remote_desktop_secret_matches(
+        &database,
+        &account.user_id,
+        &device_id,
+        &input.device_secret,
+    )
+    .await?
+    {
+        return error_response(
+            403,
+            "target_device_forbidden",
+            "Target device authentication failed.",
+        );
+    }
+    let now = now_seconds();
+
+    if let Some(row) = worker::query!(
+        &database,
+        "SELECT grant_id, request_id, cell_id, generation, secret_hash, expires_at,
+                redeemed_at, revoked_at
+         FROM remote_computer_network_enrollment_grants
+         WHERE user_id = ?1 AND device_id = ?2 AND request_id = ?3 LIMIT 1",
+        &account.user_id,
+        &device_id,
+        &request_id
+    )?
+    .first::<RemoteComputerNetworkEnrollmentGrantRow>(None)
+    .await?
+    {
+        if row.redeemed_at.is_some() || row.revoked_at.is_some() || row.expires_at <= now {
+            return error_response(
+                409,
+                "network_enrollment_request_conflict",
+                "This network enrollment request identity is no longer reusable.",
+            );
+        }
+        let current_generation = worker::query!(
+            &database,
+            "SELECT generation FROM remote_computer_network_bindings
+             WHERE user_id = ?1 AND device_id = ?2 LIMIT 1",
+            &account.user_id,
+            &device_id
+        )?
+        .first::<RemoteComputerGenerationRow>(None)
+        .await?
+        .map(|value| value.generation)
+        .unwrap_or(0);
+        if current_generation >= row.generation {
+            return error_response(
+                409,
+                "network_enrollment_generation_stale",
+                "The network enrollment generation has already been reached.",
+            );
+        }
+        let grant_secret = recoverable_remote_network_enrollment_secret(
+            &input.device_secret,
+            &row.request_id,
+            &row.grant_id,
+        );
+        let secret_hash = remote_network_enrollment_secret_hash(&grant_secret);
+        if !constant_time_eq(secret_hash.as_bytes(), row.secret_hash.as_bytes()) {
+            return error_response(
+                409,
+                "network_enrollment_recovery_conflict",
+                "The existing network enrollment grant cannot be recovered.",
+            );
+        }
+        return Ok(Response::from_json(&json!({
+            "grantId": row.grant_id,
+            "grantSecret": grant_secret,
+            "cellId": row.cell_id,
+            "generation": row.generation,
+            "expiresAt": row.expires_at,
+            "requestId": row.request_id,
+            "reconciled": true,
+        }))?
+        .with_headers(auth_headers()));
+    }
+
+    let generation = worker::query!(
+        &database,
+        "SELECT generation FROM remote_computer_network_bindings
+         WHERE user_id = ?1 AND device_id = ?2 LIMIT 1",
+        &account.user_id,
+        &device_id
+    )?
+    .first::<RemoteComputerGenerationRow>(None)
+    .await?
+    .map(|value| value.generation.saturating_add(1))
+    .unwrap_or(1);
+    let cell_id = remote_network_cell_for_account(&account.user_id);
+    let grant_id = format!("network-enroll-{}", Uuid::new_v4().simple());
+    let grant_secret = recoverable_remote_network_enrollment_secret(
+        &input.device_secret,
+        &request_id,
+        &grant_id,
+    );
+    let secret_hash = remote_network_enrollment_secret_hash(&grant_secret);
+    let expires_at = now.saturating_add(REMOTE_NETWORK_ENROLLMENT_SECONDS);
+    let results = database
+        .batch(vec![
+            worker::query!(
+                &database,
+                "UPDATE remote_computer_network_enrollment_grants
+                 SET revoked_at = ?1
+                 WHERE user_id = ?2 AND device_id = ?3
+                   AND redeemed_at IS NULL AND revoked_at IS NULL",
+                now,
+                &account.user_id,
+                &device_id
+            )?,
+            worker::query!(
+                &database,
+                "INSERT INTO remote_computer_network_enrollment_grants
+                 (grant_id, user_id, device_id, request_id, cell_id, generation,
+                  secret_hash, created_at, expires_at, redeemed_at, revoked_at)
+                 SELECT ?1, d.user_id, d.device_id, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL
+                 FROM remote_computers d
+                 WHERE d.user_id = ?8 AND d.device_id = ?9 AND d.revoked_at IS NULL",
+                &grant_id,
+                &request_id,
+                &cell_id,
+                generation,
+                &secret_hash,
+                now,
+                expires_at,
+                &account.user_id,
+                &device_id
+            )?,
+        ])
+        .await?;
+    if d1_changes(results.get(1)) == 0 {
+        return error_response(
+            404,
+            "network_enrollment_device_not_found",
+            "The target Remote Computer is not active for this account.",
+        );
+    }
+    Ok(Response::from_json(&json!({
+        "grantId": grant_id,
+        "grantSecret": grant_secret,
+        "cellId": cell_id,
+        "generation": generation,
+        "expiresAt": expires_at,
+        "requestId": request_id,
+        "reconciled": false,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_network_enrollment_revoke(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_account(&request, &context.env) {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let grant_id = route_identifier(&context, "grant_id")?.to_string();
+    let input: RemoteComputerNetworkEnrollmentRevokeRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_network_enrollment_revoke",
+                "Network enrollment revoke request must be valid JSON.",
+            );
+        }
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    if !remote_desktop_secret_matches(
+        &database,
+        &account.user_id,
+        &device_id,
+        &input.device_secret,
+    )
+    .await?
+    {
+        return error_response(
+            403,
+            "target_device_forbidden",
+            "Target device authentication failed.",
+        );
+    }
+    let exists = worker::query!(
+        &database,
+        "SELECT 1 AS ok FROM remote_computer_network_enrollment_grants
+         WHERE grant_id = ?1 AND user_id = ?2 AND device_id = ?3 LIMIT 1",
+        &grant_id,
+        &account.user_id,
+        &device_id
+    )?
+    .first::<RemoteComputerExistsRow>(None)
+    .await?
+    .is_some();
+    if !exists {
+        return error_response(
+            404,
+            "network_enrollment_grant_not_found",
+            "Network enrollment grant was not found.",
+        );
+    }
+    let now = now_seconds();
+    worker::query!(
+        &database,
+        "UPDATE remote_computer_network_enrollment_grants
+         SET revoked_at = ?1
+         WHERE grant_id = ?2 AND user_id = ?3 AND device_id = ?4
+           AND redeemed_at IS NULL AND revoked_at IS NULL",
+        now,
+        &grant_id,
+        &account.user_id,
+        &device_id
+    )?
+    .run()
+    .await?;
+    Ok(Response::from_json(&json!({
+        "grantId": grant_id,
+        "revoked": true,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_network_enrollment_redeem(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    if !remote_network_authority_allowed(&request, &context.env) {
+        return error_response(
+            401,
+            "network_authority_unauthorized",
+            "A valid network enrollment authority credential is required.",
+        );
+    }
+    let input: RemoteComputerNetworkEnrollmentRedeemRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_network_enrollment_redeem",
+                "Network enrollment redemption request must be valid JSON.",
+            );
+        }
+    };
+    if !valid_relay_identifier(&input.grant_id, 96)
+        || input.grant_secret.len() < 80
+        || input.grant_secret.len() > 192
+    {
+        return error_response(
+            400,
+            "invalid_network_enrollment_redeem",
+            "Network enrollment grant identity is invalid.",
+        );
+    }
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let row = worker::query!(
+        &database,
+        "SELECT user_id, device_id, cell_id, generation, secret_hash, expires_at,
+                redeemed_at, revoked_at
+         FROM remote_computer_network_enrollment_grants
+         WHERE grant_id = ?1 LIMIT 1",
+        &input.grant_id
+    )?
+    .first::<RemoteComputerNetworkEnrollmentRedeemRow>(None)
+    .await?;
+    let Some(row) = row else {
+        return error_response(
+            404,
+            "network_enrollment_grant_not_found",
+            "Network enrollment grant was not found.",
+        );
+    };
+    let candidate_hash = remote_network_enrollment_secret_hash(&input.grant_secret);
+    if !constant_time_eq(candidate_hash.as_bytes(), row.secret_hash.as_bytes()) {
+        return error_response(
+            404,
+            "network_enrollment_grant_not_found",
+            "Network enrollment grant was not found.",
+        );
+    }
+    let now = now_seconds();
+    if row.redeemed_at.is_some() || row.revoked_at.is_some() || row.expires_at <= now {
+        return error_response(
+            409,
+            "network_enrollment_grant_inactive",
+            "Network enrollment grant is already consumed, revoked, or expired.",
+        );
+    }
+    let claimed = worker::query!(
+        &database,
+        "UPDATE remote_computer_network_enrollment_grants
+         SET redeemed_at = ?1
+         WHERE grant_id = ?2
+           AND redeemed_at IS NULL AND revoked_at IS NULL AND expires_at > ?1
+           AND NOT EXISTS (
+             SELECT 1 FROM remote_computer_network_bindings binding
+             WHERE binding.user_id = remote_computer_network_enrollment_grants.user_id
+               AND binding.device_id = remote_computer_network_enrollment_grants.device_id
+               AND binding.generation >= remote_computer_network_enrollment_grants.generation
+           )",
+        now,
+        &input.grant_id
+    )?
+    .run()
+    .await?;
+    if claimed.meta()?.and_then(|meta| meta.changes).unwrap_or(0) == 0 {
+        return error_response(
+            409,
+            "network_enrollment_grant_conflict",
+            "Network enrollment grant cannot be consumed at its current generation.",
+        );
+    }
+    Ok(Response::from_json(&json!({
+        "userId": row.user_id,
+        "deviceId": row.device_id,
+        "cellId": row.cell_id,
+        "generation": row.generation,
+        "expiresAt": row.expires_at,
     }))?
     .with_headers(auth_headers()))
 }
