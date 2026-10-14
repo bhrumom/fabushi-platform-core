@@ -32,6 +32,8 @@ pub const REMOTE_COMPUTER_TRANSPORT_AUDIT_SCHEMA_V24: &str =
     include_str!("../migrations/0024_remote_computer_transport_audit.sql");
 pub const REMOTE_COMPUTER_AUDIT_GRANTS_SCHEMA_V25: &str =
     include_str!("../migrations/0025_remote_computer_audit_grants.sql");
+pub const REMOTE_COMPUTER_SESSION_RECONCILE_SCHEMA_V26: &str =
+    include_str!("../migrations/0026_remote_computer_session_reconcile.sql");
 pub const WORKSPACE_MESSAGING_SCHEMA_V7: &str =
     include_str!("../migrations/0007_workspace_messaging.sql");
 pub const FABUSHI_PAY_SCHEMA_V7: &str = include_str!("../migrations/0007_fabushi_pay.sql");
