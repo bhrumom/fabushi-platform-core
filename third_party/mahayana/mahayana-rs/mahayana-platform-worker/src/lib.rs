@@ -44,6 +44,8 @@ pub const REMOTE_COMPUTER_NETWORK_BINDING_SCHEMA_V31: &str =
     include_str!("../migrations/0031_remote_computer_network_bindings.sql");
 pub const REMOTE_COMPUTER_TARGET_SERVICE_GRANT_SCHEMA_V32: &str =
     include_str!("../migrations/0032_remote_computer_target_service_grants.sql");
+pub const REMOTE_COMPUTER_NETWORK_ENROLLMENT_GRANT_SCHEMA_V33: &str =
+    include_str!("../migrations/0033_remote_computer_network_enrollment_grants.sql");
 pub const REMOTE_COMPUTER_WORKER_SOURCE: &str = include_str!("worker_api/remote_computer.rs");
 pub const ACCOUNT_WORKER_SOURCE: &str = include_str!("worker_api/account.rs");
 pub const WORKER_ROUTER_SOURCE: &str = include_str!("worker_api.rs");
