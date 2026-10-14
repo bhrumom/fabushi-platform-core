@@ -221,6 +221,70 @@ fn remote_computer_exact_tool_grants_are_generation_bound_and_fail_closed() {
 }
 
 #[test]
+fn remote_computer_network_binding_is_authority_written_generation_fenced_and_secret_safe() {
+    for required in [
+        "CREATE TABLE IF NOT EXISTS remote_computer_network_bindings",
+        "CREATE UNIQUE INDEX IF NOT EXISTS remote_computer_network_live_node_idx",
+        "proof_sha256 TEXT NOT NULL CHECK (length(proof_sha256) = 64)",
+        "generation INTEGER NOT NULL CHECK (generation >= 1)",
+        "remote network binding identity or generation cannot move backwards",
+        "remote_computer_network_binding_audit",
+        "'bound','rebound','revoked'",
+    ] {
+        assert!(
+            REMOTE_COMPUTER_NETWORK_BINDING_SCHEMA_V31.contains(required),
+            "missing network binding schema invariant: {required}"
+        );
+    }
+    for forbidden in [
+        "device_secret TEXT",
+        "client_token TEXT",
+        "mobile_token TEXT",
+        "access_token TEXT",
+        "refresh_token TEXT",
+        "private_key TEXT",
+        "proof TEXT",
+    ] {
+        assert!(
+            !REMOTE_COMPUTER_NETWORK_BINDING_SCHEMA_V31
+                .to_ascii_lowercase()
+                .contains(&forbidden.to_ascii_lowercase()),
+            "network binding state must not persist protected credential/plain proof: {forbidden}"
+        );
+    }
+    for required in [
+        "FDN_NETWORK_AUTHORITY_TOKEN",
+        "X-Fabushi-Network-Authority",
+        "constant_time_eq",
+        "network_binding_generation_conflict",
+        "remote_desktop_secret_matches",
+        "networkBound",
+        "networkGeneration",
+        "networkExpiresAt",
+    ] {
+        assert!(
+            REMOTE_COMPUTER_WORKER_SOURCE.contains(required),
+            "missing network binding source invariant: {required}"
+        );
+    }
+    for route in [
+        "/v1/computers/network-binding",
+        "/v1/internal/computers/network-bindings/bind",
+        "/v1/internal/computers/network-bindings/revoke",
+    ] {
+        assert!(
+            WORKER_ROUTER_SOURCE.contains(route),
+            "network binding endpoint is not wired: {route}"
+        );
+    }
+    assert!(
+        !REMOTE_COMPUTER_WORKER_SOURCE.contains(""cellId": row.cell_id,
+                "nodeId": row.node_id"),
+        "public inventory must not expose network topology"
+    );
+}
+
+#[test]
 fn remote_computer_service_clients_are_connection_bound_and_secret_safe() {
     for required in [
         "ALTER TABLE remote_computer_clients ADD COLUMN service_connection_id TEXT",
