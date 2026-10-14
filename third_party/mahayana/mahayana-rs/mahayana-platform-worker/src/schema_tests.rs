@@ -335,6 +335,51 @@ fn remote_computer_service_clients_are_connection_bound_and_secret_safe() {
 }
 
 #[test]
+fn official_mcp_controller_operations_keep_service_and_target_authority_separate() {
+    for required in [
+        "pub(super) async fn remote_computer_operation_create",
+        "pub(super) async fn remote_computer_operation_query",
+        "pub(super) async fn remote_computer_operation_outcome_unknown",
+        "pub(super) async fn remote_computer_operation_cancel",
+        "remote_controller_account(&request, &context.env).await",
+        "remote_controller_client_binding_matches",
+        "service_binding.as_ref()",
+        "remote_operation_tool_grant_generation",
+    ] {
+        assert!(
+            REMOTE_COMPUTER_WORKER_SOURCE.contains(required),
+            "missing official MCP controller operation invariant: {required}"
+        );
+    }
+
+    let claim_start = REMOTE_COMPUTER_WORKER_SOURCE
+        .find("pub(super) async fn remote_computer_operation_claim")
+        .expect("operation claim source");
+    let result_start = REMOTE_COMPUTER_WORKER_SOURCE
+        .find("pub(super) async fn remote_computer_operation_result")
+        .expect("operation result source");
+    let activate_start = REMOTE_COMPUTER_WORKER_SOURCE
+        .find("pub(super) async fn remote_computer_session_activate")
+        .expect("session activate source");
+    let claim = &REMOTE_COMPUTER_WORKER_SOURCE[claim_start..result_start];
+    let result = &REMOTE_COMPUTER_WORKER_SOURCE[result_start..activate_start];
+    for (name, section) in [("claim", claim), ("result", result)] {
+        assert!(
+            section.contains("authenticated_account(&request, &context.env)"),
+            "target {name} must remain ordinary-account authenticated"
+        );
+        assert!(
+            section.contains("device_secret"),
+            "target {name} must retain device-secret authorization"
+        );
+        assert!(
+            !section.contains("remote_controller_account"),
+            "service controller credential must not authorize target {name}"
+        );
+    }
+}
+
+#[test]
 fn marketplace_account_install_migration_is_account_scoped_and_manifest_projected() {
     assert_eq!(
         validate_marketplace_account_install_schema(MARKETPLACE_ACCOUNT_INSTALL_SCHEMA_V18),
