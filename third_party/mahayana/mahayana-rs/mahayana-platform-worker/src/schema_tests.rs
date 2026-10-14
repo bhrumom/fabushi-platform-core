@@ -800,19 +800,19 @@ fn official_mcp_controller_network_route_is_service_only_minimal_and_live_bound(
 
     for required in [
         "authenticated_official_mcp_service(",
-        ""devices.control"",
+        r#""devices.control""#,
         "official_mcp_service_claims(",
         "binding.user_id = ?1",
         "binding.device_id = ?2",
         "binding.revoked_at IS NULL",
         "binding.expires_at > ?3",
         "computer.revoked_at IS NULL",
-        ""cellId": row.cell_id",
-        ""nodeId": row.node_id",
-        ""generation": row.generation",
-        ""expiresAt": row.expires_at",
-        ""connectionId": claims.connection_id",
-        ""delegationId": claims.delegation_id",
+        r#""cellId": row.cell_id"#,
+        r#""nodeId": row.node_id"#,
+        r#""generation": row.generation"#,
+        r#""expiresAt": row.expires_at"#,
+        r#""connectionId": claims.connection_id"#,
+        r#""delegationId": claims.delegation_id"#,
     ] {
         assert!(
             route.contains(required),
@@ -833,7 +833,7 @@ fn official_mcp_controller_network_route_is_service_only_minimal_and_live_bound(
     }
     assert!(
         WORKER_ROUTER_SOURCE.contains(
-            ""/v1/computers/:device_id/network-route",\n            remote_computer_controller_network_route,"
+            r#""/v1/computers/:device_id/network-route",\n            remote_computer_controller_network_route,"#
         ),
         "controller network-route endpoint is not wired"
     );
