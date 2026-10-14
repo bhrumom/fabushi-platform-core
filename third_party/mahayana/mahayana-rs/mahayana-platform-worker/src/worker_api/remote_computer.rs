@@ -62,6 +62,34 @@ struct RemoteComputerNetworkBindingRevokeRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerNetworkIngressRequest {
+    device_id: String,
+    device_secret: String,
+    service_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerNetworkIngressBindRequest {
+    user_id: String,
+    cell_id: String,
+    service_id: String,
+    node_id: String,
+    generation: i64,
+    expires_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerNetworkIngressRevokeRequest {
+    user_id: String,
+    cell_id: String,
+    service_id: String,
+    generation: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RemoteComputerNetworkCellSnapshotRequest {
     cell_id: String,
 }
@@ -261,6 +289,23 @@ struct RemoteComputerControllerNetworkRouteRow {
     expires_at: i64,
 }
 
+#[derive(Debug, Deserialize)]
+struct RemoteComputerNetworkIngressRow {
+    cell_id: String,
+    target_generation: i64,
+    node_id: String,
+    ingress_generation: i64,
+    expires_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerNetworkIngressBindingRow {
+    node_id: String,
+    generation: i64,
+    expires_at: i64,
+    revoked_at: Option<i64>,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteComputerNetworkCellSnapshotRow {
@@ -419,6 +464,11 @@ struct RemoteComputerToolGrantRow {
 const REMOTE_NETWORK_BINDING_MAX_SECONDS: i64 = 24 * 60 * 60;
 const REMOTE_NETWORK_CELL_SNAPSHOT_MAX_BINDINGS: usize = 256;
 const REMOTE_NETWORK_ENROLLMENT_SECONDS: i64 = 5 * 60;
+
+fn remote_network_service_id(value: &str) -> Option<String> {
+    let value = value.trim();
+    (value == "official-device-mcp").then(|| value.to_string())
+}
 
 fn remote_network_identifier(value: &str, min: usize, max: usize) -> Option<String> {
     let value = value.trim();
@@ -1200,6 +1250,321 @@ pub(super) async fn remote_computer_network_binding(
         "expiresAt": row.expires_at,
         "revokedAt": row.revoked_at,
         "active": active,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_network_ingress(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_account(&request, &context.env) {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let input: RemoteComputerNetworkIngressRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_network_ingress_request",
+                "Network ingress request must be valid JSON.",
+            );
+        }
+    };
+    let Some(service_id) = remote_network_service_id(&input.service_id) else {
+        return error_response(
+            400,
+            "invalid_network_ingress_service",
+            "Network ingress serviceId is invalid.",
+        );
+    };
+    if !valid_relay_identifier(&input.device_id, 128)
+        || input.device_secret.len() < 48
+        || input.device_secret.len() > 256
+    {
+        return error_response(
+            400,
+            "invalid_network_ingress_request",
+            "Network ingress device identity is invalid.",
+        );
+    }
+    let database = context.env.d1(DATABASE_BINDING)?;
+    if !remote_desktop_secret_matches(
+        &database,
+        &account.user_id,
+        &input.device_id,
+        &input.device_secret,
+    )
+    .await?
+    {
+        return error_response(
+            404,
+            "network_ingress_not_found",
+            "No network ingress peer is available for this computer.",
+        );
+    }
+    let now = now_seconds();
+    let row = worker::query!(
+        &database,
+        "SELECT target.cell_id AS cell_id,
+                target.generation AS target_generation,
+                ingress.node_id AS node_id,
+                ingress.generation AS ingress_generation,
+                CASE WHEN target.expires_at < ingress.expires_at
+                     THEN target.expires_at ELSE ingress.expires_at END AS expires_at
+         FROM remote_computer_network_bindings target
+         JOIN remote_computer_network_ingress_bindings ingress
+           ON ingress.user_id = target.user_id
+          AND ingress.cell_id = target.cell_id
+          AND ingress.service_id = ?4
+         JOIN remote_computers computer
+           ON computer.user_id = target.user_id
+          AND computer.device_id = target.device_id
+         WHERE target.user_id = ?1
+           AND target.device_id = ?2
+           AND target.revoked_at IS NULL
+           AND target.expires_at > ?3
+           AND ingress.revoked_at IS NULL
+           AND ingress.expires_at > ?3
+           AND computer.revoked_at IS NULL
+         LIMIT 1",
+        &account.user_id,
+        &input.device_id,
+        now,
+        &service_id
+    )?
+    .first::<RemoteComputerNetworkIngressRow>(None)
+    .await?;
+    let Some(row) = row else {
+        return error_response(
+            404,
+            "network_ingress_not_found",
+            "No live account/cell ingress peer is available for this computer.",
+        );
+    };
+    Ok(Response::from_json(&json!({
+        "deviceId": input.device_id,
+        "cellId": row.cell_id,
+        "targetGeneration": row.target_generation,
+        "serviceId": service_id,
+        "nodeId": row.node_id,
+        "ingressGeneration": row.ingress_generation,
+        "expiresAt": row.expires_at,
+        "active": true,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_network_ingress_bind(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    if !remote_network_authority_allowed(&request, &context.env) {
+        return error_response(
+            401,
+            "network_authority_unauthorized",
+            "A valid network enrollment authority credential is required.",
+        );
+    }
+    let input: RemoteComputerNetworkIngressBindRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_network_ingress",
+                "Network ingress binding must be valid JSON.",
+            );
+        }
+    };
+    let Some(cell_id) = remote_network_identifier(&input.cell_id, 8, 128) else {
+        return error_response(400, "invalid_network_cell", "Network cellId is invalid.");
+    };
+    let Some(node_id) = remote_network_identifier(&input.node_id, 8, 160) else {
+        return error_response(400, "invalid_network_node", "Network ingress nodeId is invalid.");
+    };
+    let Some(service_id) = remote_network_service_id(&input.service_id) else {
+        return error_response(
+            400,
+            "invalid_network_ingress_service",
+            "Network ingress serviceId is invalid.",
+        );
+    };
+    if input.user_id.trim().is_empty()
+        || input.user_id.len() > 160
+        || input.generation < 1
+    {
+        return error_response(
+            400,
+            "invalid_network_ingress",
+            "Network ingress identity or generation is invalid.",
+        );
+    }
+    let now = now_seconds();
+    if input.expires_at <= now
+        || input.expires_at.saturating_sub(now) > REMOTE_NETWORK_BINDING_MAX_SECONDS
+    {
+        return error_response(
+            400,
+            "invalid_network_ingress_expiry",
+            "Network ingress expiry is outside the allowed window.",
+        );
+    }
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let result = worker::query!(
+        &database,
+        "INSERT INTO remote_computer_network_ingress_bindings
+         (user_id, cell_id, service_id, node_id, generation, bound_at, expires_at, revoked_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)
+         ON CONFLICT(user_id, cell_id, service_id) DO UPDATE SET
+           node_id = excluded.node_id,
+           generation = excluded.generation,
+           bound_at = excluded.bound_at,
+           expires_at = excluded.expires_at,
+           revoked_at = NULL
+         WHERE excluded.generation > remote_computer_network_ingress_bindings.generation",
+        &input.user_id,
+        &cell_id,
+        &service_id,
+        &node_id,
+        input.generation,
+        now,
+        input.expires_at
+    )?
+    .run()
+    .await?;
+    let reconciled = if result.meta()?.and_then(|meta| meta.changes).unwrap_or(0) == 0 {
+        let row = worker::query!(
+            &database,
+            "SELECT node_id, generation, expires_at, revoked_at
+             FROM remote_computer_network_ingress_bindings
+             WHERE user_id = ?1 AND cell_id = ?2 AND service_id = ?3 LIMIT 1",
+            &input.user_id,
+            &cell_id,
+            &service_id
+        )?
+        .first::<RemoteComputerNetworkIngressBindingRow>(None)
+        .await?;
+        let Some(row) = row else {
+            return error_response(
+                409,
+                "network_ingress_generation_conflict",
+                "Network ingress generation must advance monotonically.",
+            );
+        };
+        if row.node_id != node_id
+            || row.generation != input.generation
+            || row.expires_at != input.expires_at
+            || row.revoked_at.is_some()
+        {
+            return error_response(
+                409,
+                "network_ingress_generation_conflict",
+                "Network ingress generation must advance monotonically.",
+            );
+        }
+        true
+    } else {
+        false
+    };
+    Ok(Response::from_json(&json!({
+        "ok": true,
+        "userId": input.user_id,
+        "cellId": cell_id,
+        "serviceId": service_id,
+        "nodeId": node_id,
+        "generation": input.generation,
+        "expiresAt": input.expires_at,
+        "reconciled": reconciled,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_network_ingress_revoke(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    if !remote_network_authority_allowed(&request, &context.env) {
+        return error_response(
+            401,
+            "network_authority_unauthorized",
+            "A valid network enrollment authority credential is required.",
+        );
+    }
+    let input: RemoteComputerNetworkIngressRevokeRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_network_ingress_revoke",
+                "Network ingress revoke request must be valid JSON.",
+            );
+        }
+    };
+    let Some(cell_id) = remote_network_identifier(&input.cell_id, 8, 128) else {
+        return error_response(400, "invalid_network_cell", "Network cellId is invalid.");
+    };
+    let Some(service_id) = remote_network_service_id(&input.service_id) else {
+        return error_response(
+            400,
+            "invalid_network_ingress_service",
+            "Network ingress serviceId is invalid.",
+        );
+    };
+    if input.user_id.trim().is_empty()
+        || input.user_id.len() > 160
+        || input.generation < 1
+    {
+        return error_response(
+            400,
+            "invalid_network_ingress_revoke",
+            "Network ingress revoke identity is invalid.",
+        );
+    }
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    let result = worker::query!(
+        &database,
+        "UPDATE remote_computer_network_ingress_bindings SET revoked_at = ?1
+         WHERE user_id = ?2 AND cell_id = ?3 AND service_id = ?4
+           AND generation = ?5 AND revoked_at IS NULL",
+        now,
+        &input.user_id,
+        &cell_id,
+        &service_id,
+        input.generation
+    )?
+    .run()
+    .await?;
+    if result.meta()?.and_then(|meta| meta.changes).unwrap_or(0) == 0 {
+        let already_revoked = worker::query!(
+            &database,
+            "SELECT 1 AS ok FROM remote_computer_network_ingress_bindings
+             WHERE user_id = ?1 AND cell_id = ?2 AND service_id = ?3
+               AND generation = ?4 AND revoked_at IS NOT NULL LIMIT 1",
+            &input.user_id,
+            &cell_id,
+            &service_id,
+            input.generation
+        )?
+        .first::<RemoteComputerExistsRow>(None)
+        .await?
+        .is_some();
+        if !already_revoked {
+            return error_response(
+                404,
+                "network_ingress_not_found",
+                "No live network ingress binding matches this account, cell, service, and generation.",
+            );
+        }
+    }
+    Ok(Response::from_json(&json!({
+        "ok": true,
+        "userId": input.user_id,
+        "cellId": cell_id,
+        "serviceId": service_id,
+        "generation": input.generation,
+        "revokedAt": now,
     }))?
     .with_headers(auth_headers()))
 }

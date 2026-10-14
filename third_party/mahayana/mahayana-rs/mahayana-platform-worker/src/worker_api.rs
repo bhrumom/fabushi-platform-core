@@ -584,6 +584,7 @@ pub async fn main(request: Request, env: Env, _context: Context) -> Result<Respo
         .post_async("/v1/computers/register", remote_computer_register)
         .post_async("/v1/computers/heartbeat", remote_computer_heartbeat)
         .post_async("/v1/computers/network-binding", remote_computer_network_binding)
+        .post_async("/v1/computers/network-ingress", remote_computer_network_ingress)
         .post_async(
             "/v1/computers/:device_id/network-route",
             remote_computer_controller_network_route,
@@ -611,6 +612,14 @@ pub async fn main(request: Request, env: Env, _context: Context) -> Result<Respo
         .post_async(
             "/v1/internal/computers/network-bindings/revoke",
             remote_computer_network_binding_revoke,
+        )
+        .post_async(
+            "/v1/internal/computers/network-ingress/bind",
+            remote_computer_network_ingress_bind,
+        )
+        .post_async(
+            "/v1/internal/computers/network-ingress/revoke",
+            remote_computer_network_ingress_revoke,
         )
         .post_async("/v1/computers/pair", remote_computer_pair)
         .get_async("/v1/computers/:device_id/clients", remote_computer_clients)
