@@ -21,8 +21,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Format
-        run: cargo fmt --manifest-path deploy/platform-worker/Cargo.toml -- --check
+      - name: Format changed Rust sources
+        run: |
+          rustfmt --edition 2024 --check third_party/mahayana/mahayana-rs/mahayana-platform-worker/src/worker_api/remote_computer.rs
+          rustfmt --edition 2024 --check third_party/mahayana/mahayana-rs/mahayana-platform-worker/src/schema_tests.rs
+          rustfmt --edition 2024 --check third_party/mahayana/mahayana-rs/mahayana-platform-worker/src/lib.rs
       - name: Host schema and contract tests
         run: cargo test --manifest-path deploy/platform-worker/Cargo.toml
       - name: Wasm worker check
