@@ -7,6 +7,13 @@ on:
       - "third_party/mahayana/mahayana-rs/mahayana-platform-worker/**"
       - "deploy/platform-worker/**"
       - ".github/workflows/fdn-session-reconcile.yml"
+  push:
+    branches: [main]
+    paths:
+      - "docs/specs/fdn-001-remote-computer-session-reconciliation.md"
+      - "third_party/mahayana/mahayana-rs/mahayana-platform-worker/**"
+      - "deploy/platform-worker/**"
+      - ".github/workflows/fdn-session-reconcile.yml"
   workflow_dispatch:
 
 permissions:
