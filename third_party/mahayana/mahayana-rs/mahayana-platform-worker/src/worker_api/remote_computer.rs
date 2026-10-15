@@ -846,7 +846,7 @@ pub(super) async fn remote_computer_list(
     request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
+    let account = match authenticated_live_account(&request, &context.env).await {
         Ok(account) => account,
         Err(_) => match authenticated_official_mcp_service(
             &request,
@@ -927,7 +927,7 @@ pub(super) async fn remote_computer_register(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
+    let account = match authenticated_live_account(&request, &context.env).await {
         Ok(account) => account,
         Err(_) => {
             return error_response(
@@ -1066,7 +1066,7 @@ pub(super) async fn remote_computer_heartbeat(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
+    let account = match authenticated_live_account(&request, &context.env).await {
         Ok(account) => account,
         Err(_) => {
             return error_response(401, "unauthorized", "A valid account token is required.");
@@ -1182,7 +1182,7 @@ pub(super) async fn remote_computer_network_binding(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
+    let account = match authenticated_live_account(&request, &context.env).await {
         Ok(account) => account,
         Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
     };
@@ -1258,7 +1258,7 @@ pub(super) async fn remote_computer_network_ingress(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
+    let account = match authenticated_live_account(&request, &context.env).await {
         Ok(account) => account,
         Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
     };
@@ -1573,7 +1573,7 @@ pub(super) async fn remote_computer_network_enrollment_issue(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
+    let account = match authenticated_live_account(&request, &context.env).await {
         Ok(account) => account,
         Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
     };
@@ -1750,7 +1750,7 @@ pub(super) async fn remote_computer_network_enrollment_revoke(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
+    let account = match authenticated_live_account(&request, &context.env).await {
         Ok(account) => account,
         Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
     };
@@ -2362,7 +2362,7 @@ pub(super) async fn remote_computer_session_grant(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
+    let account = match authenticated_live_account(&request, &context.env).await {
         Ok(account) => account,
         Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
     };
@@ -2588,7 +2588,7 @@ pub(super) async fn remote_computer_clients(
     request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
+    let account = match authenticated_live_account(&request, &context.env).await {
         Ok(account) => account,
         Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
     };
@@ -2630,7 +2630,7 @@ pub(super) async fn remote_computer_client_revoke(
     request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
+    let account = match authenticated_live_account(&request, &context.env).await {
         Ok(account) => account,
         Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
     };
@@ -2670,7 +2670,7 @@ pub(super) async fn remote_computer_sessions(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
+    let account = match authenticated_live_account(&request, &context.env).await {
         Ok(account) => account,
         Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
     };
@@ -2831,7 +2831,7 @@ async fn remote_controller_account(
     request: &Request,
     env: &Env,
 ) -> Result<(AuthenticatedAccount, Option<(String, String)>)> {
-    if let Ok(account) = authenticated_account(request, env) {
+    if let Ok(account) = authenticated_live_account(request, env).await {
         return Ok((account, None));
     }
     let account = authenticated_official_mcp_service(request, env, "devices.control").await?;
@@ -3437,7 +3437,7 @@ pub(super) async fn remote_computer_tool_grant(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
+    let account = match authenticated_live_account(&request, &context.env).await {
         Ok(account) => account,
         Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
     };
@@ -3531,7 +3531,7 @@ pub(super) async fn remote_computer_tool_revoke(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
+    let account = match authenticated_live_account(&request, &context.env).await {
         Ok(account) => account,
         Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
     };
@@ -3959,7 +3959,7 @@ pub(super) async fn remote_computer_operation_claim(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
+    let account = match authenticated_live_account(&request, &context.env).await {
         Ok(account) => account,
         Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
     };
@@ -4069,7 +4069,7 @@ pub(super) async fn remote_computer_operation_access(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
+    let account = match authenticated_live_account(&request, &context.env).await {
         Ok(account) => account,
         Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
     };
@@ -4188,7 +4188,7 @@ pub(super) async fn remote_computer_operation_result(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
+    let account = match authenticated_live_account(&request, &context.env).await {
         Ok(account) => account,
         Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
     };
@@ -4307,7 +4307,7 @@ pub(super) async fn remote_computer_session_activate(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
+    let account = match authenticated_live_account(&request, &context.env).await {
         Ok(account) => account,
         Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
     };
@@ -4467,7 +4467,7 @@ pub(super) async fn remote_computer_session_transport(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
+    let account = match authenticated_live_account(&request, &context.env).await {
         Ok(account) => account,
         Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
     };
@@ -4623,7 +4623,7 @@ pub(super) async fn remote_computer_session_close(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
+    let account = match authenticated_live_account(&request, &context.env).await {
         Ok(account) => account,
         Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
     };
@@ -4703,7 +4703,7 @@ pub(super) async fn remote_computer_signal(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
+    let account = match authenticated_live_account(&request, &context.env).await {
         Ok(account) => account,
         Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
     };
@@ -4856,7 +4856,7 @@ pub(super) async fn remote_computer_signal_drain(
     mut request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let account = match authenticated_account(&request, &context.env) {
+    let account = match authenticated_live_account(&request, &context.env).await {
         Ok(account) => account,
         Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
     };

@@ -347,7 +347,7 @@ fn network_enrollment_grants_are_target_issued_authority_redeemed_and_secret_saf
     let redeem = &REMOTE_COMPUTER_WORKER_SOURCE[redeem_start..snapshot_start];
 
     for required in [
-        "authenticated_account(&request, &context.env)",
+        "authenticated_live_account(&request, &context.env).await",
         "remote_desktop_secret_matches",
         "remote_network_cell_for_account(&account.user_id)",
         "value.generation.saturating_add(1)",
@@ -378,7 +378,7 @@ fn network_enrollment_grants_are_target_issued_authority_redeemed_and_secret_saf
     }
 
     for required in [
-        "authenticated_account(&request, &context.env)",
+        "authenticated_live_account(&request, &context.env).await",
         "remote_desktop_secret_matches",
         "redeemed_at IS NULL AND revoked_at IS NULL",
     ] {
@@ -406,7 +406,7 @@ fn network_enrollment_grants_are_target_issued_authority_redeemed_and_secret_saf
         );
     }
     for forbidden in [
-        "authenticated_account(",
+        "authenticated_live_account(",
         "authenticated_official_mcp_service",
         "official_mcp_service_claims",
         r#""grantSecret":"#,
@@ -479,7 +479,7 @@ fn remote_computer_network_cell_snapshot_is_authority_only_live_minimal_and_boun
         "proofSha256",
         "device_secret",
         "deviceSecret",
-        "authenticated_account(",
+        "authenticated_live_account(",
         "authenticated_official_mcp_service",
         "official_mcp_service_claims",
     ] {
@@ -566,7 +566,7 @@ fn target_service_session_grant_is_idempotent_secret_safe_and_target_only() {
 
     for required in [
         "pub(super) async fn remote_computer_session_grant",
-        "authenticated_account(&request, &context.env)",
+        "authenticated_live_account(&request, &context.env).await",
         "remote_desktop_secret_matches",
         "active_official_mcp_service_binding",
         "recoverable_target_service_client_token",
@@ -647,7 +647,7 @@ fn official_mcp_controller_operations_keep_service_and_target_authority_separate
     let result = &REMOTE_COMPUTER_WORKER_SOURCE[result_start..activate_start];
     for (name, section) in [("claim", claim), ("access", access), ("result", result)] {
         assert!(
-            section.contains("authenticated_account(&request, &context.env)"),
+            section.contains("authenticated_live_account(&request, &context.env).await"),
             "target {name} must remain ordinary-account authenticated"
         );
         assert!(
@@ -1065,7 +1065,7 @@ fn official_mcp_controller_network_route_is_service_only_minimal_and_live_bound(
         );
     }
     for forbidden in [
-        "authenticated_account(",
+        "authenticated_live_account(",
         "proof_sha256",
         "proofSha256",
         "device_secret",
@@ -1129,7 +1129,7 @@ fn remote_computer_target_network_ingress_is_authority_written_account_cell_fenc
         .expect("target network ingress reader must precede bind handler");
     let target_read = &rest[..end];
     for required in [
-        "authenticated_account(&request, &context.env)",
+        "authenticated_live_account(&request, &context.env).await",
         "remote_desktop_secret_matches(",
         "remote_computer_network_bindings target",
         "remote_computer_network_ingress_bindings ingress",
@@ -1195,6 +1195,38 @@ fn remote_computer_target_network_ingress_is_authority_written_account_cell_fenc
         assert!(
             WORKER_ROUTER_SOURCE.contains(route),
             "target ingress endpoint is not wired: {route}"
+        );
+    }
+}
+
+#[test]
+fn remote_computer_ordinary_auth_requires_live_session_everywhere() {
+    assert!(
+        !REMOTE_COMPUTER_WORKER_SOURCE.contains("authenticated_account("),
+        "Remote Computer must not use signature-only ordinary account authorization"
+    );
+    assert!(
+        REMOTE_COMPUTER_WORKER_SOURCE.contains("authenticated_live_account(request, env).await")
+    );
+    let account_source = include_str!("worker_api/account.rs");
+    let start = account_source
+        .find("pub(super) async fn authenticated_live_account(")
+        .unwrap();
+    let end = account_source[start..]
+        .find("pub(super) fn authenticated_user(")
+        .unwrap()
+        + start;
+    let live_auth = &account_source[start..end];
+    for required in [
+        "account.is_test_account",
+        "account.session_id",
+        "account_sessions",
+        "revoked_at IS NULL",
+        "session.expires_at > now_seconds()",
+    ] {
+        assert!(
+            live_auth.contains(required),
+            "missing ordinary live-session fence: {required}"
         );
     }
 }
