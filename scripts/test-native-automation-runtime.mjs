@@ -49,7 +49,7 @@ const evidence = { kind: 'native-automation-actual-wasm-local-d1', sourceSha: pr
   accountFixture: 'ephemeral locally-signed RS256 plus actual account_sessions; does not exercise login issuance',
   deployedCloud: 'NOT_VERIFIED', packagedDesktop: 'NOT_VERIFIED', assertions, overall: 'FAIL' };
 async function start() {
-  worker = spawn(wrangler, ['dev','--local','--port','8787','--ip','127.0.0.1','--persist-to',state,'--config',configPath], { stdio: 'ignore' });
+  worker = spawn(wrangler, ['dev','--local','--port','8787','--ip','127.0.0.1','--persist-to',state,'--config',configPath], { stdio: 'ignore', detached: true });
   for (let n=0; n<60; n++) {
     if (worker.exitCode != null) throw Error('fixture_worker_exited');
     try { if ((await fetch('http://127.0.0.1:8787/health', { signal: AbortSignal.timeout(1000) })).ok) return; } catch {}
@@ -61,10 +61,21 @@ async function stop() {
   if (!worker || worker.exitCode != null || worker.signalCode != null) return;
   const owned = worker;
   const exited = new Promise(resolve => owned.once('exit',resolve));
-  owned.kill('SIGTERM');
+  // The detached process group was created by this exact child launch. Verify
+  // its leader before signalling, and never clean a foreign name/PID set.
+  const pgid = execFileSync('ps',['-o','pgid=','-p',String(owned.pid)],{encoding:'utf8'}).trim();
+  assert.equal(pgid,String(owned.pid),'fixture ownership changed');
+  process.kill(-owned.pid,'SIGTERM');
   let timeout;
   try { await Promise.race([exited,new Promise((_,reject)=>{timeout=setTimeout(()=>reject(Error('fixture_worker_stop_timeout')),10000);})]); }
   finally { clearTimeout(timeout); }
+  let stopped = false;
+  for (let n=0; n<10; n++) {
+    try { await fetch('http://127.0.0.1:8787/health',{signal:AbortSignal.timeout(300)}); }
+    catch { stopped = true; break; }
+    await new Promise(r=>setTimeout(r,200));
+  }
+  assert.ok(stopped,'owned Worker remained reachable after stop; restart cannot be claimed');
 }
 async function call(path, bearer=a, body, method=body===undefined?'GET':'POST') {
   const r=await fetch(`http://127.0.0.1:8787${path}`, { method, redirect:'manual',
