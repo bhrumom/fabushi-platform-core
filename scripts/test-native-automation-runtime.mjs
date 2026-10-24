@@ -45,6 +45,7 @@ const b = token('b','session-b');
 const missing = token('a','missing-session');
 const expiredSession = token('a','expired-session');
 let worker;
+let startupOutput='';
 const assertions = [];
 const evidence = { kind: 'native-automation-actual-wasm-local-d1', sourceSha: process.env.SUBJECT_SHA,
   runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT,
@@ -52,12 +53,20 @@ const evidence = { kind: 'native-automation-actual-wasm-local-d1', sourceSha: pr
   accountFixture: 'ephemeral locally-signed RS256 plus actual account_sessions; does not exercise login issuance',
   deployedCloud: 'NOT_VERIFIED', packagedDesktop: 'NOT_VERIFIED', assertions, overall: 'FAIL' };
 async function start() {
-  worker = spawn(wrangler, ['dev','--local','--port','8787','--ip','127.0.0.1','--persist-to',state,'--config',configPath], { stdio: 'ignore', detached: true });
+  startupOutput='';
+  worker = spawn(wrangler, ['dev','--local','--port','8787','--ip','127.0.0.1','--persist-to',state,'--config',configPath], { stdio: ['ignore','pipe','pipe'], detached: true });
+  const capture=data=>{if(startupOutput.length<65536)startupOutput+=data.toString();};
+  worker.stdout.on('data',capture);worker.stderr.on('data',capture);
   for (let n=0; n<60; n++) {
     if (worker.exitCode != null) throw Error('fixture_worker_exited');
     try { if ((await fetch('http://127.0.0.1:8787/health', { signal: AbortSignal.timeout(1000) })).ok) return; } catch {}
     await new Promise(r=>setTimeout(r,1000));
   }
+  // Diagnostic messages only, never fixture keys, token values or config dumps.
+  const safe=startupOutput.replaceAll(publicKey.export({type:'spki',format:'pem'}),'[public-key]')
+    .split('\n').filter(line=>/error|failed|cannot|could|exception|invalid|no matching export|not found/i.test(line)
+      && !/PRIVATE_KEY|PUBLIC_KEY|ACCESS_TOKEN|authorization|bearer/i.test(line)).slice(-20);
+  console.error(safe.join('\n'));
   throw Error('fixture_worker_start_timeout');
 }
 async function stop() {
