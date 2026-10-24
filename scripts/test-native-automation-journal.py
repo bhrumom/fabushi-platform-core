@@ -24,6 +24,7 @@ class Journal(unittest.TestCase):
         self.path = pathlib.Path(self.tmp.name) / 'journal.db'
         self.db = sqlite3.connect(self.path)
         self.db.executescript(SCHEMA)
+        self.db.executescript((WORKER / 'migrations/0037_automation_execution.sql').read_text())
 
     def tearDown(self):
         self.db.close()
@@ -132,6 +133,61 @@ class DefinitionClock(Journal):
         self.assertEqual(self.db.execute(select, (1000,)).fetchall(), [('z',), ('a',)])
         self.assertEqual(self.db.execute("SELECT next_runs_json,updated_at,revision FROM automation_definitions WHERE user_id='a'").fetchall(),
                          [('[1000]', 10, 'rev'), ('[1000]', 10, 'rev')])
+
+class Execution(Journal):
+    def setUp(self):
+        super().setUp()
+        self.db.executescript(DEFINITION_SCHEMA)
+        self.db.executescript((WORKER / 'migrations/0006_remote_computer.sql').read_text())
+        self.db.executemany('INSERT INTO remote_computers(device_id,user_id,label,device_secret_hash,created_at,last_seen_at) VALUES(?,?,?,?,?,?)',
+            [('device-a','a','A','hash-a',1,1), ('device-b','a','B','hash-b',1,1)])
+        self.create()
+        self.db.commit()
+
+    def statement(self, name):
+        source = (WORKER / 'src/automation_execution.rs').read_text()
+        return re.search(r'pub const ' + name + r':\s*&str\s*=\s*"(.*?)";', source, re.S).group(1)
+
+    def claim(self, claim='claim-a', token='token-a', device='device-a', now=100, db=None):
+        return (db or self.db).execute(self.statement('CLAIM'),
+            (claim,token,device,'session',now+60,'a','r',now)).rowcount
+
+    def start(self, claim='claim-a', token='token-a', device='device-a', generation=1, now=110):
+        return self.db.execute(self.statement('START'), (now,'a','r',claim,token,device,generation)).rowcount
+
+    def test_device_race_expired_reservation_and_generation_fence(self):
+        other=sqlite3.connect(self.path)
+        self.assertEqual(self.claim(),1);self.db.commit()
+        self.assertEqual(self.claim('claim-b','token-b','device-b',db=other),0);other.commit()
+        self.assertEqual(self.claim(now=170),0,'same claim never refreshes even after expiry')
+        self.assertEqual(self.claim('claim-b','token-b','device-b',now=170),1)
+        self.assertEqual(self.start(),0)
+        self.assertEqual(self.start('claim-b','token-b','device-b',generation=1,now=180),0)
+        self.assertEqual(self.start('claim-b','token-b','device-b',generation=2,now=180),1)
+        self.assertEqual(self.claim('claim-c','token-c','device-a',now=10000),0)
+        other.close()
+
+    def test_running_unknown_and_terminal_never_reclaim_or_accept_ordinary_completion(self):
+        self.assertEqual(self.claim(),1);self.assertEqual(self.start(),1)
+        self.assertEqual(self.complete(),0)
+        self.assertEqual(self.db.execute(self.statement('UNKNOWN'),('a','r','claim-a','token-a','device-a',1)).rowcount,1)
+        self.assertEqual(self.claim('claim-b','token-b','device-b',now=10000),0)
+        args=('{}','terminal',200,'a','r','claim-a','token-a','device-a',1)
+        self.assertEqual(self.db.execute(self.statement('COMPLETE'),args).rowcount,1)
+        self.assertEqual(self.db.execute(self.statement('COMPLETE'),args).rowcount,0)
+        self.assertEqual(self.claim('claim-b','token-b','device-b',now=10000),0)
+        self.assertEqual(self.db.execute('SELECT completed_at,completion_digest FROM automation_runs').fetchone(),(200,'terminal'))
+
+    def test_revoked_device_and_changed_definition_cannot_start(self):
+        self.assertEqual(self.claim(),1)
+        self.db.execute("UPDATE remote_computers SET revoked_at=105 WHERE device_id='device-a'")
+        self.assertEqual(self.start(),0)
+        self.db.execute("UPDATE remote_computers SET revoked_at=NULL WHERE device_id='device-a'")
+        self.db.execute("UPDATE automation_runs SET event_json=? WHERE run_uuid='r'",
+            ('{"definitionRevision":"rev","automationId":"routine","sandAgentId":"agent"}',))
+        self.assertEqual(self.start(),0,'missing definition fences reserved start')
+        self.db.execute("INSERT INTO automation_definitions(user_id,automation_id,agent_id,definition_json,revision,mutation_id,next_runs_json,updated_at) VALUES('a','routine','agent','{\"enabled\":true}','rev','mutation','[]',1)")
+        self.assertEqual(self.start(),1)
 
 if __name__ == '__main__':
     unittest.main()

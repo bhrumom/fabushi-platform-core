@@ -2,15 +2,15 @@ use super::*;
 use crate::automation_runs::{self as domain, Completion, PollRequest, RunEvent};
 
 #[derive(Deserialize)]
-struct RunRow {
+pub(super) struct RunRow {
     event_json: String,
     event_digest: String,
     completion_json: Option<String>,
-    completion_digest: Option<String>,
+    pub(super) completion_digest: Option<String>,
     completed_at: Option<i64>,
     acknowledged_at: Option<i64>,
 }
-async fn bounded_json<T: serde::de::DeserializeOwned>(request: &mut Request) -> Result<T> {
+pub(super) async fn bounded_json<T: serde::de::DeserializeOwned>(request: &mut Request) -> Result<T> {
     if request.headers().get("Content-Length")?.and_then(|v| v.parse::<usize>().ok()).is_some_and(|v| v > 80_000) {
         return Err(worker::Error::RustError("automation request exceeds size limit".into()));
     }
@@ -20,7 +20,7 @@ async fn bounded_json<T: serde::de::DeserializeOwned>(request: &mut Request) -> 
     }
     serde_json::from_str(&body).map_err(internal_json)
 }
-async fn read_run(database: &worker::D1Database, user: &str, run: &str) -> Result<Option<RunRow>> {
+pub(super) async fn read_run(database: &worker::D1Database, user: &str, run: &str) -> Result<Option<RunRow>> {
     worker::query!(database,
         "SELECT event_json,event_digest,completion_json,completion_digest,completed_at,acknowledged_at
          FROM automation_runs WHERE user_id=?1 AND run_uuid=?2", user, run)?
@@ -32,7 +32,7 @@ fn internal_json(error: serde_json::Error) -> worker::Error {
 fn response(value: Value) -> Result<Response> {
     Ok(Response::from_json(&value)?.with_headers(auth_headers()))
 }
-fn run_value(user: &str, run: &str, row: &RunRow) -> Result<Value> {
+pub(super) fn run_value(user: &str, run: &str, row: &RunRow) -> Result<Value> {
     let event: RunEvent = serde_json::from_str(&row.event_json).map_err(internal_json)?;
     let completion = row.completion_json.as_deref().map(serde_json::from_str::<Value>)
         .transpose().map_err(internal_json)?;
