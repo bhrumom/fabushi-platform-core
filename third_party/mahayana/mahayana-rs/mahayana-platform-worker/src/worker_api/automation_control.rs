@@ -5,10 +5,10 @@ use crate::automation_runs::{self as runs,RunEvent};
 
 #[derive(Deserialize)]
 struct DefinitionRow {
-    automation_id:String,definition_json:String,revision:String,mutation_id:String,
+    automation_id:String,agent_id:String,definition_json:String,revision:String,mutation_id:String,
     next_runs_json:String,updated_at:i64,deleted_at:Option<i64>,
 }
-const SELECT_ROW:&str="SELECT automation_id,definition_json,revision,mutation_id,next_runs_json,updated_at,deleted_at
+const SELECT_ROW:&str="SELECT automation_id,agent_id,definition_json,revision,mutation_id,next_runs_json,updated_at,deleted_at
  FROM automation_definitions WHERE user_id=?1 AND automation_id=?2";
 async fn row(db:&worker::D1Database,user:&str,id:&str)->Result<Option<DefinitionRow>> {
     worker::query!(db,SELECT_ROW,user,id)?.first::<DefinitionRow>(None).await
@@ -24,7 +24,7 @@ async fn body<T:serde::de::DeserializeOwned>(request:&mut Request)->Result<T> {
 }
 fn wire(row:&DefinitionRow)->Result<Value> {
     let definition=if row.deleted_at.is_some() {None} else {Some(serde_json::from_str::<Definition>(&row.definition_json).map_err(json_error)?)};
-    Ok(json!({"id":row.automation_id,"definition":definition,"revision":row.revision,"deleted":row.deleted_at.is_some(),
+    Ok(json!({"id":row.automation_id,"agentId":row.agent_id,"definition":definition,"revision":row.revision,"deleted":row.deleted_at.is_some(),
         "updatedAt":row.updated_at,"nextRunsMs":serde_json::from_str::<Value>(&row.next_runs_json).map_err(json_error)?}))
 }
 async fn next_wake(db:&worker::D1Database,user:&str)->Result<Option<i64>> {
@@ -55,7 +55,7 @@ pub(super) async fn automation_definition_list(request:Request,context:RouteCont
     let cursor=query.get("cursor").map(|v|v.as_ref()).unwrap_or("");
     if (!agent.is_empty()&&!runs::valid_id(agent))||(!cursor.is_empty()&&!runs::valid_id(cursor)) {return error_response(400,"invalid_query","Invalid automation query.");}
     let db=context.env.d1(DATABASE_BINDING)?;
-    let rows=worker::query!(&db,"SELECT automation_id,definition_json,revision,mutation_id,next_runs_json,updated_at,deleted_at
+    let rows=worker::query!(&db,"SELECT automation_id,agent_id,definition_json,revision,mutation_id,next_runs_json,updated_at,deleted_at
         FROM automation_definitions WHERE user_id=?1 AND (?2='' OR agent_id=?2) AND automation_id>?3
         ORDER BY automation_id LIMIT 100",&account.user_id,agent,cursor)?.all().await?.results::<DefinitionRow>()?;
     let next_cursor=if rows.len()==100 {rows.last().map(|r|r.automation_id.clone())}else{None};
@@ -113,7 +113,7 @@ pub(super) async fn automation_clock_tick(mut request:Request,context:RouteConte
 async fn tick_user(env:&Env,user:&str)->Result<Value> {
     let db=env.d1(DATABASE_BINDING)?;let now=now_seconds()*1000;let mut emitted=0;let mut blocked=false;
     for _ in 0..100 {
-        let Some(found)=worker::query!(&db,"SELECT automation_id,definition_json,revision,mutation_id,next_runs_json,updated_at,deleted_at
+        let Some(found)=worker::query!(&db,"SELECT automation_id,agent_id,definition_json,revision,mutation_id,next_runs_json,updated_at,deleted_at
             FROM automation_definitions d WHERE user_id=?1 AND deleted_at IS NULL
             AND EXISTS(SELECT 1 FROM json_each(d.next_runs_json) p WHERE p.type='integer' AND CAST(p.value AS INTEGER)<=?2)
             ORDER BY updated_at,automation_id LIMIT 1",user,now)?.first::<DefinitionRow>(None).await? else{break;};
