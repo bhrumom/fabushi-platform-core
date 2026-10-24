@@ -109,6 +109,7 @@ try {
   sql('PLATFORM_DB',readFileSync(join(workerRoot,'migrations/0001_platform.sql'),'utf8'));
   sql('PLATFORM_DB',readFileSync(join(workerRoot,'migrations/0035_automation_runs.sql'),'utf8'));
   sql('PLATFORM_DB',readFileSync(join(workerRoot,'migrations/0036_automation_definitions.sql'),'utf8'));
+  sql('PLATFORM_DB',readFileSync(join(workerRoot,'migrations/0037_automation_execution.sql'),'utf8'));
   const windowStart=Math.floor(now/(30*86400))*(30*86400);
   sql('PLATFORM_DB',`INSERT INTO ai_usage_budgets VALUES
     ('a',${windowStart},${windowStart+30*86400},1000,250,100,${now}),

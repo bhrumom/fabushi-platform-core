@@ -2,6 +2,7 @@
 
 pub mod automation_runs;
 pub mod automation_definitions;
+pub mod automation_execution;
 pub mod automation_schedule;
 
 #[cfg(any(target_arch = "wasm32", test))]

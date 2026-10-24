@@ -559,7 +559,7 @@ fn remote_secret_hash(value: &str) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
 }
 
-async fn remote_desktop_secret_matches(
+pub(super) async fn remote_desktop_secret_matches(
     database: &worker::D1Database,
     user_id: &str,
     device_id: &str,

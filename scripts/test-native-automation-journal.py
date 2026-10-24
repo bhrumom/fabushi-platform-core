@@ -24,6 +24,7 @@ class Journal(unittest.TestCase):
         self.path = pathlib.Path(self.tmp.name) / 'journal.db'
         self.db = sqlite3.connect(self.path)
         self.db.executescript(SCHEMA)
+        self.db.executescript((WORKER / 'migrations/0037_automation_execution.sql').read_text())
 
     def tearDown(self):
         self.db.close()

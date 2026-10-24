@@ -9,7 +9,7 @@ pub const INSERT_RUN: &str = "INSERT OR IGNORE INTO automation_runs
 SELECT ?1,?2,?3,?4,?5 WHERE
 (SELECT COUNT(*) FROM automation_runs WHERE user_id=?1) < 20000";
 pub const COMPLETE_RUN: &str = "UPDATE automation_runs SET completion_json=?1,completion_digest=?2,completed_at=?3
-WHERE user_id=?4 AND run_uuid=?5 AND completion_digest IS NULL";
+WHERE user_id=?4 AND run_uuid=?5 AND completion_digest IS NULL AND execution_state IS NULL";
 pub const ACK_RUN: &str = "UPDATE automation_runs SET acknowledged_at=COALESCE(acknowledged_at,?1)
 WHERE user_id=?2 AND run_uuid=?3 AND completion_digest IS NOT NULL";
 
