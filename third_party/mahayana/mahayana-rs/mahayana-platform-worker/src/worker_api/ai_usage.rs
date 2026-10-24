@@ -4,10 +4,13 @@ pub(super) async fn ai_usage_status(
     request: Request,
     context: RouteContext<()>,
 ) -> Result<Response> {
-    let user_id = authenticated_user(&request, &context.env)?;
+    let account = match authenticated_session_account(&request, &context.env).await {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "An active Fabushi account session is required."),
+    };
     let database = context.env.d1(DATABASE_BINDING)?;
-    let status = current_usage_status(&database, &context.env, &user_id, now_seconds()).await?;
-    Response::from_json(&status)
+    let status = current_usage_status(&database, &context.env, &account.user_id, now_seconds()).await?;
+    Ok(Response::from_json(&status)?.with_headers(auth_headers()))
 }
 
 pub(super) async fn ai_usage_reserve(

@@ -1,0 +1,74 @@
+name: Native automation journal
+on:
+  pull_request:
+    paths:
+      - 'third_party/mahayana/mahayana-rs/mahayana-platform-worker/**'
+      - 'deploy/platform-worker/**'
+      - 'docs/specs/fabushi-native-cloud-services.md'
+      - 'scripts/test-native-automation-journal.py'
+      - 'scripts/test-native-automation-runtime.mjs'
+      - '.github/workflows/native-automation-journal.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  journal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: deploy/platform-worker -> target
+      - name: Bind exact source
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+          git rev-parse HEAD >> "$GITHUB_STEP_SUMMARY"
+      - name: Journal policy and existing Worker tests
+        run: cargo test --locked --manifest-path deploy/platform-worker/Cargo.toml
+      - name: Real SQLite durability and conflict invariants
+        run: python3 scripts/test-native-automation-journal.py
+      - name: Compile actual authenticated wasm routes
+        run: cargo check --locked --manifest-path deploy/platform-worker/Cargo.toml --target wasm32-unknown-unknown
+
+  actual-worker:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: deploy/platform-worker -> target
+      - name: Build exact Worker on disposable runner
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+          cargo install worker-build --version 0.8.5 --locked
+          cd deploy/platform-worker
+          worker-build --release --no-panic-recovery --locked
+      - name: Install isolated local D1 runtime
+        run: npm install --prefix "$RUNNER_TEMP/automation-fixture-tools" --no-audit --no-fund wrangler@4.151.0
+      - name: Real HTTP completion, ACK, restart, account isolation and revocation
+        env:
+          SUBJECT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node scripts/test-native-automation-runtime.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-automation-runtime-${{ github.event.pull_request.head.sha || github.sha }}
+          path: evidence/native-automation-runtime.json
+          if-no-files-found: error
