@@ -16,6 +16,8 @@ doctest = false
 aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc"] }
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
 base64 = "0.22"
+chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
+chrono-tz = "=0.10.4"
 getrandom = { version = "0.2", features = ["js"] }
 mahayana-platform-core = { path = "../../third_party/mahayana/mahayana-rs/mahayana-platform-core" }
 pbkdf2 = "0.12"

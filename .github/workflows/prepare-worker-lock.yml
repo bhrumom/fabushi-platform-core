@@ -1,5 +1,6 @@
 name: Prepare isolated Worker dependency lock
 on:
+  workflow_dispatch:
   push:
     branches: [work/official-mcp-oauth-20261009]
     paths: ['.github/workflows/prepare-worker-lock.yml']

@@ -15,7 +15,9 @@ const workerRoot = resolve('third_party/mahayana/mahayana-rs/mahayana-platform-w
 const wasmPath = resolve('deploy/platform-worker/build/worker/index.wasm');
 const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 writeFileSync(configPath, JSON.stringify({ name: 'native-automation-journal-test',
-  main: resolve('deploy/platform-worker/build/worker/shim.mjs'), compatibility_date: '2026-07-18',
+  main: resolve('deploy/platform-worker/native-automation-entry.mjs'), compatibility_date: '2026-07-18',
+  durable_objects: { bindings: [{ name: 'FABUSHI_AUTOMATION_CLOCK', class_name: 'FabushiAutomationClock' }] },
+  migrations: [{ tag: 'fabushi-automation-clock-v1', new_sqlite_classes: ['FabushiAutomationClock'] }],
   vars: { DEFAULT_AI_TOKEN_LIMIT: "1000", ACCESS_TOKEN_PUBLIC_KEY_PEM: publicKey.export({ type: 'spki', format: 'pem' }) },
   d1_databases: [
     { binding: 'ACCOUNT_DB', database_name: 'automation-auth', database_id: randomUUID() },
@@ -97,6 +99,7 @@ try {
   ('expired-session','expired-family','a','fixture-device','expired-refresh',${now-100},${now-100},${now-1},NULL,NULL);`);
   sql('PLATFORM_DB',readFileSync(join(workerRoot,'migrations/0001_platform.sql'),'utf8'));
   sql('PLATFORM_DB',readFileSync(join(workerRoot,'migrations/0035_automation_runs.sql'),'utf8'));
+  sql('PLATFORM_DB',readFileSync(join(workerRoot,'migrations/0036_automation_definitions.sql'),'utf8'));
   const windowStart=Math.floor(now/(30*86400))*(30*86400);
   sql('PLATFORM_DB',`INSERT INTO ai_usage_budgets VALUES
     ('a',${windowStart},${windowStart+30*86400},1000,250,100,${now}),
@@ -170,9 +173,56 @@ try {
   assert.equal((await call(poll,a,{ackRunUuids:[]})).value.events.length,0);
   assert.equal((await call('/v1/automation-runs',a,{...event,automationId:'different'})).status,409);
   pass('actual Worker restart retains completion receipt, ACK and conflicting-UUID tombstone');
+  const definition={id:'clock-1',agentId:'agent-1',name:'Native clock',description:null,enabled:true,
+    workflow:{triggers:[{trigger:{Cron:{cron:'@every 1s'}}}],prompts:[{prompt:'isolated clock fixture'}]}};
+  const putDefinition=(value=definition,precondition={expectAbsent:true})=>call(`/v1/automations/${value.id}`,a,{definition:value,...precondition},'PUT');
+  const published=await putDefinition();assert.equal(published.status,200);
+  const revision=published.value.record.revision;
+  assert.equal((await putDefinition()).value.record.revision,revision,'identical retry preserves revision and cursor');
+  assert.equal((await putDefinition({...definition,name:'conflicting'})).status,409);
+  assert.equal((await call('/v1/automations/clock-1',b)).status,404);
+  assert.equal((await call('/v1/automations?agentId=agent-1',b)).value.records.length,0);
+  assert.equal((await call('/internal/native-automation-clock/tick',a,{userId:'a'})).status,401);
+  const forged=await fetch('http://127.0.0.1:8787/internal/native-automation-clock/tick',{method:'POST',
+    headers:{'content-type':'application/json','x-fabushi-clock-proof':'x'.repeat(36)},body:JSON.stringify({userId:'a'})});
+  assert.equal(forged.status,401);
+  pass('native definitions have account isolation, CAS receipts, and unforgeable internal clock access');
+  const scheduledCount=()=>sql('PLATFORM_DB',"SELECT count(*) n FROM automation_runs WHERE user_id='a' AND json_extract(event_json,'$.automationId')='clock-1'")[0].n;
+  for(let i=0;i<40&&scheduledCount()<2;i++) await new Promise(r=>setTimeout(r,250));
+  assert.ok(scheduledCount()>=2,'real one-second Durable Object alarms must enqueue occurrences');
+  await Promise.all(Array.from({length:8},()=>call('/v1/automations/clock-1',a)));
+  const beforeClockRestart=scheduledCount();
+  await stop(); await new Promise(r=>setTimeout(r,1200)); await start();
+  for(let i=0;i<40&&scheduledCount()<=beforeClockRestart;i++) await new Promise(r=>setTimeout(r,250));
+  assert.ok(scheduledCount()>beforeClockRestart,'persisted alarm/cursor must recover after actual shutdown');
+  const scheduledRows=sql('PLATFORM_DB',"SELECT run_uuid,event_json FROM automation_runs WHERE user_id='a' AND json_extract(event_json,'$.automationId')='clock-1'");
+  const slots=scheduledRows.map(row=>{const event=JSON.parse(row.event_json);assert.equal(event.definitionRevision,revision);return `${event.event.triggerIndex}:${event.scheduledForMs}`;});
+  assert.equal(new Set(slots).size,slots.length,'concurrent arms and restart cannot duplicate occurrences');
+  pass('actual one-second Durable Object alarm, concurrent arms and process restart retain unique clock occurrences');
+  const disabled=await putDefinition({...definition,enabled:false},{baseRevision:revision});assert.equal(disabled.status,200);
+  const countAfterDisable=scheduledCount();await new Promise(r=>setTimeout(r,1400));assert.equal(scheduledCount(),countAfterDisable);
+  const deleted=await call('/v1/automations/clock-1',a,{baseRevision:disabled.value.record.revision},'DELETE');assert.equal(deleted.status,200);
+  assert.equal(deleted.value.record.deleted,true);
+  assert.equal((await call('/v1/automations/clock-1',a,{baseRevision:disabled.value.record.revision},'DELETE')).value.record.revision,deleted.value.record.revision);
+  assert.equal((await putDefinition(definition,{baseRevision:revision})).status,409,'stale pre-delete revision cannot resurrect a definition');
+  assert.equal((await putDefinition({...definition,agentId:'different'},{baseRevision:deleted.value.record.revision})).status,409,'agent identity cannot move');
+  pass('disable fences stale clocks, delete retains stable tombstones and stale/identity-moving writes fail');
+  const quotaDefinition={...definition,id:'clock-quota'};
+  const quotaPublished=await putDefinition(quotaDefinition);assert.equal(quotaPublished.status,200);
+  sql('PLATFORM_DB',`WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x < 20000-(SELECT count(*) FROM automation_runs WHERE user_id='a'))
+    INSERT INTO automation_runs(user_id,run_uuid,event_json,event_digest,created_at)
+    SELECT 'a','quota-fixture-'||x,'{}','quota',0 FROM n;`);
+  const quotaCursor=(await call('/v1/automations/clock-quota',a)).value.record.nextRunsMs;
+  await new Promise(r=>setTimeout(r,1500));
+  assert.deepEqual((await call('/v1/automations/clock-quota',a)).value.record.nextRunsMs,quotaCursor,'quota must not advance or lose a due occurrence');
+  assert.equal(sql('PLATFORM_DB',"SELECT count(*) n FROM automation_runs WHERE user_id='a'")[0].n,20000);
+  assert.equal((await call('/v1/automations/clock-quota',a,{baseRevision:quotaPublished.value.record.revision},'DELETE')).status,200);
+  pass('actual D1 journal capacity preserves the blocked cursor instead of skipping its occurrence');
   assert.equal((await call('/api/auth/logout',a,{})).status,200);
   assert.equal((await call('/v1/automation-runs/run-1',a)).status,401);
   assert.equal((await call('/v1/ai/usage',a)).status,401);
+  assert.equal((await call('/v1/automations',a)).status,401);
+  assert.equal((await putDefinition()).status,401);
   assert.equal((await call('/v1/ai/usage',b)).value.usedTokens,50);
   assert.equal((await call(poll,a,{ackRunUuids:[]})).status,401);
   assert.equal((await call(complete,a,{runUuid:'run-1',status:'succeeded'})).status,401);

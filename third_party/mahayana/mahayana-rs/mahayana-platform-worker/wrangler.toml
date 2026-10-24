@@ -1,12 +1,20 @@
 name = "mahayana-platform"
-main = "../../../../deploy/platform-worker/build/worker/shim.mjs"
+main = "../../../../deploy/platform-worker/native-automation-entry.mjs"
 compatibility_date = "2026-07-18"
 # Marketplace plugins are independent public Workers/Pages deployments. The
 # platform resolves their public URLs instead of requiring per-plugin bindings.
 compatibility_flags = ["global_fetch_strictly_public"]
 
 [triggers]
-crons = ["*/10 * * * *"]
+crons = ["* * * * *"]
+
+[[durable_objects.bindings]]
+name = "FABUSHI_AUTOMATION_CLOCK"
+class_name = "FabushiAutomationClock"
+
+[[migrations]]
+tag = "fabushi-automation-clock-v1"
+new_sqlite_classes = ["FabushiAutomationClock"]
 
 [build]
 command = "cd ../../../../deploy/platform-worker && worker-build --release --no-panic-recovery"
