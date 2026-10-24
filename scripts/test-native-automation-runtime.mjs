@@ -42,6 +42,9 @@ function token(user, sid, extra = {}) {
 }
 const a = token('a','session-a');
 const b = token('b','session-b');
+const a2 = token('a','session-a2',{device_id:'fixture-device-2'});
+const deviceSecret='fixture-only-device-secret-'.repeat(3);
+const deviceSecret2='fixture-only-second-device-secret-'.repeat(3);
 const missing = token('a','missing-session');
 const expiredSession = token('a','expired-session');
 let worker;
@@ -104,12 +107,18 @@ try {
   sql('ACCOUNT_DB',readFileSync(join(workerRoot,'account-migrations/0001_account_auth.sql'),'utf8'));
   sql('ACCOUNT_DB',`INSERT INTO account_sessions VALUES
   ('session-a','family-a','a','fixture-device','refresh-a',${now},${now},${now+3600},NULL,NULL),
+  ('session-a2','family-a2','a','fixture-device-2','refresh-a2',${now},${now},${now+3600},NULL,NULL),
   ('session-b','family-b','b','fixture-device','refresh-b',${now},${now},${now+3600},NULL,NULL),
   ('expired-session','expired-family','a','fixture-device','expired-refresh',${now-100},${now-100},${now-1},NULL,NULL);`);
   sql('PLATFORM_DB',readFileSync(join(workerRoot,'migrations/0001_platform.sql'),'utf8'));
   sql('PLATFORM_DB',readFileSync(join(workerRoot,'migrations/0035_automation_runs.sql'),'utf8'));
   sql('PLATFORM_DB',readFileSync(join(workerRoot,'migrations/0036_automation_definitions.sql'),'utf8'));
   sql('PLATFORM_DB',readFileSync(join(workerRoot,'migrations/0037_automation_execution.sql'),'utf8'));
+  sql('PLATFORM_DB',readFileSync(join(workerRoot,'migrations/0006_remote_computer.sql'),'utf8'));
+  const secretHash=value=>createHash('sha256').update('fabushi-remote-computer-v1\0').update(value).digest('base64url');
+  sql('PLATFORM_DB',`INSERT INTO remote_computers(device_id,user_id,label,device_secret_hash,created_at,last_seen_at) VALUES
+   ('fixture-device','a','A','${secretHash(deviceSecret)}',${now},${now}),
+   ('fixture-device-2','a','A2','${secretHash(deviceSecret2)}',${now},${now});`);
   const windowStart=Math.floor(now/(30*86400))*(30*86400);
   sql('PLATFORM_DB',`INSERT INTO ai_usage_budgets VALUES
     ('a',${windowStart},${windowStart+30*86400},1000,250,100,${now}),
@@ -183,6 +192,34 @@ try {
   assert.equal((await call(poll,a,{ackRunUuids:[]})).value.events.length,0);
   assert.equal((await call('/v1/automation-runs',a,{...event,automationId:'different'})).status,409);
   pass('actual Worker restart retains completion receipt, ACK and conflicting-UUID tombstone');
+  const executionRun={...event,runUuid:'execution-1'};
+  assert.equal((await call('/v1/automation-runs',a,executionRun)).status,200);
+  const executionPath='/v1/automation-runs/execution-1/execution/';
+  const proofA={claimId:'claim-a',claimToken:randomUUID(),deviceSecret};
+  const proofB={claimId:'claim-b',claimToken:randomUUID(),deviceSecret:deviceSecret2};
+  assert.equal((await call(executionPath+'claim',a,{...proofA,deviceSecret:'wrong'.repeat(16)})).status,403);
+  assert.equal((await call(executionPath+'claim',a,proofB)).status,403,'session DB device, not supplied secret, selects authority');
+  const claims=await Promise.all([call(executionPath+'claim',a,proofA),call(executionPath+'claim',a2,proofB)]);
+  assert.deepEqual(claims.map(r=>r.status).sort(),[200,409]);
+  const owner=claims[0].status===200?{token:a,proof:proofA}:{token:a2,proof:proofB};
+  const claimed=claims.find(r=>r.status===200).value;
+  const proof={...owner.proof,generation:claimed.generation};
+  const claimAgain=await call(executionPath+'claim',owner.token,owner.proof);
+  assert.equal(claimAgain.value.generation,claimed.generation);assert.equal(claimAgain.value.reservedUntil,claimed.reservedUntil);
+  assert.equal((await call(complete,a,{runUuid:'execution-1',status:'succeeded'})).status,409,'ordinary account completion cannot bypass claimed execution');
+  assert.equal((await call(executionPath+'start',owner.token,{...proof,generation:proof.generation+1})).status,409);
+  assert.equal((await call(executionPath+'start',owner.token,proof)).value.state,'running');
+  assert.equal((await call(executionPath+'unknown',owner.token,proof)).value.state,'outcome_unknown');
+  await stop();await start();
+  assert.equal((await call(executionPath+'reconcile',owner.token,proof)).value.state,'outcome_unknown');
+  assert.equal((await call(executionPath+'claim',a,{...proofA,claimId:'replacement'})).status,409);
+  const finished=await call(executionPath+'complete',owner.token,{proof,status:'succeeded'});assert.equal(finished.status,200);
+  const finishAgain=await call(executionPath+'complete',owner.token,{proof,status:'succeeded'});
+  assert.equal(finishAgain.value.run.receipt,finished.value.run.receipt);assert.equal(finishAgain.value.run.completedAt,finished.value.run.completedAt);
+  assert.equal((await call(executionPath+'complete',owner.token,{proof,status:'failed',errorMessage:'conflict'})).status,409);
+  assert.ok(!JSON.stringify(finishAgain.value).includes(owner.proof.claimToken));
+  assert.ok(!JSON.stringify(finishAgain.value).includes(owner.proof.deviceSecret));
+  pass('actual session-derived registered-device claims arbitrate two-device race, fence ordinary completion and retain unknown outcome/receipt across restart');
   const definition={id:'clock-1',agentId:'agent-1',name:'Native clock',description:null,enabled:true,
     workflow:{triggers:[{trigger:{Cron:{cron:'@every 1s'}}}],prompts:[{prompt:'isolated clock fixture'}]}};
   const putDefinition=(value=definition,precondition={expectAbsent:true})=>call(`/v1/automations/${value.id}`,a,{definition:value,...precondition},'PUT');
