@@ -1,5 +1,7 @@
 //! Cloudflare Workers entrypoint and testable platform invariants.
 
+pub mod automation_runs;
+
 #[cfg(any(target_arch = "wasm32", test))]
 mod auth;
 

@@ -485,6 +485,7 @@ struct AuthenticatedAccount {
 }
 
 mod account;
+mod automations;
 mod mcp_connections;
 mod ai_usage;
 mod ci_runner;
@@ -497,6 +498,7 @@ mod security;
 mod user_payment_proxy;
 
 use account::*;
+use automations::*;
 use mcp_connections::*;
 use ai_usage::*;
 use ci_runner::*;
@@ -511,6 +513,10 @@ use user_payment_proxy::*;
 #[event(fetch, respond_with_errors)]
 pub async fn main(request: Request, env: Env, _context: Context) -> Result<Response> {
     Router::new()
+        .post_async("/v1/automation-runs", automation_run_create)
+        .get_async("/v1/automation-runs/:run_uuid", automation_run_get)
+        .post_async("/v1/automation-runs/complete", automation_run_complete)
+        .post_async("/v1/automation-events/poll", automation_events_poll)
         .get("/health", |_, _| Response::from_json(&json!({"ok": true})))
         .post_async("/api/mcp/oauth/start", mcp_oauth_start)
         .get_async("/api/mcp/oauth/authorize", mcp_oauth_authorize)
