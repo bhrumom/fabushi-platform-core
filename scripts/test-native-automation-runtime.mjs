@@ -205,7 +205,7 @@ try {
   for(let i=0;i<40&&scheduledCount()<=beforeClockRestart;i++) await new Promise(r=>setTimeout(r,250));
   assert.ok(scheduledCount()>beforeClockRestart,'persisted alarm/cursor must recover after actual shutdown');
   const scheduledRows=sql('PLATFORM_DB',"SELECT run_uuid,event_json FROM automation_runs WHERE user_id='a' AND json_extract(event_json,'$.automationId')='clock-1'");
-  const slots=scheduledRows.map(row=>{const event=JSON.parse(row.event_json);assert.equal(event.definitionRevision,revision);return `${event.event.triggerIndex}:${event.scheduledForMs}`;});
+  const slots=scheduledRows.map(row=>{const event=JSON.parse(row.event_json);assert.equal(event.definitionRevision,revision);assert.equal(event.event,null);return `${event.scheduledForMs}`;});
   assert.equal(new Set(slots).size,slots.length,'concurrent arms and restart cannot duplicate occurrences');
   pass('actual one-second Durable Object alarm, concurrent arms and process restart retain unique clock occurrences');
   const disabled=await putDefinition({...definition,enabled:false},{baseRevision:revision});assert.equal(disabled.status,200);

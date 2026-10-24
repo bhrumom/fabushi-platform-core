@@ -133,7 +133,7 @@ async fn tick_user(env:&Env,user:&str)->Result<Value> {
         let run=domain::scheduled_run_id(user,&definition.id,&found.revision,index,due).map_err(json_error)?;
         let event=RunEvent {run_uuid:run.clone(),sand_agent_id:definition.agent_id,automation_id:definition.id,
             timestamp_ms:now as u64,definition_revision:Some(found.revision.clone()),scheduled_for_ms:Some(due as u64),
-            event:Some(json!({"type":"cron","triggerIndex":index}))};
+            event:None};
         // Timestamp belongs to the occurrence, making duplicate alarms byte-identical.
         let mut event=event;event.timestamp_ms=due as u64;
         let event_json=serde_json::to_string(&event).map_err(json_error)?;let digest=runs::digest(&event).map_err(json_error)?;
