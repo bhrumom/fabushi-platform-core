@@ -1,5 +1,6 @@
 // Actual canonical wasm routes + disposable local D1. No production credentials or deployment.
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { generateKeyPairSync, randomUUID, sign, createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -114,13 +115,41 @@ try {
   assert.equal((await call(complete,b,{runUuid:'run-1',status:'succeeded'})).status,404);
   assert.equal((await call(poll,b,{ackRunUuids:['run-1']})).status,409);
   pass('foreign account cannot read, complete or ACK another account run');
-  const done=await call(complete,a,{runUuid:'run-1',status:'succeeded'});
+  // Drop the client connection only after the real upstream service has
+  // durably completed. The caller receives no successful response or receipt.
+  let lostReceipt; let forwarded=0; let lossFailure;
+  const lossProxy=createServer(async (req,res)=>{
+    try {
+      const chunks=[]; for await (const chunk of req) chunks.push(chunk);
+      forwarded++;
+      const upstream=await fetch(`http://127.0.0.1:8787${complete}`,{
+        method:'POST',headers:{authorization:`Bearer ${a}`,'content-type':'application/json'},
+        body:Buffer.concat(chunks),signal:AbortSignal.timeout(10000),
+      });
+      assert.equal(upstream.status,200);
+      lostReceipt=(await upstream.json()).receipt;
+      res.destroy();
+    } catch(error) { lossFailure=error; res.destroy(); }
+  });
+  try {
+    await new Promise((resolve,reject)=>{lossProxy.once('error',reject);lossProxy.listen(0,'127.0.0.1',resolve);});
+    await assert.rejects(fetch(`http://127.0.0.1:${lossProxy.address().port}/complete`,{
+      method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({runUuid:'run-1',status:'succeeded'}),signal:AbortSignal.timeout(15000),
+    }));
+    assert.equal(lossFailure,undefined); assert.equal(forwarded,1);
+  } finally {
+    lossProxy.closeAllConnections();
+    await new Promise(resolve=>lossProxy.close(resolve));
+  }
+  const done=await call('/v1/automation-runs/run-1',a);
   assert.equal(done.status,200); assert.match(done.value.receipt,/^[a-f0-9]{64}$/);
+  assert.equal(done.value.receipt,lostReceipt);
   const retry=await call(complete,a,{runUuid:'run-1',status:'succeeded'});
   assert.equal(retry.status,200); assert.equal(retry.value.receipt,done.value.receipt); assert.equal(retry.value.completedAt,done.value.completedAt);
   assert.equal((await call(complete,a,{runUuid:'run-1',status:'failed',errorMessage:'conflict'})).status,409);
   assert.equal((await call(complete,a,{runUuid:'absent',status:'succeeded'})).status,404);
-  pass('response-loss retry preserves canonical receipt; conflict and missing completion stay errors');
+  pass('connection dropped after server completion; retry preserves receipt, conflicts and missing runs stay errors');
   assert.equal((await call(poll,a,{ackRunUuids:['run-1','missing']})).status,409);
   assert.equal((await call(poll,a,{ackRunUuids:[]})).value.events.length,1);
   assert.equal((await call(poll,a,{ackRunUuids:['run-1']})).value.events.length,0);
