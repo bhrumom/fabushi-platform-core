@@ -189,7 +189,9 @@ async fn complete_attempt(env: &Env, row: &Attempt, code: &str) -> Result<Value>
 
 #[event(scheduled)]
 pub async fn cleanup_expired_mcp_authorizations(_event: worker::ScheduledEvent, env: Env, _context: worker::ScheduleContext) -> Result<()> {
-    mcp_cleanup(&env).await
+    let cleanup = mcp_cleanup(&env).await;
+    let clocks = super::automation_control::reconcile_automation_clocks(&env).await;
+    cleanup.and(clocks)
 }
 
 pub(super) async fn mcp_oauth_callback(request: Request, context: RouteContext<()>) -> Result<Response> {
