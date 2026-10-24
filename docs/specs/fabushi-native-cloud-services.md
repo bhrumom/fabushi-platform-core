@@ -45,3 +45,6 @@ Additive migration, no destructive conversion of account/session/agent/file reco
 
 ## Compliance
 All AC1..AC5 pending. Initial journal implementation is only a scoped unit; no service migration or release completion claimed. Desktop PR #172 changes endpoint configuration only; PR #171 handles unconfirmed completion ACK.
+
+## Native account usage integration unit
+Desktop replaces the foreign usage dashboard with the existing /v1/ai/usage projection and in-app Usage surface. That read route must use the same active account-session gate as the new journal, return 401 for revoked/mismatched sessions and preserve the existing authoritative token-budget calculation. No changes to model-gateway reserve/capture privileges or budget arithmetic. Actual wasm/D1 tests seed different account budgets, verify separate values, then exercise real logout and refusal of the old account token. This is additional scoped NS-R4/NS-R5 evidence, not cloud service completeness.

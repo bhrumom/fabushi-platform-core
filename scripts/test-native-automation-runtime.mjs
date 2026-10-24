@@ -16,7 +16,7 @@ const wasmPath = resolve('deploy/platform-worker/build/worker/index.wasm');
 const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 writeFileSync(configPath, JSON.stringify({ name: 'native-automation-journal-test',
   main: resolve('deploy/platform-worker/build/worker/shim.mjs'), compatibility_date: '2026-07-18',
-  vars: { ACCESS_TOKEN_PUBLIC_KEY_PEM: publicKey.export({ type: 'spki', format: 'pem' }) },
+  vars: { DEFAULT_AI_TOKEN_LIMIT: "1000", ACCESS_TOKEN_PUBLIC_KEY_PEM: publicKey.export({ type: 'spki', format: 'pem' }) },
   d1_databases: [
     { binding: 'ACCOUNT_DB', database_name: 'automation-auth', database_id: randomUUID() },
     { binding: 'PLATFORM_DB', database_name: 'automation-platform', database_id: randomUUID() },
@@ -95,12 +95,22 @@ try {
   ('session-a','family-a','a','fixture-device','refresh-a',${now},${now},${now+3600},NULL,NULL),
   ('session-b','family-b','b','fixture-device','refresh-b',${now},${now},${now+3600},NULL,NULL),
   ('expired-session','expired-family','a','fixture-device','expired-refresh',${now-100},${now-100},${now-1},NULL,NULL);`);
+  sql('PLATFORM_DB',readFileSync(join(workerRoot,'migrations/0001_platform.sql'),'utf8'));
   sql('PLATFORM_DB',readFileSync(join(workerRoot,'migrations/0035_automation_runs.sql'),'utf8'));
+  const windowStart=Math.floor(now/(30*86400))*(30*86400);
+  sql('PLATFORM_DB',`INSERT INTO ai_usage_budgets VALUES
+    ('a',${windowStart},${windowStart+30*86400},1000,250,100,${now}),
+    ('b',${windowStart},${windowStart+30*86400},1000,50,0,${now});`);
   await start();
   for (const bad of ['invalid',missing,expiredSession,token('a','session-b'),token('a','session-a',{iss:'https://foreign.invalid'})]) {
     assert.equal((await call('/v1/automation-runs',bad,event)).status,401);
+    assert.equal((await call('/v1/ai/usage',bad)).status,401);
   }
   pass('actual signature, issuer, session existence, expiry and account binding deny invalid requests');
+  const usageA=await call('/v1/ai/usage',a); const usageB=await call('/v1/ai/usage',b);
+  assert.equal(usageA.status,200); assert.equal(usageA.value.usedTokens,250); assert.equal(usageA.value.remainingTokens,650);
+  assert.equal(usageB.status,200); assert.equal(usageB.value.usedTokens,50); assert.equal(usageB.value.remainingTokens,950);
+  pass('native account usage projects distinct authoritative token budgets without cross-account data');
   assert.equal((await call('/v1/automation-runs',a,{...event,extra:'invalid'})).status,400);
   assert.equal((await call('/v1/automation-runs',a,event)).status,200);
   assert.equal((await call('/v1/automation-runs',a,event)).status,200);
@@ -162,6 +172,8 @@ try {
   pass('actual Worker restart retains completion receipt, ACK and conflicting-UUID tombstone');
   assert.equal((await call('/api/auth/logout',a,{})).status,200);
   assert.equal((await call('/v1/automation-runs/run-1',a)).status,401);
+  assert.equal((await call('/v1/ai/usage',a)).status,401);
+  assert.equal((await call('/v1/ai/usage',b)).value.usedTokens,50);
   assert.equal((await call(poll,a,{ackRunUuids:[]})).status,401);
   assert.equal((await call(complete,a,{runUuid:'run-1',status:'succeeded'})).status,401);
   assert.equal((await call('/v1/automation-runs',b,event)).status,200);
