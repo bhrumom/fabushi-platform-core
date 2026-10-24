@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS automation_definitions (
   mutation_id TEXT NOT NULL,
   next_runs_json TEXT NOT NULL CHECK(json_valid(next_runs_json)),
   updated_at INTEGER NOT NULL,
+  clock_checked_at INTEGER NOT NULL DEFAULT 0,
   deleted_at INTEGER,
   PRIMARY KEY(user_id, automation_id)
 );

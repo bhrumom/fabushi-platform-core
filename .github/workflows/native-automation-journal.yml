@@ -8,6 +8,13 @@ on:
       - 'scripts/test-native-automation-journal.py'
       - 'scripts/test-native-automation-runtime.mjs'
       - '.github/workflows/native-automation-journal.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'third_party/mahayana/mahayana-rs/mahayana-platform-worker/**'
+      - 'deploy/platform-worker/**'
+      - 'scripts/test-native-automation-*'
+      - '.github/workflows/native-automation-journal.yml'
   workflow_dispatch:
 permissions:
   contents: read

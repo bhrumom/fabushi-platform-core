@@ -112,6 +112,11 @@ pub(super) async fn automation_clock_tick(mut request:Request,context:RouteConte
 }
 async fn tick_user(env:&Env,user:&str)->Result<Value> {
     let db=env.d1(DATABASE_BINDING)?;let now=now_seconds()*1000;let mut emitted=0;let mut blocked=false;
+    // One account can have several due definitions. Rotate the entire due set,
+    // including untouched siblings when the first occurrence hits account capacity.
+    worker::query!(&db,"UPDATE automation_definitions SET clock_checked_at=?1
+        WHERE user_id=?2 AND deleted_at IS NULL AND EXISTS(SELECT 1 FROM json_each(next_runs_json) p
+        WHERE p.type='integer' AND CAST(p.value AS INTEGER)<=?3)",now_seconds(),user,now)?.run().await?;
     for _ in 0..100 {
         let Some(found)=worker::query!(&db,"SELECT automation_id,agent_id,definition_json,revision,mutation_id,next_runs_json,updated_at,deleted_at
             FROM automation_definitions d WHERE user_id=?1 AND deleted_at IS NULL
@@ -135,9 +140,15 @@ async fn tick_user(env:&Env,user:&str)->Result<Value> {
         let next_json=serde_json::to_string(&positions).map_err(json_error)?;
         db.batch(vec![worker::query!(&db,domain::INSERT_SCHEDULED_RUN,user,&run,&event_json,&digest,now_seconds(),
             &event.automation_id,&found.revision,&found.next_runs_json)?,
-            worker::query!(&db,domain::ADVANCE_CLOCK,&next_json,user,&event.automation_id,&found.revision,&found.next_runs_json,&run,&digest)?]).await?;
+            worker::query!(&db,domain::ADVANCE_CLOCK,&next_json,user,&event.automation_id,&found.revision,&found.next_runs_json,&run,&digest,now_seconds())?]).await?;
         let current=row(&db,user,&event.automation_id).await?;
-        if current.as_ref().is_some_and(|v|v.revision==found.revision&&v.next_runs_json==found.next_runs_json){blocked=true;break;}
+        if current.as_ref().is_some_and(|v|v.revision==found.revision&&v.next_runs_json==found.next_runs_json){
+            // Rotate a capacity-blocked account without consuming its due occurrence.
+            worker::query!(&db,"UPDATE automation_definitions SET clock_checked_at=?1
+                WHERE user_id=?2 AND automation_id=?3 AND revision=?4 AND next_runs_json=?5",
+                now_seconds(),user,&event.automation_id,&found.revision,&found.next_runs_json)?.run().await?;
+            blocked=true;break;
+        }
         emitted+=1;
     }
     let next=next_wake(&db,user).await?;
@@ -147,8 +158,8 @@ async fn tick_user(env:&Env,user:&str)->Result<Value> {
 pub(super) async fn reconcile_automation_clocks(env:&Env)->Result<()> {
     #[derive(Deserialize)]struct User{user_id:String}
     let db=env.d1(DATABASE_BINDING)?;
-    let users=worker::query!(&db,"SELECT DISTINCT d.user_id FROM automation_definitions d,json_each(d.next_runs_json) p
-        WHERE d.deleted_at IS NULL AND p.type='integer' AND CAST(p.value AS INTEGER)<=?1 ORDER BY d.user_id LIMIT 50",now_seconds()*1000)?
+    let users=worker::query!(&db,"SELECT d.user_id FROM automation_definitions d,json_each(d.next_runs_json) p
+        WHERE d.deleted_at IS NULL AND p.type='integer' AND CAST(p.value AS INTEGER)<=?1 GROUP BY d.user_id ORDER BY MIN(d.clock_checked_at),d.user_id LIMIT 50",now_seconds()*1000)?
         .all().await?.results::<User>()?;
     for user in users {tick_user(env,&user.user_id).await?;}
     Ok(())

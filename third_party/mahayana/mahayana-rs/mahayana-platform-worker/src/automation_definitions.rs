@@ -22,7 +22,7 @@ pub const INSERT_SCHEDULED_RUN:&str="INSERT OR IGNORE INTO automation_runs
  WHERE EXISTS(SELECT 1 FROM automation_definitions WHERE user_id=?1 AND automation_id=?6
  AND revision=?7 AND deleted_at IS NULL AND next_runs_json=?8)
  AND (SELECT COUNT(*) FROM automation_runs WHERE user_id=?1)<20000";
-pub const ADVANCE_CLOCK:&str="UPDATE automation_definitions SET next_runs_json=?1
+pub const ADVANCE_CLOCK:&str="UPDATE automation_definitions SET next_runs_json=?1,clock_checked_at=?8
  WHERE user_id=?2 AND automation_id=?3 AND revision=?4 AND deleted_at IS NULL AND next_runs_json=?5
  AND EXISTS(SELECT 1 FROM automation_runs WHERE user_id=?2 AND run_uuid=?6 AND event_digest=?7)";
 
