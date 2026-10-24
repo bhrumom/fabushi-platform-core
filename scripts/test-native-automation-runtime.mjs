@@ -197,20 +197,24 @@ try {
     headers:{'content-type':'application/json','x-fabushi-clock-proof':'x'.repeat(36)},body:JSON.stringify({userId:'a'})});
   assert.equal(forged.status,401);
   pass('native definitions have account isolation, CAS receipts, and unforgeable internal clock access');
-  const scheduledCount=()=>sql('PLATFORM_DB',"SELECT count(*) n FROM automation_runs WHERE user_id='a' AND json_extract(event_json,'$.automationId')='clock-1'")[0].n;
-  for(let i=0;i<40&&scheduledCount()<2;i++) await new Promise(r=>setTimeout(r,250));
-  assert.ok(scheduledCount()>=2,'real one-second Durable Object alarms must enqueue occurrences');
+  const scheduledEvents=async()=>{
+    const result=await call(poll,a,{ackRunUuids:[]});assert.equal(result.status,200);
+    return result.value.events.filter(event=>event.automationId==='clock-1');
+  };
+  const scheduledCount=async()=>(await scheduledEvents()).length;
+  for(let i=0;i<40&&await scheduledCount()<2;i++) await new Promise(r=>setTimeout(r,250));
+  assert.ok(await scheduledCount()>=2,'real one-second Durable Object alarms must enqueue occurrences');
   await Promise.all(Array.from({length:8},()=>call('/v1/automations/clock-1',a)));
-  const beforeClockRestart=scheduledCount();
+  const beforeClockRestart=await scheduledCount();
   await stop(); await new Promise(r=>setTimeout(r,1200)); await start();
-  for(let i=0;i<40&&scheduledCount()<=beforeClockRestart;i++) await new Promise(r=>setTimeout(r,250));
-  assert.ok(scheduledCount()>beforeClockRestart,'persisted alarm/cursor must recover after actual shutdown');
-  const scheduledRows=sql('PLATFORM_DB',"SELECT run_uuid,event_json FROM automation_runs WHERE user_id='a' AND json_extract(event_json,'$.automationId')='clock-1'");
-  const slots=scheduledRows.map(row=>{const event=JSON.parse(row.event_json);assert.equal(event.definitionRevision,revision);assert.equal(event.event,null);return `${event.scheduledForMs}`;});
+  for(let i=0;i<40&&await scheduledCount()<=beforeClockRestart;i++) await new Promise(r=>setTimeout(r,250));
+  assert.ok(await scheduledCount()>beforeClockRestart,'persisted alarm/cursor must recover after actual shutdown');
+  const scheduledRows=await scheduledEvents();
+  const slots=scheduledRows.map(event=>{assert.equal(event.definitionRevision,revision);assert.equal(event.event,null);return `${event.scheduledForMs}`;});
   assert.equal(new Set(slots).size,slots.length,'concurrent arms and restart cannot duplicate occurrences');
   pass('actual one-second Durable Object alarm, concurrent arms and process restart retain unique clock occurrences');
   const disabled=await putDefinition({...definition,enabled:false},{baseRevision:revision});assert.equal(disabled.status,200);
-  const countAfterDisable=scheduledCount();await new Promise(r=>setTimeout(r,1400));assert.equal(scheduledCount(),countAfterDisable);
+  const countAfterDisable=await scheduledCount();await new Promise(r=>setTimeout(r,1400));assert.equal(await scheduledCount(),countAfterDisable);
   const deleted=await call('/v1/automations/clock-1',a,{baseRevision:disabled.value.record.revision},'DELETE');assert.equal(deleted.status,200);
   assert.equal(deleted.value.record.deleted,true);
   assert.equal((await call('/v1/automations/clock-1',a,{baseRevision:disabled.value.record.revision},'DELETE')).value.record.revision,deleted.value.record.revision);
@@ -219,13 +223,15 @@ try {
   pass('disable fences stale clocks, delete retains stable tombstones and stale/identity-moving writes fail');
   const quotaDefinition={...definition,id:'clock-quota'};
   const quotaPublished=await putDefinition(quotaDefinition);assert.equal(quotaPublished.status,200);
+  const quotaCursor=quotaPublished.value.record.nextRunsMs;
+  await stop();
   sql('PLATFORM_DB',`WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x < 20000-(SELECT count(*) FROM automation_runs WHERE user_id='a'))
     INSERT INTO automation_runs(user_id,run_uuid,event_json,event_digest,created_at)
     SELECT 'a','quota-fixture-'||x,'{}','quota',0 FROM n;`);
-  const quotaCursor=(await call('/v1/automations/clock-quota',a)).value.record.nextRunsMs;
+  assert.equal(sql('PLATFORM_DB',"SELECT count(*) n FROM automation_runs WHERE user_id='a'")[0].n,20000);
+  await start();
   await new Promise(r=>setTimeout(r,1500));
   assert.deepEqual((await call('/v1/automations/clock-quota',a)).value.record.nextRunsMs,quotaCursor,'quota must not advance or lose a due occurrence');
-  assert.equal(sql('PLATFORM_DB',"SELECT count(*) n FROM automation_runs WHERE user_id='a'")[0].n,20000);
   assert.equal((await call('/v1/automations/clock-quota',a,{baseRevision:quotaPublished.value.record.revision},'DELETE')).status,200);
   pass('actual D1 journal capacity preserves the blocked cursor instead of skipping its occurrence');
   assert.equal((await call('/api/auth/logout',a,{})).status,200);
