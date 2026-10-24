@@ -1,20 +1,26 @@
 // Clock wakeups only. The Rust automation domain and D1 remain authoritative.
-import worker from './build/worker/shim.mjs';
+import RustEntrypoint from './build/worker/shim.mjs';
 
 const CAPABILITY = '__FABUSHI_CLOCK_CAPABILITY';
 const USER_HEADER = 'x-fabushi-automation-clock-user';
 const AT_HEADER = 'x-fabushi-automation-clock-at';
 const validUser = value => typeof value === 'string' && /^[A-Za-z0-9._:-]{1,200}$/.test(value);
 
-export default {
-  ...worker,
-  async fetch(request, env, context) {
+// worker-build 0.8.5 exports a WorkerEntrypoint class, not a handler object.
+// Inherit scheduled/queue/email and the generated Wasm recovery proxy.
+function dispatch(request, env, context) {
+  return RustEntrypoint.prototype.fetch.call({ env, ctx: context }, request);
+}
+export default class FabushiNativeEntrypoint extends RustEntrypoint {
+  async fetch(request) {
+    const env = this.env;
+    const context = this.ctx;
     // No deployment variable or incoming HTTP header may supply the private
     // per-invocation capability used by the object alarm below.
     const { [CAPABILITY]: _discarded, ...publicEnv } = env;
     const headers = new Headers(request.headers);
     headers.delete('x-fabushi-clock-proof');
-    const result = await worker.fetch(new Request(request, { headers }), publicEnv, context);
+    const result = await dispatch(new Request(request, { headers }), publicEnv, context);
     const user = result.headers.get(USER_HEADER);
     if (user === null) return result;
     if (!validUser(user) || !env.FABUSHI_AUTOMATION_CLOCK) return unavailable();
@@ -28,8 +34,8 @@ export default {
     const publicHeaders = new Headers(result.headers);
     publicHeaders.delete(USER_HEADER); publicHeaders.delete(AT_HEADER);
     return new Response(result.body, { status: result.status, statusText: result.statusText, headers: publicHeaders });
-  },
-};
+  }
+}
 
 function unavailable() {
   return new Response(JSON.stringify({ error: 'automation_clock_unavailable', message: 'Reconcile the persisted automation before retrying; publication may have committed.' }), {
@@ -57,9 +63,9 @@ export class FabushiAutomationClock {
     const userId = await this.state.storage.get('userId');
     if (!validUser(userId)) throw Error('native_clock_identity_missing');
     const capability = crypto.randomUUID();
-    const response = await worker.fetch(new Request('https://clock.internal/internal/native-automation-clock/tick', {
+    const response = await dispatch(new Request('https://clock.internal/internal/native-automation-clock/tick', {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-fabushi-clock-proof': capability }, body: JSON.stringify({ userId }),
-    }), { ...this.env, [CAPABILITY]: capability }, { waitUntil() {} });
+    }), { ...this.env, [CAPABILITY]: capability }, { waitUntil: promise => this.state.waitUntil(promise) });
     if (!response.ok) throw Error('native_clock_tick_failed');
     const result = await response.json();
     if (result.protocol !== 'fabushi.automation.definition.v1') throw Error('native_clock_protocol_invalid');
@@ -67,7 +73,7 @@ export class FabushiAutomationClock {
       if (!Number.isSafeInteger(result.nextWakeAtMs) || result.nextWakeAtMs < 0) throw Error('native_clock_position_invalid');
       const next = Math.max(Date.now() + 100, result.nextWakeAtMs);
       const existing = await this.state.storage.getAlarm();
-      if (existing === null || next < existing) await this.state.storage.setAlarm(next);
+      if (existing === null || existing <= Date.now() || next < existing) await this.state.storage.setAlarm(next);
     }
   }
 }
