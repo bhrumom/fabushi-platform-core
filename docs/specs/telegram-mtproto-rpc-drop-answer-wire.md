@@ -123,3 +123,17 @@ Round-60 authored-only external contracts SHALL pin exact 4-byte zero-field vari
 The existing ledger responsibility `TDRP-R9-MTPROTO-RPC-DROP-ANSWER-WIRE-001` remains the sole row; no duplicate responsibility is created. Its state remains `implemented / validation_status=not-run / accepted=false`. Historical multi-request drop/cancel semantics, arbitrary `wasSent/haveSent/_resendingIds/toSend/_sentContainers`, connection scheduling, auth-key binding/persistence, gzip, complete difference decoding/application, broader source/legal closure, Stage-B executable evidence, and independent release ACCEPT remain open or outside this wire-only claim.
 
 No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, or runtime acceptance is permitted or claimed for this Stage-A revalidation.
+
+
+## Round 60 final source-level compliance
+
+Canonical source inspection and remote desktop readback close the fixed-U `RpcDropAnswer` response wire responsibility at source level with **no production delta**.
+
+- Canonical production api/tl/lib blobs remain `ebfb3670b5cd097b9ce288782c7954f5cfe9fc43` / `89256ab35184b6dc06a095ab34abb9f44e95a264` / `abab39e42f100972484191f0e52e9edd9b88c6cf`.
+- The authored-only canonical external contract is commit `cf51ff32eb217bc2084b8f2cbf9c886eb2a588ec`, blob `3c69527d941fad9eddb8c264e695666ad3e404f9`.
+- Desktop mirrored that contract byte-identically in commit `314b0b90fa96efe492fd3785e141a0d1390646d3`.
+- Desktop bookkeeping/evidence is commit `90af27989bc0f1e822ba49cebd1060471d28d515`.
+- The existing ledger row `TDRP-R9-MTPROTO-RPC-DROP-ANSWER-WIRE-001` remains `implemented / validation_status=not-run / accepted=false`; coverage remains `97 responsibilities / 16172 unknown / 16145 unread / 0 omitted`.
+- Historical request drop/cancel scheduling and arbitrary request mutation, connection scheduling, auth-key binding/persistence, gzip, complete difference decoding/application, broader source/legal closure, Stage-B executable evidence, and independent release ACCEPT remain open or outside this wire-only claim.
+
+No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, or runtime acceptance was performed.
