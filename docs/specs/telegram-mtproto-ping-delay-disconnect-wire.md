@@ -85,3 +85,18 @@ Stage A source review only:
 - `Telegram/SourceFiles/mtproto/details/mtproto_tls_socket.cpp@e7562e3ca1a1da03f5d368085d5e61d887ab3f16`
 - `docs/specs/telegram-mtproto-single-ping-pong.md`
 - `docs/specs/spec-first-ai-development.md`
+
+
+## Source-level implementation review
+
+Canonical implementation commit: `cb816c7540ea93717238b3aec96372cdab1c1706`. Canonical blobs: protocol api `405b04166bea039051833a38ad0a75c62107f70c`, protocol lib `ef7fe73335551e303fa71b02f5cf066d778ae8a4`. Desktop synchronization commit: `d38f6bef11a9a4334f8387c73c7b74e7994c0cdb`; desktop bookkeeping commit: `df7cd04aa812c9c8cd5f5c9916f0d9261ec37b8f`.
+
+- R1-R4: satisfied by source inspection — `PING_DELAY_DISCONNECT_CONSTRUCTOR` is exactly `0xf3427b8c`; `build_ping_delay_disconnect` writes constructor, `ping_id:i64`, then `disconnect_delay:i32` through the existing TL writer and applies no policy transformation.
+- R5: satisfied by source inspection — authored-only contracts check exact 16-byte field layout, fixed-U delay 60, and signed minimum/maximum values.
+- R6: satisfied by source inspection — the builder touches no socket, timer, session, request history, persistence, or runtime state.
+- R7: satisfied by remote blob readback — desktop provider api/lib blobs are byte-identical to the canonical blobs above.
+- R8: satisfied as an explicit boundary — no main-session timer/scheduling behavior was synthesized; that lifecycle remains open/fail-closed.
+- R9: satisfied as an explicit boundary — fixed-U `tlsClientHello/tlsBlock*` were verified as the local ClientHello-template AST consumed by `mtproto_tls_socket.cpp`; no artificial inbound parser or second TLS transport owner was introduced. The missing TLS camouflage socket/generator lifecycle remains open/fail-closed.
+- R10: satisfied for Stage A process — no build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried.
+
+Acceptance criteria AC1-AC6 are satisfied at source/implementation/bookkeeping level. AC7 remains intentionally **blocked/not-run** until Stage B executable validation.
