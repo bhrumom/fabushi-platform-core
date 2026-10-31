@@ -1514,6 +1514,301 @@ fn server_dh_answer_is_nonce_bound_decrypted_and_hash_authenticated() {
     );
 }
 
+
+#[test]
+fn server_dh_inner_data_rejects_malformed_wire_and_cryptographic_boundaries() {
+    let nonce = [0x12; 16];
+    let server_nonce = [0x34; 16];
+    let new_nonce = [0x56; 32];
+    let dh_prime = hex::decode(KNOWN_DH_PRIME_HEX).unwrap();
+    let mut g_a = vec![0_u8; 256];
+    g_a[0] = 0x80;
+
+    let encode_inner = |
+        constructor: u32,
+        body_nonce: [u8; 16],
+        body_server_nonce: [u8; 16],
+        generator: i32,
+        prime: &[u8],
+        public_value: &[u8],
+        server_time: i32,
+    | {
+        let mut answer = TlWriter::new();
+        answer.write_u32(constructor);
+        answer.write_i128_bytes(&body_nonce);
+        answer.write_i128_bytes(&body_server_nonce);
+        answer.write_i32(generator);
+        answer.write_bytes(prime).unwrap();
+        answer.write_bytes(public_value).unwrap();
+        answer.write_i32(server_time);
+        answer.into_bytes()
+    };
+    let encrypt_inner = |answer: &[u8], residual_padding: usize, corrupt_hash: bool| {
+        let mut digest = Sha1::digest(answer).to_vec();
+        if corrupt_hash {
+            digest[0] ^= 1;
+        }
+        let mut plaintext = digest;
+        plaintext.extend_from_slice(answer);
+        plaintext.extend(std::iter::repeat_n(0xa5, residual_padding));
+        while plaintext.len() % 16 != 0 {
+            plaintext.push(0x5a);
+        }
+        let (key, iv) = derive_tmp_aes_key_iv(&new_nonce, &server_nonce);
+        aes_ige_encrypt(&plaintext, &key, &iv).unwrap()
+    };
+    let decrypt = |encrypted: &[u8]| {
+        decrypt_server_dh_inner_data(encrypted, &new_nonce, &nonce, &server_nonce)
+    };
+
+    assert_eq!(
+        decrypt(&[]).unwrap_err(),
+        HandshakeError::InvalidServerDhCiphertext
+    );
+    assert_eq!(
+        decrypt(&[0_u8; 15]).unwrap_err(),
+        HandshakeError::InvalidServerDhCiphertext
+    );
+
+    let exact = encode_inner(
+        SERVER_DH_INNER_DATA_CONSTRUCTOR,
+        nonce,
+        server_nonce,
+        3,
+        &dh_prime,
+        &g_a,
+        -123_456_789,
+    );
+    let parsed = decrypt(&encrypt_inner(&exact, 0, false)).unwrap();
+    assert_eq!(parsed.server_time, -123_456_789);
+
+    let unknown = encode_inner(
+        0x1122_3344,
+        nonce,
+        server_nonce,
+        3,
+        &dh_prime,
+        &g_a,
+        1_720_000_000,
+    );
+    assert_eq!(
+        decrypt(&encrypt_inner(&unknown, 0, false)).unwrap_err(),
+        HandshakeError::UnexpectedServerDhInnerConstructor(0x1122_3344)
+    );
+
+    for cut in 0..exact.len() {
+        assert!(
+            decrypt(&encrypt_inner(&exact[..cut], 0, false)).is_err(),
+            "truncation cut {cut} unexpectedly accepted"
+        );
+    }
+
+    let wrong_nonce = encode_inner(
+        SERVER_DH_INNER_DATA_CONSTRUCTOR,
+        [0x13; 16],
+        server_nonce,
+        3,
+        &dh_prime,
+        &g_a,
+        1_720_000_000,
+    );
+    assert_eq!(
+        decrypt(&encrypt_inner(&wrong_nonce, 0, false)).unwrap_err(),
+        HandshakeError::NonceMismatch
+    );
+
+    let wrong_server_nonce = encode_inner(
+        SERVER_DH_INNER_DATA_CONSTRUCTOR,
+        nonce,
+        [0x35; 16],
+        3,
+        &dh_prime,
+        &g_a,
+        1_720_000_000,
+    );
+    assert_eq!(
+        decrypt(&encrypt_inner(&wrong_server_nonce, 0, false)).unwrap_err(),
+        HandshakeError::ServerNonceMismatch
+    );
+
+    assert_eq!(
+        decrypt(&encrypt_inner(&exact, 0, true)).unwrap_err(),
+        HandshakeError::ServerDhHashMismatch
+    );
+    assert!(matches!(
+        decrypt(&encrypt_inner(&exact, 16, false)).unwrap_err(),
+        HandshakeError::InvalidServerDhPadding(length) if length > 15
+    ));
+
+    let bad_generator = encode_inner(
+        SERVER_DH_INNER_DATA_CONSTRUCTOR,
+        nonce,
+        server_nonce,
+        8,
+        &dh_prime,
+        &g_a,
+        1_720_000_000,
+    );
+    assert_eq!(
+        decrypt(&encrypt_inner(&bad_generator, 0, false)).unwrap_err(),
+        HandshakeError::InvalidServerDhParameters
+    );
+
+    let short_prime = vec![0x80; 255];
+    let bad_prime_length = encode_inner(
+        SERVER_DH_INNER_DATA_CONSTRUCTOR,
+        nonce,
+        server_nonce,
+        3,
+        &short_prime,
+        &g_a,
+        1_720_000_000,
+    );
+    assert_eq!(
+        decrypt(&encrypt_inner(&bad_prime_length, 0, false)).unwrap_err(),
+        HandshakeError::InvalidServerDhParameters
+    );
+
+    let untrusted_prime = vec![0x80; 256];
+    let bad_prime_trust = encode_inner(
+        SERVER_DH_INNER_DATA_CONSTRUCTOR,
+        nonce,
+        server_nonce,
+        3,
+        &untrusted_prime,
+        &g_a,
+        1_720_000_000,
+    );
+    assert_eq!(
+        decrypt(&encrypt_inner(&bad_prime_trust, 0, false)).unwrap_err(),
+        HandshakeError::UntrustedDhPrime
+    );
+
+    let empty_g_a = encode_inner(
+        SERVER_DH_INNER_DATA_CONSTRUCTOR,
+        nonce,
+        server_nonce,
+        3,
+        &dh_prime,
+        &[],
+        1_720_000_000,
+    );
+    assert_eq!(
+        decrypt(&encrypt_inner(&empty_g_a, 0, false)).unwrap_err(),
+        HandshakeError::InvalidServerDhParameters
+    );
+
+    let oversized_g_a = vec![0x80; 257];
+    let bad_g_a_length = encode_inner(
+        SERVER_DH_INNER_DATA_CONSTRUCTOR,
+        nonce,
+        server_nonce,
+        3,
+        &dh_prime,
+        &oversized_g_a,
+        1_720_000_000,
+    );
+    assert_eq!(
+        decrypt(&encrypt_inner(&bad_g_a_length, 0, false)).unwrap_err(),
+        HandshakeError::InvalidServerDhParameters
+    );
+
+    let unsafe_g_a = [1_u8];
+    let bad_g_a_value = encode_inner(
+        SERVER_DH_INNER_DATA_CONSTRUCTOR,
+        nonce,
+        server_nonce,
+        3,
+        &dh_prime,
+        &unsafe_g_a,
+        1_720_000_000,
+    );
+    assert_eq!(
+        decrypt(&encrypt_inner(&bad_g_a_value, 0, false)).unwrap_err(),
+        HandshakeError::InvalidDhPublicValue
+    );
+}
+
+#[test]
+fn rejected_server_dh_inner_data_does_not_advance_handshake_state() {
+    let nonce = [0x11; 16];
+    let server_nonce = [0x22; 16];
+    let new_nonce = [0x56; 32];
+    let fingerprint = telegram_server_rsa_key(false)
+        .unwrap()
+        .fingerprint()
+        .unwrap();
+
+    let mut res_pq = TlWriter::new();
+    res_pq.write_u32(RES_PQ_CONSTRUCTOR);
+    res_pq.write_i128_bytes(&nonce);
+    res_pq.write_i128_bytes(&server_nonce);
+    res_pq.write_bytes(&[0x04, 0x2a, 0x39]).unwrap();
+    res_pq.write_vector_length(1).unwrap();
+    res_pq.write_u64(fingerprint);
+
+    let mut handshake = AuthKeyHandshake::new(nonce);
+    handshake.begin(4).unwrap();
+    handshake
+        .receive_res_pq(PlaintextEnvelope {
+            message_id: 5,
+            body: res_pq.into_bytes(),
+        })
+        .unwrap();
+    handshake
+        .prepare_req_dh_params_with_random(8, 2, false, |output| {
+            output.fill(0x56);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(handshake.state(), &AuthKeyHandshakeState::AwaitingServerDh);
+
+    let dh_prime = hex::decode(KNOWN_DH_PRIME_HEX).unwrap();
+    let mut g_a = vec![0_u8; 256];
+    g_a[0] = 0x80;
+    let mut invalid_inner = TlWriter::new();
+    invalid_inner.write_u32(0x1122_3344);
+    invalid_inner.write_i128_bytes(&nonce);
+    invalid_inner.write_i128_bytes(&server_nonce);
+    invalid_inner.write_i32(3);
+    invalid_inner.write_bytes(&dh_prime).unwrap();
+    invalid_inner.write_bytes(&g_a).unwrap();
+    invalid_inner.write_i32(1_720_000_000);
+    let invalid_inner = invalid_inner.into_bytes();
+
+    let mut plaintext = Sha1::digest(&invalid_inner).to_vec();
+    plaintext.extend_from_slice(&invalid_inner);
+    while plaintext.len() % 16 != 0 {
+        plaintext.push(0xa5);
+    }
+    let (key, iv) = derive_tmp_aes_key_iv(&new_nonce, &server_nonce);
+    let encrypted_answer = aes_ige_encrypt(&plaintext, &key, &iv).unwrap();
+
+    let mut outer = TlWriter::new();
+    outer.write_u32(SERVER_DH_PARAMS_OK_CONSTRUCTOR);
+    outer.write_i128_bytes(&nonce);
+    outer.write_i128_bytes(&server_nonce);
+    outer.write_bytes(&encrypted_answer).unwrap();
+
+    assert_eq!(
+        handshake
+            .receive_server_dh_with_random(
+                PlaintextEnvelope {
+                    message_id: 9,
+                    body: outer.into_bytes(),
+                },
+                12,
+                |output| {
+                    output.fill(0x44);
+                    Ok(())
+                },
+            )
+            .unwrap_err(),
+        HandshakeError::UnexpectedServerDhInnerConstructor(0x1122_3344)
+    );
+    assert_eq!(handshake.state(), &AuthKeyHandshakeState::AwaitingServerDh);
+}
+
 #[test]
 fn client_dh_inner_data_builder_serializes_fixed_u_object_exactly() {
     let nonce = [
