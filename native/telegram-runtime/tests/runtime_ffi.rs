@@ -333,3 +333,34 @@ fn recovery_and_challenge_commands_do_not_fabricate_ready_without_required_state
     }
     close_client(client).unwrap();
 }
+
+
+#[test]
+fn authorization_projection_exposes_canonical_self_identity_field() {
+    let client = create_client();
+    let state = execute(client, json!({"@type": "telegram.getAuthorizationState"}));
+    assert_eq!(state["ok"], true);
+    assert!(state["data"].get("selfUserId").is_some());
+    assert_eq!(state["data"]["selfUserId"], Value::Null);
+    close_client(client).unwrap();
+}
+
+#[test]
+fn lifecycle_commands_share_the_same_runtime_identity_projection() {
+    let client = create_client();
+    let status = execute(client, json!({"@type": "telegram.getStatus"}));
+    assert_eq!(status["ok"], true);
+    assert!(status["data"].get("authorizationState").is_some());
+    assert!(status["data"].get("selfUserId").is_some());
+
+    for request in [
+        json!({"@type": "telegram.resendAuthenticationCode"}),
+        json!({"@type": "telegram.cancelAuthenticationCode"}),
+        json!({"@type": "telegram.sendVerifyEmailCode", "email": "a@example.test"}),
+    ] {
+        let response = execute(client, request);
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["errorCode"], "auth_context_missing");
+    }
+    close_client(client).unwrap();
+}
