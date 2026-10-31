@@ -89,8 +89,8 @@ pub use generated::{
     WIRE_CONSTRUCTORS,
 };
 pub use handshake::{
-    build_p_q_inner_data_dc, build_req_dh_params, build_set_client_dh_params,
-    decrypt_server_dh_inner_data,
+    build_client_dh_inner_data, build_p_q_inner_data_dc, build_req_dh_params,
+    build_set_client_dh_params, decrypt_server_dh_inner_data,
     derive_tmp_aes_key_iv, factor_res_pq, parse_dh_gen_result, parse_res_pq,
     parse_server_dh_params, prepare_client_dh, rsa_pad, rsa_pad_with_random,
     select_server_key_fingerprint, telegram_server_rsa_key, validate_server_dh_parameters,

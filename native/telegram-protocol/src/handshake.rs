@@ -783,6 +783,21 @@ pub fn validate_server_dh_parameters(data: &ServerDhInnerData) -> Result<(), Han
     Ok(())
 }
 
+pub fn build_client_dh_inner_data(
+    nonce: &Nonce,
+    server_nonce: &Nonce,
+    retry_id: u64,
+    g_b: &[u8],
+) -> Result<Vec<u8>, TlError> {
+    let mut inner = TlWriter::new();
+    inner.write_u32(CLIENT_DH_INNER_DATA_CONSTRUCTOR);
+    inner.write_i128_bytes(nonce);
+    inner.write_i128_bytes(server_nonce);
+    inner.write_u64(retry_id);
+    inner.write_bytes(g_b)?;
+    Ok(inner.into_bytes())
+}
+
 pub fn build_set_client_dh_params(
     nonce: &Nonce,
     server_nonce: &Nonce,
@@ -831,13 +846,13 @@ where
         new_nonce[index] ^ data.server_nonce[index]
     }));
 
-    let mut inner = TlWriter::new();
-    inner.write_u32(CLIENT_DH_INNER_DATA_CONSTRUCTOR);
-    inner.write_i128_bytes(&data.nonce);
-    inner.write_i128_bytes(&data.server_nonce);
-    inner.write_u64(retry_id);
-    inner.write_bytes(&biguint_to_minimal_be(&g_b))?;
-    let inner = Zeroizing::new(inner.into_bytes());
+    let g_b_bytes = biguint_to_minimal_be(&g_b);
+    let inner = Zeroizing::new(build_client_dh_inner_data(
+        &data.nonce,
+        &data.server_nonce,
+        retry_id,
+        &g_b_bytes,
+    )?);
 
     let mut answer_with_hash = Zeroizing::new(Sha1::digest(&inner[..]).to_vec());
     answer_with_hash.extend_from_slice(&inner);
