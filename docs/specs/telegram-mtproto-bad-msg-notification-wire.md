@@ -79,3 +79,38 @@ Desktop synchronization commit: `1205f8709995aa4f5fd5dafdc9fb5121fbfce06c`; desk
 - R10: satisfied by remote blob readback — desktop provider copies are byte-identical to canonical sources.
 
 Acceptance criteria AC1-AC7 are satisfied at source/implementation level. AC8 remains intentionally **blocked/not-run** until Stage B executable validation. No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried in this review.
+
+
+## Round 88 adjacent revalidation / no-production-delta (task round 57, 2026-11-01)
+
+Live checkpoint readback before this write is `329c3e89bb5dcf5dbd6d27153fd160d891adbe2f`; fixed U remains
+`telegramdesktop/tdesktop@f985723b552b30fe1c17d377d57f44e61a15a8c4`. The adjacent wire-only
+responsibility is already exact in the existing canonical owner:
+
+- `native/telegram-protocol/src/api.rs@ebfb3670b5cd097b9ce288782c7954f5cfe9fc43` keeps
+  `BAD_MSG_NOTIFICATION_CONSTRUCTOR = 0xa7eff811`,
+  `BadMsgNotification { bad_message_id: i64, bad_message_sequence_number: i32, error_code: i32 }`, and
+  `parse_bad_msg_notification`, which reads exactly i64/i32/i32 and rejects trailing bytes.
+- `native/telegram-protocol/src/tl.rs@89256ab35184b6dc06a095ab34abb9f44e95a264` implements signed little-endian
+  `read_i64` / `read_i32` through fixed-size `take_array`, so the field widths are exactly 8/4/4 and
+  truncation fails closed.
+- `native/telegram-protocol/src/lib.rs@abab39e42f100972484191f0e52e9edd9b88c6cf` exports the same
+  parser/type/constructor.
+- `native/telegram-network/src/lib.rs@1fc1b1f69e3e37377400d078f916599e0c7b20bc` already consumes that parser in
+  both receive branches and in the direct bad-message clock guard. Those recovery/application consumers are
+  pre-existing and are not modified by this adjacent wire-only revalidation.
+
+The exact TL object is 20 bytes: 4-byte constructor + 8-byte signed `bad_msg_id` + 4-byte signed
+`bad_msg_seqno` + 4-byte signed `error_code`. Therefore the current disposition is **no production delta**.
+This round only adds an external authored-only regression contract for exact 20-byte layout, signed extremes,
+constructor/field truncation boundaries, wrong constructor, trailing-byte rejection, and exact EOF, then mirrors the
+same contract into the desktop provider.
+
+This round deliberately keeps wire parsing separate from bad-time/time-correction recovery, current-request
+correlation, retry/session reset, sent-request/container history, acknowledgement/resend application, connection
+scheduling, auth-key lifecycle, gzip, and complete difference/differenceSlice decoding/application. Existing
+recovery code is evidence that the parser ships, not part of the isolated parser responsibility claimed here.
+
+No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment,
+installation, GitHub Actions, checks, statuses, or runtime acceptance is executed or queried in Stage A. Executable
+validation remains `not-run` and acceptance remains false.
