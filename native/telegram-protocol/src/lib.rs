@@ -24,7 +24,7 @@ pub use api::{
     build_auth_request_password_recovery, build_auth_resend_code, build_auth_send_code,
     build_auth_sign_in, build_auth_sign_up, build_init_connection_get_config, build_msgs_ack,
     parse_account_email_verified, parse_account_password_prefix, parse_account_sent_email_code,
-    parse_auth_password_recovery, parse_auth_sent_code, parse_bool,
+    parse_auth_authorization_user_id, parse_auth_password_recovery, parse_auth_sent_code, parse_bool,
     parse_config_dc_directory_prefix, try_parse_rpc_error, AccountPasswordState, ApiRequestError,
     ConfigDcDirectory, EmailVerifiedResult, InitConnection, NextCodeType, PasswordRecovery,
     RpcErrorResponse, SentCode, SentCodeDelivery, SentCodeResult, SentEmailCode,
@@ -35,12 +35,14 @@ pub use api::{
     AUTH_CHECK_PASSWORD_CONSTRUCTOR, AUTH_CHECK_RECOVERY_PASSWORD_CONSTRUCTOR,
     AUTH_PASSWORD_RECOVERY_CONSTRUCTOR, AUTH_REQUEST_PASSWORD_RECOVERY_CONSTRUCTOR,
     AUTH_RESEND_CODE_CONSTRUCTOR, AUTH_SEND_CODE_CONSTRUCTOR, AUTH_SENT_CODE_CONSTRUCTOR,
+    AUTH_AUTHORIZATION_CONSTRUCTOR, AUTH_AUTHORIZATION_SIGN_UP_REQUIRED_CONSTRUCTOR,
     AUTH_SENT_CODE_PAYMENT_REQUIRED_CONSTRUCTOR, AUTH_SENT_CODE_SUCCESS_CONSTRUCTOR,
     AUTH_SIGN_IN_CONSTRUCTOR, AUTH_SIGN_UP_CONSTRUCTOR, CODE_SETTINGS_CONSTRUCTOR,
     CONFIG_CONSTRUCTOR, DC_OPTION_CONSTRUCTOR, EMAIL_VERIFICATION_CODE_CONSTRUCTOR,
     EMAIL_VERIFY_PURPOSE_LOGIN_SETUP_CONSTRUCTOR, HELP_GET_CONFIG_CONSTRUCTOR,
     INIT_CONNECTION_CONSTRUCTOR, INVOKE_WITH_LAYER_CONSTRUCTOR, MSGS_ACK_CONSTRUCTOR,
     MTPROTO_LAYER, PASSWORD_KDF_ALGO_CONSTRUCTOR, RPC_ERROR_CONSTRUCTOR,
+    USER_CONSTRUCTOR, USER_EMPTY_CONSTRUCTOR,
 };
 pub use auth::{
     AuthCommand, AuthError, AuthEvent, AuthorizationMachine, AuthorizationState, CodeDeliveryType,

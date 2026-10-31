@@ -541,6 +541,27 @@ pub fn connect_directory(
     Err(NetworkError::ConnectFailed { attempts })
 }
 
+pub fn resume_auth_key(
+    directory: &DcDirectory,
+    dc_id: i32,
+    auth_key: AuthKey,
+    server_salt: i64,
+    server_time: i32,
+    config: &NetworkConfig,
+) -> Result<EstablishedSession, NetworkError> {
+    let (endpoint, transport) = connect_directory(directory, dc_id, DcPurpose::Main, config)?;
+    Ok(EstablishedSession {
+        endpoint,
+        transport,
+        auth_key,
+        server_salt,
+        server_time,
+        message_ids: MessageIdGuard::default(),
+        sequence: SessionSequence::new(),
+        session_id: random_i64()?,
+    })
+}
+
 pub fn establish_auth_key(
     directory: &DcDirectory,
     dc_id: i32,

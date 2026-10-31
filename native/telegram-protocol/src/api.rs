@@ -15,6 +15,10 @@ pub const AUTH_SEND_CODE_CONSTRUCTOR: u32 = 0xa677_244f;
 pub const CODE_SETTINGS_CONSTRUCTOR: u32 = 0xad25_3d78;
 pub const AUTH_SIGN_IN_CONSTRUCTOR: u32 = 0x8d52_a951;
 pub const AUTH_SIGN_UP_CONSTRUCTOR: u32 = 0xaac7_b717;
+pub const AUTH_AUTHORIZATION_CONSTRUCTOR: u32 = 0x2ea2_c0d4;
+pub const AUTH_AUTHORIZATION_SIGN_UP_REQUIRED_CONSTRUCTOR: u32 = 0x4474_7e9a;
+pub const USER_EMPTY_CONSTRUCTOR: u32 = 0xd3bc_4b7a;
+pub const USER_CONSTRUCTOR: u32 = 0xb1b8_cc83;
 pub const MSGS_ACK_CONSTRUCTOR: u32 = 0x62d6_b459;
 pub const CONFIG_CONSTRUCTOR: u32 = 0xcc1a_241e;
 pub const DC_OPTION_CONSTRUCTOR: u32 = 0x18b7_a10d;
@@ -73,7 +77,9 @@ pub enum SentCodeResult {
     Code {
         code: SentCode,
     },
-    Success,
+    Success {
+        user_id: i64,
+    },
     PaymentRequired {
         store_product: String,
         phone_code_hash: String,
@@ -135,7 +141,7 @@ pub struct SentEmailCode {
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum EmailVerifiedResult {
     LoginCode { email: String, code: SentCode },
-    LoginSuccess { email: String },
+    LoginSuccess { email: String, user_id: i64 },
     LoginPaymentRequired {
         email: String,
         store_product: String,
@@ -451,7 +457,9 @@ pub fn parse_auth_sent_code(input: &[u8]) -> Result<SentCodeResult, ApiRequestEr
                 },
             })
         }
-        AUTH_SENT_CODE_SUCCESS_CONSTRUCTOR => Ok(SentCodeResult::Success),
+        AUTH_SENT_CODE_SUCCESS_CONSTRUCTOR => Ok(SentCodeResult::Success {
+            user_id: parse_auth_authorization_user_id_from_reader(&mut reader)?,
+        }),
         AUTH_SENT_CODE_PAYMENT_REQUIRED_CONSTRUCTOR => {
             let result = SentCodeResult::PaymentRequired {
                 store_product: reader.read_string()?.to_string(),
@@ -562,7 +570,10 @@ pub fn parse_account_email_verified(input: &[u8]) -> Result<EmailVerifiedResult,
                         },
                     })
                 }
-                AUTH_SENT_CODE_SUCCESS_CONSTRUCTOR => Ok(EmailVerifiedResult::LoginSuccess { email }),
+                AUTH_SENT_CODE_SUCCESS_CONSTRUCTOR => Ok(EmailVerifiedResult::LoginSuccess {
+                    email,
+                    user_id: parse_auth_authorization_user_id_from_reader(&mut reader)?,
+                }),
                 AUTH_SENT_CODE_PAYMENT_REQUIRED_CONSTRUCTOR => {
                     let result = EmailVerifiedResult::LoginPaymentRequired {
                         email,
@@ -587,6 +598,49 @@ pub fn parse_account_email_verified(input: &[u8]) -> Result<EmailVerifiedResult,
         }
         actual => Err(ApiRequestError::Tl(TlError::UnexpectedConstructor {
             expected: ACCOUNT_EMAIL_VERIFIED_LOGIN_CONSTRUCTOR,
+            actual,
+        })),
+    }
+}
+
+pub fn parse_auth_authorization_user_id(input: &[u8]) -> Result<i64, ApiRequestError> {
+    let mut reader = TlReader::new(input);
+    let user_id = parse_auth_authorization_user_id_from_reader(&mut reader)?;
+    if !reader.is_finished() {
+        return Err(ApiRequestError::TrailingBytes(reader.remaining()));
+    }
+    Ok(user_id)
+}
+
+fn parse_auth_authorization_user_id_from_reader(
+    reader: &mut TlReader<'_>,
+) -> Result<i64, ApiRequestError> {
+    let constructor = reader.read_u32()?;
+    if constructor != AUTH_AUTHORIZATION_CONSTRUCTOR {
+        return Err(ApiRequestError::Tl(TlError::UnexpectedConstructor {
+            expected: AUTH_AUTHORIZATION_CONSTRUCTOR,
+            actual: constructor,
+        }));
+    }
+    let flags = reader.read_i32()?;
+    if flags & 1 != 0 {
+        reader.read_i32()?;
+    }
+    if flags & 2 != 0 {
+        reader.read_i32()?;
+    }
+    if flags & 4 != 0 {
+        reader.read_bytes()?;
+    }
+    match reader.read_u32()? {
+        USER_EMPTY_CONSTRUCTOR => Ok(reader.read_i64()?),
+        USER_CONSTRUCTOR => {
+            reader.read_i32()?;
+            reader.read_i32()?;
+            Ok(reader.read_i64()?)
+        }
+        actual => Err(ApiRequestError::Tl(TlError::UnexpectedConstructor {
+            expected: USER_CONSTRUCTOR,
             actual,
         })),
     }
@@ -801,5 +855,40 @@ fn require_nonempty(value: &str, field: &'static str) -> Result<(), ApiRequestEr
         Err(ApiRequestError::EmptyField(field))
     } else {
         Ok(())
+    }
+}
+
+
+#[cfg(test)]
+mod authorization_identity_contract_tests {
+    use super::*;
+
+    fn authorization_with_user(user_id: i64) -> Vec<u8> {
+        let mut writer = TlWriter::new();
+        writer.write_u32(AUTH_AUTHORIZATION_CONSTRUCTOR);
+        writer.write_i32(0);
+        writer.write_u32(USER_CONSTRUCTOR);
+        writer.write_i32(0);
+        writer.write_i32(0);
+        writer.write_i64(user_id);
+        writer.into_bytes()
+    }
+
+    #[test]
+    fn auth_authorization_exposes_canonical_self_user_id() {
+        assert_eq!(
+            parse_auth_authorization_user_id(&authorization_with_user(4_242)).unwrap(),
+            4_242
+        );
+    }
+
+    #[test]
+    fn sent_code_success_carries_authorized_self_user_id() {
+        let mut payload = AUTH_SENT_CODE_SUCCESS_CONSTRUCTOR.to_le_bytes().to_vec();
+        payload.extend_from_slice(&authorization_with_user(9_001));
+        assert_eq!(
+            parse_auth_sent_code(&payload).unwrap(),
+            SentCodeResult::Success { user_id: 9_001 }
+        );
     }
 }
