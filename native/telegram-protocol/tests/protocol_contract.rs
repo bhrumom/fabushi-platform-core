@@ -1,6 +1,6 @@
 use fabushi_telegram_protocol::{
     aes_ige_encrypt, build_auth_send_code, build_auth_sign_in, build_auth_sign_up,
-    build_client_dh_inner_data, build_init_connection_get_config, build_msgs_ack, build_msgs_state_req,
+    build_client_dh_inner_data, build_init_connection_get_config, build_msg_resend_req, build_msgs_ack, build_msgs_state_req,
     build_p_q_inner_data_dc, build_p_q_inner_data_temp_dc, build_req_dh_params, build_req_pq_multi,
     build_set_client_dh_params,
     decrypt_message, decrypt_server_dh_inner_data, derive_aes_key_iv, derive_tmp_aes_key_iv,
@@ -37,7 +37,7 @@ use fabushi_telegram_protocol::{
     CONFIG_CONSTRUCTOR, DC_OPTION_CONSTRUCTOR, DESTROY_AUTH_KEY_FAIL_CONSTRUCTOR,
     DESTROY_AUTH_KEY_NONE_CONSTRUCTOR, DESTROY_AUTH_KEY_OK_CONSTRUCTOR, HELP_GET_CONFIG_CONSTRUCTOR,
     INIT_CONNECTION_CONSTRUCTOR, INPUT_CHECK_PASSWORD_SRP_CONSTRUCTOR,
-    INVOKE_WITH_LAYER_CONSTRUCTOR, MSGS_ACK_CONSTRUCTOR, MSGS_STATE_REQ_CONSTRUCTOR, MTPROTO_LAYER,
+    INVOKE_WITH_LAYER_CONSTRUCTOR, MSG_RESEND_REQ_CONSTRUCTOR, MSGS_ACK_CONSTRUCTOR, MSGS_STATE_REQ_CONSTRUCTOR, MTPROTO_LAYER,
     PASSWORD_KDF_ALGO_CONSTRUCTOR,
 };
 use fabushi_telegram_protocol::{
@@ -204,6 +204,52 @@ fn message_acknowledgement_encodes_server_ids_as_a_tl_vector() {
     assert_eq!(reader.read_i64().unwrap(), 101);
     assert_eq!(reader.read_i64().unwrap(), 103);
     assert!(reader.is_finished());
+}
+
+#[test]
+fn msg_resend_req_request_wire_is_exact_and_vector_bounded() {
+    let empty = build_msg_resend_req(&[]).unwrap();
+    let mut empty_reader = TlReader::new(&empty);
+    assert_eq!(empty_reader.read_u32().unwrap(), MSG_RESEND_REQ_CONSTRUCTOR);
+    assert_eq!(empty_reader.read_vector_length().unwrap(), 0);
+    assert!(empty_reader.is_finished());
+
+    let shipping_id = 0x0102_0304_0506_0708_i64;
+    let one = build_msg_resend_req(&[shipping_id]).unwrap();
+    let mut one_expected = Vec::new();
+    one_expected.extend_from_slice(&MSG_RESEND_REQ_CONSTRUCTOR.to_le_bytes());
+    one_expected.extend_from_slice(&0x1cb5_c415_u32.to_le_bytes());
+    one_expected.extend_from_slice(&1_i32.to_le_bytes());
+    one_expected.extend_from_slice(&shipping_id.to_le_bytes());
+    assert_eq!(one, one_expected);
+
+    let ids = [i64::MIN, -1, 0, 0x1112_1314_1516_1718_i64, i64::MAX];
+    let encoded = build_msg_resend_req(&ids).unwrap();
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&MSG_RESEND_REQ_CONSTRUCTOR.to_le_bytes());
+    expected.extend_from_slice(&0x1cb5_c415_u32.to_le_bytes());
+    expected.extend_from_slice(&(ids.len() as i32).to_le_bytes());
+    for id in ids {
+        expected.extend_from_slice(&id.to_le_bytes());
+    }
+    assert_eq!(encoded, expected);
+
+    let mut reader = TlReader::new(&encoded);
+    assert_eq!(reader.read_u32().unwrap(), MSG_RESEND_REQ_CONSTRUCTOR);
+    assert_eq!(reader.read_vector_length().unwrap(), ids.len());
+    for id in ids {
+        assert_eq!(reader.read_i64().unwrap(), id);
+    }
+    assert!(reader.is_finished());
+
+    let mut overflow = TlWriter::new();
+    assert_eq!(
+        overflow
+            .write_vector_length(i32::MAX as usize + 1)
+            .unwrap_err(),
+        TlError::LengthOutOfRange
+    );
+    assert!(overflow.as_slice().is_empty());
 }
 
 #[test]
