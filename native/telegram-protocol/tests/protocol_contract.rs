@@ -3166,3 +3166,86 @@ fn future_salt_vector_elements_fail_closed_at_constructor_and_each_field_boundar
     trailing.push(0);
     assert!(fabushi_telegram_protocol::parse_future_salts(&trailing).is_err());
 }
+
+
+#[test]
+fn rpc_drop_answer_response_variants_preserve_exact_fixed_u_wire_boundaries() {
+    let unknown = fabushi_telegram_protocol::RPC_ANSWER_UNKNOWN_CONSTRUCTOR.to_le_bytes();
+    assert_eq!(unknown.len(), 4);
+    assert_eq!(
+        fabushi_telegram_protocol::parse_rpc_drop_answer(&unknown).unwrap(),
+        fabushi_telegram_protocol::RpcDropAnswer::Unknown
+    );
+
+    let dropped_running =
+        fabushi_telegram_protocol::RPC_ANSWER_DROPPED_RUNNING_CONSTRUCTOR.to_le_bytes();
+    assert_eq!(dropped_running.len(), 4);
+    assert_eq!(
+        fabushi_telegram_protocol::parse_rpc_drop_answer(&dropped_running).unwrap(),
+        fabushi_telegram_protocol::RpcDropAnswer::DroppedRunning
+    );
+
+    let mut dropped = TlWriter::new();
+    dropped.write_u32(fabushi_telegram_protocol::RPC_ANSWER_DROPPED_CONSTRUCTOR);
+    dropped.write_i64(i64::MIN);
+    dropped.write_i32(i32::MIN);
+    dropped.write_i32(i32::MAX);
+    let bytes = dropped.into_bytes();
+
+    assert_eq!(bytes.len(), 20);
+    assert_eq!(
+        &bytes[0..4],
+        &fabushi_telegram_protocol::RPC_ANSWER_DROPPED_CONSTRUCTOR.to_le_bytes()
+    );
+    assert_eq!(&bytes[4..12], &i64::MIN.to_le_bytes());
+    assert_eq!(&bytes[12..16], &i32::MIN.to_le_bytes());
+    assert_eq!(&bytes[16..20], &i32::MAX.to_le_bytes());
+    assert_eq!(
+        fabushi_telegram_protocol::parse_rpc_drop_answer(&bytes).unwrap(),
+        fabushi_telegram_protocol::RpcDropAnswer::Dropped {
+            message_id: i64::MIN,
+            sequence_number: i32::MIN,
+            bytes: i32::MAX,
+        }
+    );
+}
+
+#[test]
+fn rpc_drop_answer_response_variants_fail_closed_on_constructor_field_and_eof_boundaries() {
+    assert!(
+        fabushi_telegram_protocol::parse_rpc_drop_answer(&0_u32.to_le_bytes()).is_err()
+    );
+
+    for constructor in [
+        fabushi_telegram_protocol::RPC_ANSWER_UNKNOWN_CONSTRUCTOR,
+        fabushi_telegram_protocol::RPC_ANSWER_DROPPED_RUNNING_CONSTRUCTOR,
+    ] {
+        let exact = constructor.to_le_bytes();
+        for cut in 0..exact.len() {
+            assert!(fabushi_telegram_protocol::parse_rpc_drop_answer(&exact[..cut]).is_err());
+        }
+        let mut trailing = exact.to_vec();
+        trailing.push(0);
+        assert!(fabushi_telegram_protocol::parse_rpc_drop_answer(&trailing).is_err());
+    }
+
+    let mut dropped = TlWriter::new();
+    dropped.write_u32(fabushi_telegram_protocol::RPC_ANSWER_DROPPED_CONSTRUCTOR);
+    dropped.write_i64(i64::MAX);
+    dropped.write_i32(i32::MAX);
+    dropped.write_i32(i32::MIN);
+    let exact = dropped.into_bytes();
+    assert_eq!(exact.len(), 20);
+
+    for cut in 0..exact.len() {
+        assert!(fabushi_telegram_protocol::parse_rpc_drop_answer(&exact[..cut]).is_err());
+    }
+
+    let mut wrong_constructor = exact.clone();
+    wrong_constructor[0..4].copy_from_slice(&0_u32.to_le_bytes());
+    assert!(fabushi_telegram_protocol::parse_rpc_drop_answer(&wrong_constructor).is_err());
+
+    let mut trailing = exact;
+    trailing.push(0);
+    assert!(fabushi_telegram_protocol::parse_rpc_drop_answer(&trailing).is_err());
+}
