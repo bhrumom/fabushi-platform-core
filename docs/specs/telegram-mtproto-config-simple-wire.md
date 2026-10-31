@@ -124,3 +124,17 @@ No executable validation is permitted in this stage.
 - fixed-U `special_config_request.cpp@fdb65506b0a886bc2daeccb61090bc44be7e2d88`
 - fixed-U `special_config_request.h@91901489e778089b03187682a9556e929867b94f`
 - `docs/specs/spec-first-ai-development.md`
+
+
+## Source-level implementation review
+
+Canonical implementation commits: `cde1297cacd3861764d74a111629d002e74c9d71`, fail-closed constructor dispatch correction `46db4422aa7221b1c8048f96f1c7c47cd0c01458`, and malformed-framing contract expansion `022b578b8f7823a9af737a2f88fdf4c684fa4e56`. Canonical blobs: protocol api `0c852a5e3bc41a4ac571d713ae3d4edea19b3619`, protocol lib `04e5020e7b1e7ed46b403c151f84a095a1a17e4c`. Desktop synchronization commits: `870ec15e7760718ad7ef1eb5e578dfcef8f0e46b` and final contract sync `878329a3f54895da0c44ab33e14cf8856444e128`.
+
+- R1: satisfied by source inspection — all four fixed-U constructor constants are present with exact IDs.
+- R2-R3: satisfied by source inspection — typed `IpPort`, `AccessPointRule`, and `HelpConfigSimple` preserve raw signed integer values, strings, secret bytes, and vector order without imposing bootstrap policy.
+- R4-R5: satisfied by source inspection — public parsers require exact constructors, nested decoding uses the existing bounded `TlReader`, unknown `IpPort` constructors fail before variant fields are consumed, and malformed vector constructors, invalid UTF-8 strings, truncation at every byte boundary, nested wrong constructors, and trailing bytes are covered by authored contracts.
+- R6-R8: satisfied by source inspection and owner review — no expiry/time comparison, phone-prefix interpretation, IP/port/DC validation, `DcDirectory` mutation, web acquisition/decryption, transport/session/auth/request mutation, or second bootstrap owner was introduced. The Telegram Desktop `SpecialConfigRequest` lifecycle remains explicitly fail-closed/open.
+- R9: satisfied by remote blob readback — desktop provider api/lib blobs after `878329a3f54895da0c44ab33e14cf8856444e128` are byte-identical to canonical api/lib blobs.
+- R10: satisfied for Stage A process — contracts were authored only; no build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried.
+
+Acceptance criteria AC1-AC7 are satisfied at source/implementation/bookkeeping level. AC8 remains intentionally **blocked/not-run** until Stage B executable validation. No runtime claim is made for special-config acquisition/decryption/expiry/phone-prefix/DC endpoint application.
