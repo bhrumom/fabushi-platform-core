@@ -69,6 +69,7 @@ pub struct EstablishedSession {
     message_ids: MessageIdGuard,
     sequence: SessionSequence,
     session_id: i64,
+    clock_offset_seconds: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,6 +205,7 @@ impl EstablishedSession {
         for attempt in 0..2 {
             let request_message_id = self.send_encrypted_message(body, true)?;
             let mut retry_with_new_salt = false;
+            let mut retry_bad_message: Option<(i64, i32)> = None;
             for _ in 0..DEFAULT_MAX_RPC_MESSAGES {
                 let payload = self.transport.receive_payload()?;
                 let envelope = EncryptedEnvelope::from_bytes(&payload)?;
@@ -213,9 +215,7 @@ impl EstablishedSession {
                     &envelope,
                     self.session_id,
                 )?;
-                let (now, _) = unix_time()?;
-                self.message_ids
-                    .validate_server_message_id(response.message_id, now)?;
+                self.validate_incoming_message_id(response.message_id, &response.body)?;
                 let mut acknowledgements = Vec::new();
                 if response.sequence_number.rem_euclid(2) == 1 {
                     acknowledgements.push(response.message_id);
@@ -235,8 +235,18 @@ impl EstablishedSession {
                         retry_with_new_salt = true;
                         break;
                     }
+                    RpcOutcome::RetryBadMessage { message_id, code } => {
+                        retry_bad_message = Some((message_id, code));
+                        break;
+                    }
                     RpcOutcome::Continue => {}
                 }
+            }
+            if let Some((message_id, code)) = retry_bad_message {
+                if attempt == 0 {
+                    continue;
+                }
+                return Err(NetworkError::BadServerMessage { message_id, code });
             }
             if !(retry_with_new_salt && attempt == 0) {
                 return Err(NetworkError::RpcTimeout);
@@ -250,7 +260,7 @@ impl EstablishedSession {
         body: &[u8],
         content_related: bool,
     ) -> Result<i64, NetworkError> {
-        let message_id = next_message_id(&mut self.message_ids)?;
+        let message_id = self.next_message_id()?;
         let mut padding = vec![0_u8; encrypted_padding_length(body.len())];
         secure_random(&mut padding)?;
         let message = PlainMessage {
@@ -323,10 +333,27 @@ impl EstablishedSession {
                 self.server_salt = read_i64_at(body, 20)?;
                 Ok(RpcOutcome::NewSalt)
             }
-            BAD_MSG_NOTIFICATION_CONSTRUCTOR => Err(NetworkError::BadServerMessage {
-                message_id: read_i64_at(body, 4)?,
-                code: read_i32_at(body, 16)?,
-            }),
+            BAD_MSG_NOTIFICATION_CONSTRUCTOR => {
+                let message_id = read_i64_at(body, 4)?;
+                let code = read_i32_at(body, 16)?;
+                if message_id != request_message_id {
+                    return Err(NetworkError::BadServerMessage { message_id, code });
+                }
+                match bad_message_recovery_action(code) {
+                    Some(BadMessageRecoveryAction::CorrectTimeAndRetry) => {
+                        self.correct_time_from_server_message(response_message_id)?;
+                        Ok(RpcOutcome::RetryBadMessage { message_id, code })
+                    }
+                    Some(BadMessageRecoveryAction::ResetSessionAndRetry) => {
+                        self.reset_session_state()?;
+                        Ok(RpcOutcome::RetryBadMessage { message_id, code })
+                    }
+                    Some(BadMessageRecoveryAction::Retry) => {
+                        Ok(RpcOutcome::RetryBadMessage { message_id, code })
+                    }
+                    None => Err(NetworkError::BadServerMessage { message_id, code }),
+                }
+            },
             MESSAGE_CONTAINER_CONSTRUCTOR => {
                 let count = read_i32_at(body, 4)?;
                 if !(0..=1024).contains(&count) {
@@ -376,6 +403,61 @@ impl EstablishedSession {
         }
     }
 
+    fn next_message_id(&mut self) -> Result<i64, NetworkError> {
+        let (seconds, nanos) = unix_time()?;
+        let adjusted = seconds
+            .checked_add(self.clock_offset_seconds)
+            .ok_or(NetworkError::InvalidSystemClock)?;
+        Ok(self
+            .message_ids
+            .generate_client_message_id(adjusted, nanos)?)
+    }
+
+    fn validate_incoming_message_id(
+        &mut self,
+        message_id: i64,
+        body: &[u8],
+    ) -> Result<(), NetworkError> {
+        let (local_now, _) = unix_time()?;
+        let adjusted_now = local_now
+            .checked_add(self.clock_offset_seconds)
+            .ok_or(NetworkError::InvalidSystemClock)?;
+        match self
+            .message_ids
+            .validate_server_message_id(message_id, adjusted_now)
+        {
+            Ok(()) => Ok(()),
+            Err(MessageIdError::OutsideTimeWindow)
+                if direct_bad_message_time_recovery(body) =>
+            {
+                self.message_ids
+                    .validate_server_message_id(message_id, message_id >> 32)
+                    .map_err(NetworkError::from)
+            }
+            Err(error) => Err(NetworkError::from(error)),
+        }
+    }
+
+    fn correct_time_from_server_message(
+        &mut self,
+        response_message_id: i64,
+    ) -> Result<(), NetworkError> {
+        let server_seconds = response_message_id >> 32;
+        let (local_seconds, _) = unix_time()?;
+        self.clock_offset_seconds = server_seconds
+            .checked_sub(local_seconds)
+            .ok_or(NetworkError::InvalidSystemClock)?;
+        self.server_time =
+            i32::try_from(server_seconds).map_err(|_| NetworkError::InvalidSystemClock)?;
+        Ok(())
+    }
+
+    fn reset_session_state(&mut self) -> Result<(), NetworkError> {
+        self.session_id = random_i64()?;
+        self.sequence = SessionSequence::new();
+        Ok(())
+    }
+
     pub fn ping(&mut self) -> Result<PingResult, NetworkError> {
         let mut ping_bytes = [0_u8; 8];
         secure_random(&mut ping_bytes)?;
@@ -384,7 +466,7 @@ impl EstablishedSession {
 
     pub fn send_ping(&mut self, ping_id: i64) -> Result<PingResult, NetworkError> {
         for attempt in 0..2 {
-            let request_message_id = next_message_id(&mut self.message_ids)?;
+            let request_message_id = self.next_message_id()?;
             let mut body = Vec::with_capacity(12);
             body.extend_from_slice(&PING_CONSTRUCTOR.to_le_bytes());
             body.extend_from_slice(&ping_id.to_le_bytes());
@@ -403,6 +485,7 @@ impl EstablishedSession {
             self.transport.send_payload(&envelope.to_bytes())?;
 
             let mut should_retry_with_new_salt = false;
+            let mut retry_bad_message: Option<(i64, i32)> = None;
             for _ in 0..DEFAULT_MAX_SERVICE_MESSAGES {
                 let payload = self.transport.receive_payload()?;
                 let envelope = EncryptedEnvelope::from_bytes(&payload)?;
@@ -412,10 +495,13 @@ impl EstablishedSession {
                     &envelope,
                     self.session_id,
                 )?;
-                let (now, _) = unix_time()?;
-                self.message_ids
-                    .validate_server_message_id(response.message_id, now)?;
-                match self.process_service_body(&response.body, ping_id, request_message_id)? {
+                self.validate_incoming_message_id(response.message_id, &response.body)?;
+                match self.process_service_body(
+                    &response.body,
+                    ping_id,
+                    request_message_id,
+                    response.message_id,
+                )? {
                     ServiceOutcome::Pong(response_message_id) => {
                         return Ok(PingResult {
                             ping_id,
@@ -424,8 +510,18 @@ impl EstablishedSession {
                         });
                     }
                     ServiceOutcome::NewSalt => should_retry_with_new_salt = true,
+                    ServiceOutcome::RetryBadMessage { message_id, code } => {
+                        retry_bad_message = Some((message_id, code));
+                        break;
+                    }
                     ServiceOutcome::Continue => {}
                 }
+            }
+            if let Some((message_id, code)) = retry_bad_message {
+                if attempt == 0 {
+                    continue;
+                }
+                return Err(NetworkError::BadServerMessage { message_id, code });
             }
             if !(should_retry_with_new_salt && attempt == 0) {
                 return Err(NetworkError::PongTimeout);
@@ -439,6 +535,7 @@ impl EstablishedSession {
         body: &[u8],
         ping_id: i64,
         request_message_id: i64,
+        response_message_id: i64,
     ) -> Result<ServiceOutcome, NetworkError> {
         match read_u32_at(body, 0)? {
             PONG_CONSTRUCTOR => {
@@ -465,6 +562,27 @@ impl EstablishedSession {
                 self.server_salt = read_i64_at(body, 20)?;
                 Ok(ServiceOutcome::NewSalt)
             }
+            BAD_MSG_NOTIFICATION_CONSTRUCTOR => {
+                let message_id = read_i64_at(body, 4)?;
+                let code = read_i32_at(body, 16)?;
+                if message_id != request_message_id {
+                    return Err(NetworkError::BadServerMessage { message_id, code });
+                }
+                match bad_message_recovery_action(code) {
+                    Some(BadMessageRecoveryAction::CorrectTimeAndRetry) => {
+                        self.correct_time_from_server_message(response_message_id)?;
+                        Ok(ServiceOutcome::RetryBadMessage { message_id, code })
+                    }
+                    Some(BadMessageRecoveryAction::ResetSessionAndRetry) => {
+                        self.reset_session_state()?;
+                        Ok(ServiceOutcome::RetryBadMessage { message_id, code })
+                    }
+                    Some(BadMessageRecoveryAction::Retry) => {
+                        Ok(ServiceOutcome::RetryBadMessage { message_id, code })
+                    }
+                    None => Err(NetworkError::BadServerMessage { message_id, code }),
+                }
+            }
             MESSAGE_CONTAINER_CONSTRUCTOR => {
                 let count = read_i32_at(body, 4)?;
                 if !(0..=1024).contains(&count) {
@@ -490,8 +608,12 @@ impl EstablishedSession {
                     let (now, _) = unix_time()?;
                     self.message_ids
                         .validate_server_message_id(message_id, now)?;
-                    let inner_outcome =
-                        self.process_service_body(inner, ping_id, request_message_id)?;
+                    let inner_outcome = self.process_service_body(
+                        inner,
+                        ping_id,
+                        request_message_id,
+                        message_id,
+                    )?;
                     if !matches!(inner_outcome, ServiceOutcome::Continue) {
                         outcome = inner_outcome;
                     }
@@ -512,13 +634,43 @@ impl EstablishedSession {
 enum ServiceOutcome {
     Pong(i64),
     NewSalt,
+    RetryBadMessage { message_id: i64, code: i32 },
     Continue,
 }
 
 enum RpcOutcome {
     Result(RpcResult),
     NewSalt,
+    RetryBadMessage { message_id: i64, code: i32 },
     Continue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BadMessageRecoveryAction {
+    CorrectTimeAndRetry,
+    ResetSessionAndRetry,
+    Retry,
+}
+
+fn bad_message_recovery_action(code: i32) -> Option<BadMessageRecoveryAction> {
+    match code {
+        16 | 17 => Some(BadMessageRecoveryAction::CorrectTimeAndRetry),
+        32 | 33 => Some(BadMessageRecoveryAction::ResetSessionAndRetry),
+        64 => Some(BadMessageRecoveryAction::Retry),
+        _ => None,
+    }
+}
+
+fn direct_bad_message_time_recovery(body: &[u8]) -> bool {
+    read_u32_at(body, 0).ok() == Some(BAD_MSG_NOTIFICATION_CONSTRUCTOR)
+        && matches!(read_i32_at(body, 16).ok(), Some(16 | 17))
+}
+
+fn clock_offset_seconds(server_time: i32) -> Result<i64, NetworkError> {
+    let (local_seconds, _) = unix_time()?;
+    i64::from(server_time)
+        .checked_sub(local_seconds)
+        .ok_or(NetworkError::InvalidSystemClock)
 }
 
 pub fn connect_directory(
@@ -559,6 +711,7 @@ pub fn resume_auth_key(
         message_ids: MessageIdGuard::default(),
         sequence: SessionSequence::new(),
         session_id: random_i64()?,
+        clock_offset_seconds: clock_offset_seconds(server_time)?,
     })
 }
 
@@ -596,6 +749,7 @@ pub fn establish_auth_key(
             message_ids,
             sequence: SessionSequence::new(),
             session_id: random_i64()?,
+            clock_offset_seconds: clock_offset_seconds(established.server_time)?,
         }),
         DhGenAction::Retry(retry) => {
             continue_dh_retries(endpoint, transport, &mut handshake, &mut message_ids, retry)
@@ -623,6 +777,7 @@ fn continue_dh_retries(
                     message_ids: message_ids.clone(),
                     sequence: SessionSequence::new(),
                     session_id: random_i64()?,
+                    clock_offset_seconds: clock_offset_seconds(established.server_time)?,
                 });
             }
             DhGenAction::Retry(retry) => request = retry,
@@ -700,4 +855,57 @@ fn read_i64_at(input: &[u8], offset: usize) -> Result<i64, NetworkError> {
             .try_into()
             .expect("eight-byte slice"),
     ))
+}
+
+#[cfg(test)]
+mod recovery_contract_tests {
+    use super::{
+        bad_message_recovery_action, direct_bad_message_time_recovery,
+        BadMessageRecoveryAction, BAD_MSG_NOTIFICATION_CONSTRUCTOR,
+    };
+
+    fn bad_message(code: i32) -> Vec<u8> {
+        let mut body = Vec::with_capacity(20);
+        body.extend_from_slice(&BAD_MSG_NOTIFICATION_CONSTRUCTOR.to_le_bytes());
+        body.extend_from_slice(&123_i64.to_le_bytes());
+        body.extend_from_slice(&1_i32.to_le_bytes());
+        body.extend_from_slice(&code.to_le_bytes());
+        body
+    }
+
+    #[test]
+    fn fixed_u_recoverable_bad_message_codes_are_bounded_and_typed() {
+        assert_eq!(
+            bad_message_recovery_action(16),
+            Some(BadMessageRecoveryAction::CorrectTimeAndRetry)
+        );
+        assert_eq!(
+            bad_message_recovery_action(17),
+            Some(BadMessageRecoveryAction::CorrectTimeAndRetry)
+        );
+        assert_eq!(
+            bad_message_recovery_action(32),
+            Some(BadMessageRecoveryAction::ResetSessionAndRetry)
+        );
+        assert_eq!(
+            bad_message_recovery_action(33),
+            Some(BadMessageRecoveryAction::ResetSessionAndRetry)
+        );
+        assert_eq!(
+            bad_message_recovery_action(64),
+            Some(BadMessageRecoveryAction::Retry)
+        );
+        assert_eq!(bad_message_recovery_action(48), None);
+        assert_eq!(bad_message_recovery_action(99), None);
+    }
+
+    #[test]
+    fn only_direct_time_skew_notifications_relax_the_clock_window() {
+        assert!(direct_bad_message_time_recovery(&bad_message(16)));
+        assert!(direct_bad_message_time_recovery(&bad_message(17)));
+        assert!(!direct_bad_message_time_recovery(&bad_message(32)));
+        assert!(!direct_bad_message_time_recovery(&bad_message(64)));
+        assert!(!direct_bad_message_time_recovery(&[0_u8; 20]));
+        assert!(!direct_bad_message_time_recovery(&[0_u8; 8]));
+    }
 }
