@@ -63,3 +63,22 @@ Do not run build, typecheck, lint, schema validation, generators, unit/contract/
 - AC5: Desktop provider copies are byte-identical to canonical protocol/network sources.
 - AC6: No gzip/difference/multi-request history scope is claimed.
 - AC7: Authored tests remain not-run and acceptance remains false until Stage B executable evidence exists.
+
+
+## Stage-A spec compliance review — 2026-11-01
+
+Implementation commit: `3a850171c59a5f27809e176ba54971c7c0c003dc`  
+Canonical blobs: protocol api `75959eb82460cb36bf5f43c6e4470ef8814ea2a9`, protocol lib `3540f1a60df0d07f77b6e38349e0c500ec2d12d8`, network `42be9e9fa78c3acc77367799c1ecb506cdd25ab0`.
+
+- R1: passed by source inspection — the protocol owner exports `BAD_SERVER_SALT_CONSTRUCTOR`, typed `BadServerSalt`, `parse_bad_server_salt`, and the public crate re-exports.
+- R2: passed by source inspection — the parser consumes `bad_msg_id`, `bad_msg_seqno`, `error_code`, and `new_server_salt` in fixed-U order.
+- R3: passed by source inspection — wrong constructor and any truncated read return parse failure; a non-finished reader returns `TrailingBytes`.
+- R4: passed by source inspection — `EstablishedSession::scan_rpc_body` invokes `parse_bad_server_salt(body)` before current-request matching and before assigning `self.server_salt`.
+- R5: passed by source inspection — the ping/service branch invokes the same typed parser before matching and salt mutation.
+- R6: passed by source inspection — `bad_server_salt_matches_request` gates both branches to the one outstanding request; a valid unrelated id preserves `BadServerMessage` with the parsed id/code.
+- R7: passed by source inspection — `BadServerSalt.bad_message_sequence_number` retains the decoded fixed-U sequence field without creating historical sent/container state.
+- R8: passed by source inspection — a matching object assigns exactly `notification.new_server_salt` and returns the existing `NewSalt` outcome.
+- R9: passed by ownership/scope inspection — changes stay in existing protocol/network owners; no gzip, full difference decoder, or historical `wasSent/haveSent/_resendingIds/toSend/_sentContainers` owner was introduced.
+- R10: passed as an authored-only Stage-A artifact — exact-field, wrong-constructor, truncation, trailing-byte, and current-request contracts were added but not run.
+
+Acceptance criteria AC1-AC4 and AC6 are satisfied at source/implementation level. AC5 is pending desktop synchronization in this round. AC7 remains intentionally **blocked/not-run** until Stage B executable validation. No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried in this review.
