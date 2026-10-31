@@ -102,3 +102,24 @@ Canonical request implementation commit: `37fff2cb24658b6e0f738bbbd23cecdf075f4b
 - R15-R16: satisfied as source-level ownership boundaries — the builder has no socket, scheduler, callback registry, request-history lookup/mutation, ACK/resend/container, timeout/reconnect, persistence, gzip, or updates-difference side effect. Historical outstanding-RPC selection/correlation/drop semantics and arbitrary `wasSent/haveSent/_resendingIds/toSend/_sentContainers` history remain fail-closed.
 
 AC7-AC9 are satisfied at source/implementation/bookkeeping level. AC10 remains intentionally **blocked/not-run** for executable validation with `accepted=false`. No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried.
+
+
+## Round 60 adjacent revalidation: RpcDropAnswer result wire
+
+Live authority reread at checkpoint `b6c7f4ad9a7e40bc4ffe24b6ee7a5e33ae134b83` confirms fixed-U remains `telegramdesktop/tdesktop@f985723b552b30fe1c17d377d57f44e61a15a8c4`, with `mtproto.tl@76225965bfc794388db241f3f760db8ab79e84f8` and `session_private.cpp@13cbc76ec723386027b5b4dcac79999b791c4614`.
+
+The existing response-side owner is already exact and therefore requires **no production delta**:
+
+- `native/telegram-protocol/src/api.rs@ebfb3670b5cd097b9ce288782c7954f5cfe9fc43` dispatches exactly `rpc_answer_unknown#5e2ad36e`, `rpc_answer_dropped_running#cd78e586`, and `rpc_answer_dropped#a43ad8b7`.
+- The first two variants consume only their 4-byte constructor and strict EOF rejects any payload bytes.
+- `rpc_answer_dropped` consumes exactly constructor 4 + `msg_id:long` 8 + `seq_no:int` 4 + `bytes:int` 4 = 20 bytes, preserving signed `i64/i32/i32` values.
+- `native/telegram-protocol/src/tl.rs@89256ab35184b6dc06a095ab34abb9f44e95a264` implements signed little-endian fixed-width reads through bounded `take_array`; every truncation fails closed.
+- `native/telegram-protocol/src/lib.rs@abab39e42f100972484191f0e52e9edd9b88c6cf` exports the same canonical parser/type/constructors.
+- The desktop provider copies are byte-identical to those canonical api/lib blobs at the live desktop checkpoint.
+- Fixed-U `session_private.cpp` has no direct `rpc_answer_*` branch. Accordingly, this revalidation does not invent request-history mutation, drop/cancel scheduling, callback lookup, resend/container state, or any other application lifecycle.
+
+Round-60 authored-only external contracts SHALL pin exact 4-byte zero-field variants, exact 20-byte Dropped field offsets, signed `i64/i32/i32` boundaries, constructor and per-field truncation, unknown constructor rejection, and trailing-byte rejection for every variant. These contracts must remain unexecuted in Stage A.
+
+The existing ledger responsibility `TDRP-R9-MTPROTO-RPC-DROP-ANSWER-WIRE-001` remains the sole row; no duplicate responsibility is created. Its state remains `implemented / validation_status=not-run / accepted=false`. Historical multi-request drop/cancel semantics, arbitrary `wasSent/haveSent/_resendingIds/toSend/_sentContainers`, connection scheduling, auth-key binding/persistence, gzip, complete difference decoding/application, broader source/legal closure, Stage-B executable evidence, and independent release ACCEPT remain open or outside this wire-only claim.
+
+No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, or runtime acceptance is permitted or claimed for this Stage-A revalidation.
