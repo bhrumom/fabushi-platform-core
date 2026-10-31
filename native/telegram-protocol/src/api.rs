@@ -28,6 +28,7 @@ pub const RPC_DROP_ANSWER_CONSTRUCTOR: u32 = 0x58e4_a740;
 pub const RPC_ANSWER_UNKNOWN_CONSTRUCTOR: u32 = 0x5e2a_d36e;
 pub const RPC_ANSWER_DROPPED_RUNNING_CONSTRUCTOR: u32 = 0xcd78_e586;
 pub const RPC_ANSWER_DROPPED_CONSTRUCTOR: u32 = 0xa43a_d8b7;
+pub const DESTROY_AUTH_KEY_CONSTRUCTOR: u32 = 0xd143_5160;
 pub const DESTROY_SESSION_CONSTRUCTOR: u32 = 0xe751_2126;
 pub const DESTROY_SESSION_OK_CONSTRUCTOR: u32 = 0xe220_45fc;
 pub const DESTROY_SESSION_NONE_CONSTRUCTOR: u32 = 0x62d3_50c9;
@@ -546,6 +547,12 @@ pub fn build_ping_delay_disconnect(ping_id: i64, disconnect_delay: i32) -> Vec<u
     writer.write_u32(PING_DELAY_DISCONNECT_CONSTRUCTOR);
     writer.write_i64(ping_id);
     writer.write_i32(disconnect_delay);
+    writer.into_bytes()
+}
+
+pub fn build_destroy_auth_key() -> Vec<u8> {
+    let mut writer = TlWriter::new();
+    writer.write_u32(DESTROY_AUTH_KEY_CONSTRUCTOR);
     writer.into_bytes()
 }
 
@@ -1549,7 +1556,7 @@ mod authorization_identity_contract_tests {
 #[cfg(test)]
 mod mtproto_service_builder_contract_tests {
     use super::{
-        build_destroy_session, build_get_future_salts, build_msg_resend_req, build_msgs_ack,
+        build_destroy_auth_key, build_destroy_session, build_get_future_salts, build_msg_resend_req, build_msgs_ack,
         build_msgs_state_req, build_ping, build_ping_delay_disconnect, build_rpc_drop_answer,
         parse_bad_msg_notification,
         parse_bad_server_salt,
@@ -1558,7 +1565,7 @@ mod mtproto_service_builder_contract_tests {
         parse_http_wait, parse_ip_port, parse_message_container, parse_msgs_all_info,
         parse_msgs_state_info, parse_pong, parse_rpc_drop_answer, parse_rpc_result,
         AccessPointRule, IpPort, BAD_MSG_NOTIFICATION_CONSTRUCTOR, BAD_SERVER_SALT_CONSTRUCTOR,
-        DESTROY_SESSION_CONSTRUCTOR, DESTROY_SESSION_NONE_CONSTRUCTOR,
+        DESTROY_AUTH_KEY_CONSTRUCTOR, DESTROY_SESSION_CONSTRUCTOR, DESTROY_SESSION_NONE_CONSTRUCTOR,
         DESTROY_SESSION_OK_CONSTRUCTOR, DestroySessionResult,
         ACCESS_POINT_RULE_CONSTRUCTOR, FUTURE_SALTS_CONSTRUCTOR, GET_FUTURE_SALTS_CONSTRUCTOR,
         HELP_CONFIG_SIMPLE_CONSTRUCTOR,
@@ -1615,6 +1622,13 @@ mod mtproto_service_builder_contract_tests {
         expected.extend_from_slice(&i64::MAX.to_le_bytes());
         expected.extend_from_slice(&i32::MAX.to_le_bytes());
         assert_eq!(encoded, expected);
+    }
+
+    #[test]
+    fn destroy_auth_key_serializes_fixed_u_zero_field_request_exactly() {
+        let encoded = build_destroy_auth_key();
+        assert_eq!(encoded, DESTROY_AUTH_KEY_CONSTRUCTOR.to_le_bytes());
+        assert_eq!(encoded.len(), 4);
     }
 
     #[test]
