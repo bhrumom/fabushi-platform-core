@@ -25,6 +25,8 @@ pub const RPC_RESULT_CONSTRUCTOR: u32 = 0xf35c_6d01;
 pub const RPC_ANSWER_UNKNOWN_CONSTRUCTOR: u32 = 0x5e2a_d36e;
 pub const RPC_ANSWER_DROPPED_RUNNING_CONSTRUCTOR: u32 = 0xcd78_e586;
 pub const RPC_ANSWER_DROPPED_CONSTRUCTOR: u32 = 0xa43a_d8b7;
+pub const DESTROY_SESSION_OK_CONSTRUCTOR: u32 = 0xe220_45fc;
+pub const DESTROY_SESSION_NONE_CONSTRUCTOR: u32 = 0x62d3_50c9;
 pub const MESSAGE_CONTAINER_CONSTRUCTOR: u32 = 0x73f1_f8dc;
 pub const MAX_MESSAGE_CONTAINER_ENTRIES: usize = 1024;
 pub const MSG_RESEND_REQ_CONSTRUCTOR: u32 = 0x7d86_1a08;
@@ -259,6 +261,12 @@ pub enum RpcDropAnswer {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestroySessionResult {
+    Ok { session_id: i64 },
+    None { session_id: i64 },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageContainerEntry {
     pub message_id: i64,
@@ -289,6 +297,8 @@ pub enum ApiRequestError {
     InvalidRpcResultBodyLength(usize),
     #[error("Telegram MTProto RpcDropAnswer has unexpected constructor {0:#010x}")]
     UnexpectedRpcDropAnswerConstructor(u32),
+    #[error("Telegram MTProto DestroySessionRes has unexpected constructor {0:#010x}")]
+    UnexpectedDestroySessionConstructor(u32),
     #[error("Telegram MTProto message container is malformed")]
     InvalidMessageContainer,
     #[error("Telegram MTProto future-salts payload is malformed")]
@@ -558,6 +568,23 @@ pub fn parse_rpc_drop_answer(input: &[u8]) -> Result<RpcDropAnswer, ApiRequestEr
         return Err(ApiRequestError::TrailingBytes(reader.remaining()));
     }
     Ok(answer)
+}
+
+pub fn parse_destroy_session_result(
+    input: &[u8],
+) -> Result<DestroySessionResult, ApiRequestError> {
+    let mut reader = TlReader::new(input);
+    let constructor = reader.read_u32()?;
+    let session_id = reader.read_i64()?;
+    let result = match constructor {
+        DESTROY_SESSION_OK_CONSTRUCTOR => DestroySessionResult::Ok { session_id },
+        DESTROY_SESSION_NONE_CONSTRUCTOR => DestroySessionResult::None { session_id },
+        actual => return Err(ApiRequestError::UnexpectedDestroySessionConstructor(actual)),
+    };
+    if !reader.is_finished() {
+        return Err(ApiRequestError::TrailingBytes(reader.remaining()));
+    }
+    Ok(result)
 }
 
 pub fn parse_message_container(input: &[u8]) -> Result<MessageContainer, ApiRequestError> {
@@ -1337,9 +1364,12 @@ mod mtproto_service_builder_contract_tests {
         build_msg_resend_req, build_msgs_ack, build_msgs_state_req, parse_bad_msg_notification,
         parse_bad_server_salt,
         parse_future_salts, parse_msg_detailed_info, parse_msg_new_detailed_info, parse_msgs_ack,
-        parse_message_container, parse_msgs_all_info, parse_msgs_state_info, parse_pong,
-        parse_rpc_result, BAD_MSG_NOTIFICATION_CONSTRUCTOR, BAD_SERVER_SALT_CONSTRUCTOR,
-        FUTURE_SALTS_CONSTRUCTOR,
+        parse_destroy_session_result, parse_message_container, parse_msgs_all_info,
+        parse_msgs_state_info, parse_pong, parse_rpc_drop_answer, parse_rpc_result,
+        BAD_MSG_NOTIFICATION_CONSTRUCTOR, BAD_SERVER_SALT_CONSTRUCTOR,
+        DESTROY_SESSION_NONE_CONSTRUCTOR, DESTROY_SESSION_OK_CONSTRUCTOR, DestroySessionResult,
+        FUTURE_SALTS_CONSTRUCTOR, RpcDropAnswer, RPC_ANSWER_DROPPED_CONSTRUCTOR,
+        RPC_ANSWER_DROPPED_RUNNING_CONSTRUCTOR, RPC_ANSWER_UNKNOWN_CONSTRUCTOR,
         FUTURE_SALT_CONSTRUCTOR, MESSAGE_CONTAINER_CONSTRUCTOR, MSG_DETAILED_INFO_CONSTRUCTOR,
         MSG_NEW_DETAILED_INFO_CONSTRUCTOR, MSGS_ACK_CONSTRUCTOR,
         MSGS_ALL_INFO_CONSTRUCTOR,
@@ -1491,6 +1521,51 @@ mod mtproto_service_builder_contract_tests {
         let mut dropped_trailing = exact;
         dropped_trailing.extend_from_slice(&0_u32.to_le_bytes());
         assert!(parse_rpc_drop_answer(&dropped_trailing).is_err());
+    }
+
+    #[test]
+    fn destroy_session_result_parses_both_fixed_u_variants() {
+        let ok_session_id = 0x3132_3334_3536_3738_i64;
+        let mut ok = TlWriter::new();
+        ok.write_u32(DESTROY_SESSION_OK_CONSTRUCTOR);
+        ok.write_i64(ok_session_id);
+        assert_eq!(
+            parse_destroy_session_result(ok.as_slice()).expect("parse destroy_session_ok"),
+            DestroySessionResult::Ok {
+                session_id: ok_session_id,
+            }
+        );
+
+        let none_session_id = 0x4142_4344_4546_4748_i64;
+        let mut none = TlWriter::new();
+        none.write_u32(DESTROY_SESSION_NONE_CONSTRUCTOR);
+        none.write_i64(none_session_id);
+        assert_eq!(
+            parse_destroy_session_result(none.as_slice()).expect("parse destroy_session_none"),
+            DestroySessionResult::None {
+                session_id: none_session_id,
+            }
+        );
+    }
+
+    #[test]
+    fn destroy_session_result_rejects_unknown_constructor_truncation_and_trailing_bytes() {
+        let mut unknown = TlWriter::new();
+        unknown.write_u32(0);
+        unknown.write_i64(1);
+        assert!(parse_destroy_session_result(unknown.as_slice()).is_err());
+
+        let mut exact = TlWriter::new();
+        exact.write_u32(DESTROY_SESSION_OK_CONSTRUCTOR);
+        exact.write_i64(0x5152_5354_5556_5758_i64);
+        let exact = exact.into_bytes();
+        for cut in [0_usize, 1, 3, 4, 8, exact.len() - 1] {
+            assert!(parse_destroy_session_result(&exact[..cut]).is_err());
+        }
+
+        let mut trailing = exact;
+        trailing.extend_from_slice(&0_u32.to_le_bytes());
+        assert!(parse_destroy_session_result(&trailing).is_err());
     }
 
     #[test]
