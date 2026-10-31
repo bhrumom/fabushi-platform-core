@@ -1,13 +1,16 @@
 use crate::{handshake::KNOWN_DH_PRIME_HEX, tl::TlWriter};
 use num_bigint_dig::BigUint;
 use pbkdf2::pbkdf2_hmac;
+use serde::Deserialize;
+use serde::Serialize;
 use sha2::{Digest, Sha256, Sha512};
 use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
 
 pub const INPUT_CHECK_PASSWORD_SRP_CONSTRUCTOR: u32 = 0xd27f_f082;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PasswordSrpParameters {
     pub srp_id: i64,
     pub salt1: Vec<u8>,
