@@ -107,3 +107,21 @@ Canonical blobs: protocol api `bdac614fab9ca16ffeb36c7e98a012fe20231597`, protoc
 - R10: passed as an authored-only Stage-A artifact — exact/malformed/parser-correlation contracts were added but not run.
 
 Acceptance criteria AC1–AC7 are satisfied at source/implementation level. AC8 remains intentionally **blocked/not-run** until Stage B executable validation. No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried in this review.
+
+
+## Round 36 request-side source-level compliance readback
+
+Implementation commit: `58a9635f0286283218f6d8b7b2b14dd466bd4b98`.  
+Desktop provider synchronization commit: `dd232c52e1b39cdccb409c6d6307f1523e4d538f`.  
+Desktop bookkeeping commit: `e91b2242931aa8f6b2a4cf6a88952283c914ac65`.  
+Canonical and desktop protocol blobs: api `e8026c79b8b14261ef30d39bf6de8b0bc92306a6`, lib `809eeb7aa3256e1aa259e694f413b9c0377f08d6`.
+
+- R11: satisfied by source inspection — `GET_FUTURE_SALTS_CONSTRUCTOR` is exported as fixed-U `0xb921bd04`.
+- R12: satisfied by source inspection — `build_get_future_salts(num: i32) -> Vec<u8>` is public and re-exported by the protocol crate.
+- R13: satisfied by source inspection — the builder writes only the constructor then one little-endian `i32`, yielding the exact 8-byte contract.
+- R14: satisfied by source inspection — `num` is written directly with no validation, clamp, retry, scheduling, or salt-lifecycle transformation.
+- R15: satisfied by source inspection — request serialization is a distinct builder; `parse_future_salts` and response/current-request correlation are unchanged and remain receive-side responsibilities.
+- R16: satisfied as an authored-only Stage-A artifact — exact-layout, signed-boundary, and request/response-parser separation contracts exist but were not run.
+- R17: satisfied by ownership/source inspection — the builder has no socket, timer, session-salt, persistence, retry, response-settlement, or request-history side effect; live scheduling/install/rotation remains unclaimed/fail-closed.
+
+AC9–AC12 are satisfied at source/implementation/bookkeeping level. AC13 is satisfied for the fail-closed ownership boundary and remains **blocked/not-run** for executable validation: `validation_status=not-run`, `accepted=false`. No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried.
