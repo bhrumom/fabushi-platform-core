@@ -3473,3 +3473,148 @@ fn http_wait_fails_closed_at_every_fixed_u_boundary_and_strict_eof() {
     trailing.push(0);
     assert!(fabushi_telegram_protocol::parse_http_wait(&trailing).is_err());
 }
+
+
+#[test]
+fn config_simple_public_parser_preserves_fixed_u_values_without_bootstrap_policy() {
+    let mut empty_rules = TlWriter::new();
+    empty_rules.write_u32(fabushi_telegram_protocol::HELP_CONFIG_SIMPLE_CONSTRUCTOR);
+    empty_rules.write_i32(i32::MIN);
+    empty_rules.write_i32(i32::MAX);
+    empty_rules.write_vector_length(0).unwrap();
+    let empty = fabushi_telegram_protocol::parse_help_config_simple(&empty_rules.into_bytes()).unwrap();
+    assert_eq!(empty.date, i32::MIN);
+    assert_eq!(empty.expires, i32::MAX);
+    assert!(empty.rules.is_empty());
+
+    let secret = vec![0x00, 0xff, 0x80, 0x01];
+    let mut encoded = TlWriter::new();
+    encoded.write_u32(fabushi_telegram_protocol::HELP_CONFIG_SIMPLE_CONSTRUCTOR);
+    encoded.write_i32(i32::MIN);
+    encoded.write_i32(i32::MAX);
+    encoded.write_vector_length(1).unwrap();
+    encoded.write_u32(fabushi_telegram_protocol::ACCESS_POINT_RULE_CONSTRUCTOR);
+    encoded.write_string("").unwrap();
+    encoded.write_i32(i32::MIN);
+    encoded.write_vector_length(2).unwrap();
+    encoded.write_u32(fabushi_telegram_protocol::IP_PORT_CONSTRUCTOR);
+    encoded.write_i32(i32::MIN);
+    encoded.write_i32(-1);
+    encoded.write_u32(fabushi_telegram_protocol::IP_PORT_SECRET_CONSTRUCTOR);
+    encoded.write_i32(i32::MAX);
+    encoded.write_i32(i32::MIN);
+    encoded.write_bytes(&secret).unwrap();
+
+    assert_eq!(
+        fabushi_telegram_protocol::parse_help_config_simple(&encoded.into_bytes()).unwrap(),
+        fabushi_telegram_protocol::HelpConfigSimple {
+            date: i32::MIN,
+            expires: i32::MAX,
+            rules: vec![fabushi_telegram_protocol::AccessPointRule {
+                phone_prefix_rules: String::new(),
+                dc_id: i32::MIN,
+                ips: vec![
+                    fabushi_telegram_protocol::IpPort::Plain {
+                        ipv4: i32::MIN,
+                        port: -1,
+                    },
+                    fabushi_telegram_protocol::IpPort::Secret {
+                        ipv4: i32::MAX,
+                        port: i32::MIN,
+                        secret,
+                    },
+                ],
+            }],
+        }
+    );
+}
+
+#[test]
+fn config_simple_public_parsers_fail_closed_at_nested_boundaries_and_strict_eof() {
+    let mut ip = TlWriter::new();
+    ip.write_u32(fabushi_telegram_protocol::IP_PORT_SECRET_CONSTRUCTOR);
+    ip.write_i32(i32::MIN);
+    ip.write_i32(i32::MAX);
+    ip.write_bytes(&[0xee, 0xaa, 0x00, 0xff]).unwrap();
+    let ip_exact = ip.into_bytes();
+
+    for cut in 0..ip_exact.len() {
+        assert!(fabushi_telegram_protocol::parse_ip_port(&ip_exact[..cut]).is_err());
+    }
+    let mut ip_wrong_constructor = ip_exact.clone();
+    ip_wrong_constructor[0..4].copy_from_slice(&0_u32.to_le_bytes());
+    assert!(fabushi_telegram_protocol::parse_ip_port(&ip_wrong_constructor).is_err());
+    let mut ip_trailing = ip_exact.clone();
+    ip_trailing.push(0);
+    assert!(fabushi_telegram_protocol::parse_ip_port(&ip_trailing).is_err());
+
+    let mut rule = TlWriter::new();
+    rule.write_u32(fabushi_telegram_protocol::ACCESS_POINT_RULE_CONSTRUCTOR);
+    rule.write_string("+1,-12").unwrap();
+    rule.write_i32(i32::MIN);
+    rule.write_vector_length(1).unwrap();
+    rule.write_u32(fabushi_telegram_protocol::IP_PORT_SECRET_CONSTRUCTOR);
+    rule.write_i32(i32::MAX);
+    rule.write_i32(-443);
+    rule.write_bytes(&[0x10, 0x20, 0x30]).unwrap();
+    let rule_exact = rule.into_bytes();
+
+    for cut in 0..rule_exact.len() {
+        assert!(fabushi_telegram_protocol::parse_access_point_rule(&rule_exact[..cut]).is_err());
+    }
+    let mut rule_wrong_constructor = rule_exact.clone();
+    rule_wrong_constructor[0..4].copy_from_slice(&0_u32.to_le_bytes());
+    assert!(fabushi_telegram_protocol::parse_access_point_rule(&rule_wrong_constructor).is_err());
+
+    let mut wrong_rule_vector = TlWriter::new();
+    wrong_rule_vector.write_u32(fabushi_telegram_protocol::ACCESS_POINT_RULE_CONSTRUCTOR);
+    wrong_rule_vector.write_string("+1").unwrap();
+    wrong_rule_vector.write_i32(2);
+    wrong_rule_vector.write_u32(0);
+    wrong_rule_vector.write_i32(0);
+    assert!(fabushi_telegram_protocol::parse_access_point_rule(&wrong_rule_vector.into_bytes()).is_err());
+
+    let mut rule_wrong_ip = rule_exact.clone();
+    let ip_constructor = fabushi_telegram_protocol::IP_PORT_SECRET_CONSTRUCTOR.to_le_bytes();
+    let ip_offset = rule_wrong_ip
+        .windows(4)
+        .position(|window| window == ip_constructor)
+        .unwrap();
+    rule_wrong_ip[ip_offset..ip_offset + 4].copy_from_slice(&0_u32.to_le_bytes());
+    assert!(fabushi_telegram_protocol::parse_access_point_rule(&rule_wrong_ip).is_err());
+    let mut rule_trailing = rule_exact.clone();
+    rule_trailing.push(0);
+    assert!(fabushi_telegram_protocol::parse_access_point_rule(&rule_trailing).is_err());
+
+    let mut config_exact = Vec::new();
+    config_exact.extend_from_slice(&fabushi_telegram_protocol::HELP_CONFIG_SIMPLE_CONSTRUCTOR.to_le_bytes());
+    config_exact.extend_from_slice(&i32::MIN.to_le_bytes());
+    config_exact.extend_from_slice(&i32::MAX.to_le_bytes());
+    config_exact.extend_from_slice(&0x1cb5_c415_u32.to_le_bytes());
+    config_exact.extend_from_slice(&1_i32.to_le_bytes());
+    config_exact.extend_from_slice(&rule_exact);
+
+    for cut in 0..config_exact.len() {
+        assert!(fabushi_telegram_protocol::parse_help_config_simple(&config_exact[..cut]).is_err());
+    }
+    let mut config_wrong_constructor = config_exact.clone();
+    config_wrong_constructor[0..4].copy_from_slice(&0_u32.to_le_bytes());
+    assert!(fabushi_telegram_protocol::parse_help_config_simple(&config_wrong_constructor).is_err());
+
+    let mut config_wrong_vector = config_exact.clone();
+    config_wrong_vector[12..16].copy_from_slice(&0_u32.to_le_bytes());
+    assert!(fabushi_telegram_protocol::parse_help_config_simple(&config_wrong_vector).is_err());
+
+    let mut config_wrong_rule = config_exact.clone();
+    let rule_constructor = fabushi_telegram_protocol::ACCESS_POINT_RULE_CONSTRUCTOR.to_le_bytes();
+    let rule_offset = config_wrong_rule
+        .windows(4)
+        .position(|window| window == rule_constructor)
+        .unwrap();
+    config_wrong_rule[rule_offset..rule_offset + 4].copy_from_slice(&0_u32.to_le_bytes());
+    assert!(fabushi_telegram_protocol::parse_help_config_simple(&config_wrong_rule).is_err());
+
+    let mut config_trailing = config_exact;
+    config_trailing.push(0);
+    assert!(fabushi_telegram_protocol::parse_help_config_simple(&config_trailing).is_err());
+}
