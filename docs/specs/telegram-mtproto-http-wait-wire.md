@@ -109,3 +109,16 @@ Canonical implementation commit: `96bb0e2cd31cdfc82aaa44e0f8e25acf8c30a204`. Can
 - R8: satisfied for Stage A process — contracts were authored only; no build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried.
 
 Acceptance criteria AC1-AC6 are satisfied at source/implementation/bookkeeping level. AC7 remains intentionally **blocked/not-run** until Stage B executable validation. No runtime claim is made for the HTTP connection-wait lifecycle.
+
+
+## Round 64 adjacent revalidation — fixed-U http_wait exact wire
+
+At live checkpoint `1542bb5e40d2b3c9d4b21ac59f99cb420d7fdbb7`, fixed U remains `telegramdesktop/tdesktop@f985723b552b30fe1c17d377d57f44e61a15a8c4`. Rereading `mtproto.tl@76225965bfc794388db241f3f760db8ab79e84f8` and `session_private.cpp@13cbc76ec723386027b5b4dcac79999b791c4614` confirms `http_wait#9299359f max_delay:int wait_after:int max_wait:int = HttpWait` is shipping-reachable only as the object serialized by `SessionPrivate::tryToSend()` when `_connection->usingHttpWait()`; there is no independent receive-side `mtpc_http_wait` branch. The observed `100 / 30 / 25000` call-site values remain lifecycle evidence, not schema validity constraints.
+
+This is a source-level **no-production-delta** revalidation. Current canonical `native/telegram-protocol/src/api.rs@ebfb3670b5cd097b9ce288782c7954f5cfe9fc43` still exports `HTTP_WAIT_CONSTRUCTOR`, typed `HttpWait { max_delay:i32, wait_after:i32, max_wait:i32 }`, and `parse_http_wait`; `native/telegram-protocol/src/tl.rs@89256ab35184b6dc06a095ab34abb9f44e95a264` supplies bounded little-endian signed `i32` reads, while `native/telegram-protocol/src/lib.rs@abab39e42f100972484191f0e52e9edd9b88c6cf` re-exports the same owner. The parser requires constructor + three fields = exactly 16 bytes, rejects constructor mismatch and every truncation through the bounded reader, and rejects any trailing bytes.
+
+Round-64 authored-only external contracts SHALL pin exact length 16, offsets `0..4 / 4..8 / 8..12 / 12..16`, independent signed `i32::MIN / -1 / i32::MAX` preservation across the three fields, every truncation cut `0..15`, wrong-constructor rejection, strict EOF, and shall not hard-code the fixed-U call-site values as validity constraints. These contracts SHALL NOT be executed during Stage A.
+
+The wire-only parser remains intentionally separate from `usingHttpWait()` transport selection/scheduling, timeout/retry/backoff, request queues/history, `wasSent/haveSent/_resendingIds/toSend/_sentContainers`, auth-key binding/persistence, `gzip_packed`, and complete difference/differenceSlice decoding/application. The existing ledger responsibility `TDRP-R9-MTPROTO-HTTP-WAIT-WIRE-001` remains the sole row and stays `implemented / validation_status=not-run / accepted=false`; coverage remains `responsibilities_total=97, unknown=16172, unread=16145, omitted=0`.
+
+No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, or runtime acceptance was performed.
