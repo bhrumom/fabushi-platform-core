@@ -1,4 +1,5 @@
 use crate::{
+    api::build_req_pq_multi,
     crypto::{aes_ige_decrypt, aes_ige_encrypt, CryptoError},
     tl::{TlError, TlReader, TlWriter},
 };
@@ -9,14 +10,6 @@ use subtle::ConstantTimeEq;
 use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
 
-pub const REQ_PQ_MULTI_CONSTRUCTOR: u32 = 0xbe7e_8ef1;
-
-pub fn build_req_pq_multi(nonce: &[u8; 16]) -> Vec<u8> {
-    let mut writer = TlWriter::with_capacity(20);
-    writer.write_u32(REQ_PQ_MULTI_CONSTRUCTOR);
-    writer.write_i128_bytes(nonce);
-    writer.into_bytes()
-}
 pub const RES_PQ_CONSTRUCTOR: u32 = 0x0516_2463;
 pub const P_Q_INNER_DATA_DC_CONSTRUCTOR: u32 = 0xa9f5_5f95;
 pub const REQ_DH_PARAMS_CONSTRUCTOR: u32 = 0xd712_e4be;

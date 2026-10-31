@@ -20,6 +20,7 @@ pub const AUTH_AUTHORIZATION_SIGN_UP_REQUIRED_CONSTRUCTOR: u32 = 0x4474_7e9a;
 pub const USER_EMPTY_CONSTRUCTOR: u32 = 0xd3bc_4b7a;
 pub const USER_CONSTRUCTOR: u32 = 0xb1b8_cc83;
 pub const REQ_PQ_CONSTRUCTOR: u32 = 0x6046_9778;
+pub const REQ_PQ_MULTI_CONSTRUCTOR: u32 = 0xbe7e_8ef1;
 pub const MSGS_ACK_CONSTRUCTOR: u32 = 0x62d6_b459;
 pub const PONG_CONSTRUCTOR: u32 = 0x3477_73c5;
 pub const PING_CONSTRUCTOR: u32 = 0x7abe_77ec;
@@ -532,6 +533,13 @@ pub fn build_auth_check_password(proof: &PasswordSrpProof) -> Result<Vec<u8>, Ap
 pub fn build_req_pq(nonce: &[u8; 16]) -> Vec<u8> {
     let mut writer = TlWriter::new();
     writer.write_u32(REQ_PQ_CONSTRUCTOR);
+    writer.write_i128_bytes(nonce);
+    writer.into_bytes()
+}
+
+pub fn build_req_pq_multi(nonce: &[u8; 16]) -> Vec<u8> {
+    let mut writer = TlWriter::with_capacity(20);
+    writer.write_u32(REQ_PQ_MULTI_CONSTRUCTOR);
     writer.write_i128_bytes(nonce);
     writer.into_bytes()
 }
