@@ -199,12 +199,15 @@ produced in Stage A. No executable evidence is produced or claimed.
 
 | Requirement / AC | Status | Evidence / reason |
 | --- | --- | --- |
-| R1-R8 | pending | Source readback complete; awaiting authored contract/bookkeeping save. |
-| R9 | pending | Authored-only contract not yet saved. |
-| R10 | pending | Awaiting final bookkeeping readback. |
-| AC-1 | pending | Production blobs are unchanged at discovery time; final readback pending. |
-| AC-2 | pending | Authored-only contract not yet saved. |
-| AC-3 | pending | Desktop mirror not yet saved. |
-| AC-4 | pending | Ledger/P0/source-closure/evidence update pending. |
-| AC-5 | pending | Responsibility row not yet saved. |
-| AC-6 | pending | Final Stage-A scope readback pending. |
+| R1-R8 | passed | Remote source readback at platform checkpoint ae5b7a6f6b6669fe9069d7371b1b4a2acd76e182 confirms api.rs@ebfb3670b5cd097b9ce288782c7954f5cfe9fc43 preserves constructor 0x04deb57d, signed i64 req_msg_id, opaque TL info bytes and strict trailing rejection; tl.rs@89256ab35184b6dc06a095ab34abb9f44e95a264 preserves TL bytes short/long framing, byte limits, padding and truncation; lib.rs@abab39e42f100972484191f0e52e9edd9b88c6cf exports the same parser/type/constructor. Fixed-U SessionPrivate performs typed MTPMsgsStateInfo::read before request-history/application semantics. |
+| R9 | passed | Canonical authored-only contract file is native/telegram-protocol/tests/protocol_contract.rs@efaa8ac407af5bca430855fbb69c862f9ce793b0; desktop mirror commit ae630cf55cb611f9e400b8c5a4bbbbad20654387 has the same blob. Cases cover signed id, binary non-UTF8 state, empty and 254-byte long-form TL payloads, wrong constructor, truncation, missing padding, trailing bytes and exact EOF. They were not executed. |
+| R10 | passed | Desktop ledger/evidence keep arbitrary request history/application, connection scheduling, auth-key lifecycle, gzip and complete difference decoding explicitly open/fail-closed. |
+| AC-1 | passed | Production api/tl/lib blobs remain ebfb3670b5cd097b9ce288782c7954f5cfe9fc43 / 89256ab35184b6dc06a095ab34abb9f44e95a264 / abab39e42f100972484191f0e52e9edd9b88c6cf; no production behavior delta was made. |
+| AC-2 | passed | Authored contract commit ae5b7a6f6b6669fe9069d7371b1b4a2acd76e182 and blob efaa8ac407af5bca430855fbb69c862f9ce793b0 lock R1-R7/R9; executable validation is intentionally deferred. |
+| AC-3 | passed | Desktop production api/lib remain ebfb3670b5cd097b9ce288782c7954f5cfe9fc43 / abab39e42f100972484191f0e52e9edd9b88c6cf; desktop contract mirror commit ae630cf55cb611f9e400b8c5a4bbbbad20654387 is byte-identical at efaa8ac407af5bca430855fbb69c862f9ce793b0. |
+| AC-4 | passed | Desktop ledger/evidence/P0/source-closure commit 33883aadf33e05875f63bb437a8681afb2186b39 records fixed-U identities, binary-info semantics, no-production-delta disposition and open broader lifecycle boundaries. |
+| AC-5 | passed | Existing parity ledger records TDRP-R9-MTPROTO-MSGS-STATE-INFO-WIRE-001 as implemented / validation_status=not-run / accepted=false with responsibilities_total=94, unknown=16172, unread=16145, omitted=0. |
+| AC-6 | passed | This Stage-A round performed source/blob readback and authored/saved code/docs only. No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E execution, GitHub Actions/status/check query, package, deploy, install or runtime acceptance was performed. |
+
+Source-level compliance is complete for this isolated service-message wire slice. This does not constitute executable
+verification, candidate readiness, release acceptance, request-history/application closure, or broader migration closure.
