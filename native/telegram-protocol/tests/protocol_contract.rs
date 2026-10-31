@@ -4,7 +4,7 @@ use fabushi_telegram_protocol::{
     build_p_q_inner_data_dc, build_p_q_inner_data_temp_dc, build_req_dh_params, build_req_pq_multi,
     build_set_client_dh_params,
     decrypt_message, decrypt_server_dh_inner_data, derive_aes_key_iv, derive_tmp_aes_key_iv,
-    encrypt_message, factor_res_pq, parse_dh_gen_result, parse_schema_catalog,
+    encrypt_message, factor_res_pq, parse_dh_gen_result, parse_res_pq, parse_schema_catalog,
     parse_server_dh_params, parse_td_api_schema, prepare_client_dh, quick_ack_token,
     rsa_pad_with_random, select_server_key_fingerprint, telegram_server_rsa_key,
     wire_constructor_by_name, wire_constructors_by_id, AuthCommand, AuthError, AuthKey,
@@ -1033,6 +1033,165 @@ fn res_pq_validates_nonce_pq_and_server_key_fingerprints() {
             .unwrap_err(),
         HandshakeError::NonceMismatch
     );
+}
+
+#[test]
+fn res_pq_parser_is_exact_for_fixed_u_body_and_rejects_wire_mutations() {
+    let nonce = [0x31; 16];
+    let server_nonce = [0x42; 16];
+    let mut exact = TlWriter::new();
+    exact.write_u32(RES_PQ_CONSTRUCTOR);
+    exact.write_i128_bytes(&nonce);
+    exact.write_i128_bytes(&server_nonce);
+    exact.write_bytes(&[0x04, 0x2a, 0x39]).unwrap();
+    exact.write_vector_length(2).unwrap();
+    exact.write_u64(0x0102_0304_0506_0708);
+    exact.write_u64(0x8877_6655_4433_2211);
+    let exact = exact.into_bytes();
+
+    assert_eq!(
+        parse_res_pq(&exact).unwrap(),
+        ResPq {
+            nonce,
+            server_nonce,
+            pq: vec![0x04, 0x2a, 0x39],
+            server_public_key_fingerprints: vec![
+                0x0102_0304_0506_0708,
+                0x8877_6655_4433_2211,
+            ],
+        }
+    );
+
+    for cut in 0..exact.len() {
+        assert!(
+            parse_res_pq(&exact[..cut]).is_err(),
+            "resPQ truncation cut {cut} unexpectedly accepted"
+        );
+    }
+
+    assert_eq!(
+        parse_res_pq(&0x1122_3344_u32.to_le_bytes()).unwrap_err(),
+        HandshakeError::UnexpectedConstructor(0x1122_3344)
+    );
+
+    let vector_offset = 4 + 16 + 16 + 4;
+    let mut wrong_vector = exact.clone();
+    wrong_vector[vector_offset..vector_offset + 4]
+        .copy_from_slice(&0x1122_3344_u32.to_le_bytes());
+    assert_eq!(
+        parse_res_pq(&wrong_vector).unwrap_err(),
+        HandshakeError::Tl(TlError::UnexpectedConstructor {
+            expected: 0x1cb5_c415,
+            actual: 0x1122_3344,
+        })
+    );
+
+    let mut negative_vector = exact.clone();
+    negative_vector[vector_offset + 4..vector_offset + 8]
+        .copy_from_slice(&(-1_i32).to_le_bytes());
+    assert_eq!(
+        parse_res_pq(&negative_vector).unwrap_err(),
+        HandshakeError::Tl(TlError::NegativeVectorLength(-1))
+    );
+
+    let mut oversized_vector = exact.clone();
+    oversized_vector[vector_offset + 4..vector_offset + 8]
+        .copy_from_slice(&65_i32.to_le_bytes());
+    assert_eq!(
+        parse_res_pq(&oversized_vector).unwrap_err(),
+        HandshakeError::Tl(TlError::VectorLengthLimit {
+            length: 65,
+            maximum: 64,
+        })
+    );
+
+    let mut short_vector = exact.clone();
+    short_vector[vector_offset + 4..vector_offset + 8]
+        .copy_from_slice(&3_i32.to_le_bytes());
+    assert!(matches!(
+        parse_res_pq(&short_vector).unwrap_err(),
+        HandshakeError::Tl(TlError::UnexpectedEof { .. })
+    ));
+
+    let mut trailing = exact.clone();
+    trailing.push(0x99);
+    assert_eq!(
+        parse_res_pq(&trailing).unwrap_err(),
+        HandshakeError::TrailingBodyBytes(1)
+    );
+}
+
+#[test]
+fn res_pq_receiver_rejects_empty_fields_nonce_mismatch_and_invalid_state_without_mutation() {
+    let nonce = [0x31; 16];
+    let server_nonce = [0x42; 16];
+
+    let encode = |body_nonce: [u8; 16], pq: &[u8], fingerprints: &[u64]| {
+        let mut writer = TlWriter::new();
+        writer.write_u32(RES_PQ_CONSTRUCTOR);
+        writer.write_i128_bytes(&body_nonce);
+        writer.write_i128_bytes(&server_nonce);
+        writer.write_bytes(pq).unwrap();
+        writer.write_vector_length(fingerprints.len()).unwrap();
+        for fingerprint in fingerprints {
+            writer.write_u64(*fingerprint);
+        }
+        writer.into_bytes()
+    };
+
+    let mut empty_pq = AuthKeyHandshake::new(nonce);
+    empty_pq.begin(4).unwrap();
+    assert_eq!(
+        empty_pq
+            .receive_res_pq(PlaintextEnvelope {
+                message_id: 5,
+                body: encode(nonce, &[], &[7]),
+            })
+            .unwrap_err(),
+        HandshakeError::EmptyPq
+    );
+    assert_eq!(empty_pq.state(), &AuthKeyHandshakeState::AwaitingResPq);
+
+    let mut empty_fingerprints = AuthKeyHandshake::new(nonce);
+    empty_fingerprints.begin(6).unwrap();
+    assert_eq!(
+        empty_fingerprints
+            .receive_res_pq(PlaintextEnvelope {
+                message_id: 7,
+                body: encode(nonce, &[0x17, 0xed], &[]),
+            })
+            .unwrap_err(),
+        HandshakeError::MissingServerKeyFingerprint
+    );
+    assert_eq!(
+        empty_fingerprints.state(),
+        &AuthKeyHandshakeState::AwaitingResPq
+    );
+
+    let mut wrong_nonce = AuthKeyHandshake::new(nonce);
+    wrong_nonce.begin(8).unwrap();
+    assert_eq!(
+        wrong_nonce
+            .receive_res_pq(PlaintextEnvelope {
+                message_id: 9,
+                body: encode([0x99; 16], &[0x17, 0xed], &[7]),
+            })
+            .unwrap_err(),
+        HandshakeError::NonceMismatch
+    );
+    assert_eq!(wrong_nonce.state(), &AuthKeyHandshakeState::AwaitingResPq);
+
+    let mut wrong_state = AuthKeyHandshake::new(nonce);
+    assert_eq!(
+        wrong_state
+            .receive_res_pq(PlaintextEnvelope {
+                message_id: 10,
+                body: encode(nonce, &[0x17, 0xed], &[7]),
+            })
+            .unwrap_err(),
+        HandshakeError::InvalidState("not awaiting resPQ")
+    );
+    assert_eq!(wrong_state.state(), &AuthKeyHandshakeState::Ready);
 }
 
 #[test]
