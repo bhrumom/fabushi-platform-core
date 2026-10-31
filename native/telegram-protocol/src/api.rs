@@ -20,6 +20,7 @@ pub const AUTH_AUTHORIZATION_SIGN_UP_REQUIRED_CONSTRUCTOR: u32 = 0x4474_7e9a;
 pub const USER_EMPTY_CONSTRUCTOR: u32 = 0xd3bc_4b7a;
 pub const USER_CONSTRUCTOR: u32 = 0xb1b8_cc83;
 pub const MSGS_ACK_CONSTRUCTOR: u32 = 0x62d6_b459;
+pub const MSG_RESEND_REQ_CONSTRUCTOR: u32 = 0x7d86_1a08;
 pub const CONFIG_CONSTRUCTOR: u32 = 0xcc1a_241e;
 pub const DC_OPTION_CONSTRUCTOR: u32 = 0x18b7_a10d;
 pub const AUTH_SENT_CODE_CONSTRUCTOR: u32 = 0x5e00_2502;
@@ -356,6 +357,16 @@ pub fn build_auth_check_password(proof: &PasswordSrpProof) -> Result<Vec<u8>, Ap
 pub fn build_msgs_ack(message_ids: &[i64]) -> Result<Vec<u8>, ApiRequestError> {
     let mut writer = TlWriter::new();
     writer.write_u32(MSGS_ACK_CONSTRUCTOR);
+    writer.write_vector_length(message_ids.len())?;
+    for message_id in message_ids {
+        writer.write_i64(*message_id);
+    }
+    Ok(writer.into_bytes())
+}
+
+pub fn build_msg_resend_req(message_ids: &[i64]) -> Result<Vec<u8>, ApiRequestError> {
+    let mut writer = TlWriter::new();
+    writer.write_u32(MSG_RESEND_REQ_CONSTRUCTOR);
     writer.write_vector_length(message_ids.len())?;
     for message_id in message_ids {
         writer.write_i64(*message_id);
@@ -890,5 +901,20 @@ mod authorization_identity_contract_tests {
             parse_auth_sent_code(&payload).unwrap(),
             SentCodeResult::Success { user_id: 9_001 }
         );
+    }
+}
+
+#[cfg(test)]
+mod mtproto_service_builder_contract_tests {
+    use super::{build_msg_resend_req, MSG_RESEND_REQ_CONSTRUCTOR};
+
+    #[test]
+    fn msg_resend_req_encodes_fixed_u_constructor_and_single_answer_id() {
+        let answer_id = 0x0102_0304_0506_0708_i64;
+        let encoded = build_msg_resend_req(&[answer_id]).expect("encode resend request");
+        assert_eq!(&encoded[0..4], &MSG_RESEND_REQ_CONSTRUCTOR.to_le_bytes());
+        assert_eq!(&encoded[4..8], &0x1cb5_c415_u32.to_le_bytes());
+        assert_eq!(&encoded[8..12], &1_i32.to_le_bytes());
+        assert_eq!(&encoded[12..20], &answer_id.to_le_bytes());
     }
 }

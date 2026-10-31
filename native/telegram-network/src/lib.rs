@@ -26,6 +26,7 @@ const PING_CONSTRUCTOR: u32 = 0x7abe_77ec;
 const PONG_CONSTRUCTOR: u32 = 0x3477_73c5;
 const NEW_SESSION_CREATED_CONSTRUCTOR: u32 = 0x9ec2_0908;
 const MESSAGE_CONTAINER_CONSTRUCTOR: u32 = 0x73f1_f8dc;
+const MSG_DETAILED_INFO_CONSTRUCTOR: u32 = 0x276d_3ec6;
 const BAD_SERVER_SALT_CONSTRUCTOR: u32 = 0xedab_447b;
 const BAD_MSG_NOTIFICATION_CONSTRUCTOR: u32 = 0xa7ef_f811;
 const MSGS_ACK_CONSTRUCTOR: u32 = 0x62d6_b459;
@@ -344,6 +345,16 @@ impl EstablishedSession {
                 } else {
                     Ok(RpcOutcome::Continue)
                 }
+            }
+            MSG_DETAILED_INFO_CONSTRUCTOR => {
+                let sent_message_id = read_i64_at(body, 4)?;
+                let answer_message_id = read_i64_at(body, 12)?;
+                if detailed_info_matches_request(sent_message_id, request_message_id) {
+                    let resend = fabushi_telegram_protocol::build_msg_resend_req(&[answer_message_id])
+                        .map_err(|_| NetworkError::InvalidServiceMessage)?;
+                    self.send_encrypted_message(&resend, false)?;
+                }
+                Ok(RpcOutcome::Continue)
             }
             BAD_SERVER_SALT_CONSTRUCTOR => {
                 let message_id = read_i64_at(body, 4)?;
@@ -671,6 +682,10 @@ fn new_session_requires_replay(request_message_id: i64, first_message_id: i64) -
     request_message_id < first_message_id
 }
 
+fn detailed_info_matches_request(sent_message_id: i64, request_message_id: i64) -> bool {
+    sent_message_id == request_message_id
+}
+
 fn bad_message_recovery_action(code: i32) -> Option<BadMessageRecoveryAction> {
     match code {
         16 | 17 | 64 => Some(BadMessageRecoveryAction::CorrectTimeAndRetry),
@@ -879,7 +894,7 @@ fn read_i64_at(input: &[u8], offset: usize) -> Result<i64, NetworkError> {
 mod recovery_contract_tests {
     use super::{
         bad_message_recovery_action, direct_bad_message_time_recovery,
-        new_session_requires_replay, BadMessageRecoveryAction,
+        detailed_info_matches_request, new_session_requires_replay, BadMessageRecoveryAction,
         BAD_MSG_NOTIFICATION_CONSTRUCTOR,
     };
 
@@ -923,6 +938,13 @@ mod recovery_contract_tests {
         assert!(new_session_requires_replay(100, 104));
         assert!(!new_session_requires_replay(104, 104));
         assert!(!new_session_requires_replay(108, 104));
+    }
+
+    #[test]
+    fn detailed_info_requests_resend_only_for_the_current_outstanding_rpc() {
+        assert!(detailed_info_matches_request(123, 123));
+        assert!(!detailed_info_matches_request(122, 123));
+        assert!(!detailed_info_matches_request(124, 123));
     }
 
     #[test]
