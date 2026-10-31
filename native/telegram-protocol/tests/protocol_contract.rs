@@ -1,7 +1,7 @@
 use fabushi_telegram_protocol::{
     aes_ige_encrypt, build_auth_send_code, build_auth_sign_in, build_auth_sign_up,
     build_init_connection_get_config, build_msgs_ack, build_p_q_inner_data_dc, build_req_dh_params,
-    build_req_pq_multi,
+    build_req_pq_multi, build_set_client_dh_params,
     decrypt_message, decrypt_server_dh_inner_data, derive_aes_key_iv, derive_tmp_aes_key_iv,
     encrypt_message, factor_res_pq, parse_dh_gen_result, parse_schema_catalog,
     parse_server_dh_params, parse_td_api_schema, prepare_client_dh, quick_ack_token,
@@ -1180,6 +1180,40 @@ fn server_dh_answer_is_nonce_bound_decrypted_and_hash_authenticated() {
 }
 
 #[test]
+fn set_client_dh_params_builder_serializes_fixed_u_request_exactly() {
+    let nonce = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+    ];
+    let server_nonce = [
+        0xff, 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99, 0x88,
+        0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00,
+    ];
+    let encrypted_data = [0x10, 0x20, 0x30, 0x40, 0x50];
+    let encoded =
+        build_set_client_dh_params(&nonce, &server_nonce, &encrypted_data).unwrap();
+
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&SET_CLIENT_DH_PARAMS_CONSTRUCTOR.to_le_bytes());
+    expected.extend_from_slice(&nonce);
+    expected.extend_from_slice(&server_nonce);
+    expected.push(encrypted_data.len() as u8);
+    expected.extend_from_slice(&encrypted_data);
+    expected.extend_from_slice(&[0_u8; 2]);
+    assert_eq!(encoded, expected);
+
+    let mut reader = TlReader::new(&encoded);
+    assert_eq!(
+        reader.read_u32().unwrap(),
+        SET_CLIENT_DH_PARAMS_CONSTRUCTOR
+    );
+    assert_eq!(reader.read_i128_bytes().unwrap(), nonce);
+    assert_eq!(reader.read_i128_bytes().unwrap(), server_nonce);
+    assert_eq!(reader.read_bytes().unwrap(), encrypted_data);
+    assert!(reader.is_finished());
+}
+
+#[test]
 fn client_dh_derives_auth_key_and_authenticates_dh_gen_ok() {
     let nonce = [0x12; 16];
     let server_nonce = [0x34; 16];
@@ -1210,8 +1244,13 @@ fn client_dh_derives_auth_key_and_authenticates_dh_gen_ok() {
     );
     assert_eq!(request.read_i128_bytes().unwrap(), nonce);
     assert_eq!(request.read_i128_bytes().unwrap(), server_nonce);
-    assert!(!request.read_bytes().unwrap().is_empty());
+    let encrypted_data = request.read_bytes().unwrap().to_vec();
+    assert!(!encrypted_data.is_empty());
     assert!(request.is_finished());
+    assert_eq!(
+        prepared.request_body,
+        build_set_client_dh_params(&nonce, &server_nonce, &encrypted_data).unwrap()
+    );
 
     let mut material = Vec::from(new_nonce);
     material.push(1);

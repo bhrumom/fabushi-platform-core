@@ -783,6 +783,19 @@ pub fn validate_server_dh_parameters(data: &ServerDhInnerData) -> Result<(), Han
     Ok(())
 }
 
+pub fn build_set_client_dh_params(
+    nonce: &Nonce,
+    server_nonce: &Nonce,
+    encrypted_data: &[u8],
+) -> Result<Vec<u8>, TlError> {
+    let mut request = TlWriter::new();
+    request.write_u32(SET_CLIENT_DH_PARAMS_CONSTRUCTOR);
+    request.write_i128_bytes(nonce);
+    request.write_i128_bytes(server_nonce);
+    request.write_bytes(encrypted_data)?;
+    Ok(request.into_bytes())
+}
+
 pub fn prepare_client_dh<F>(
     data: &ServerDhInnerData,
     new_nonce: &[u8; 32],
@@ -839,13 +852,10 @@ where
     key.zeroize();
     iv.zeroize();
 
-    let mut request = TlWriter::new();
-    request.write_u32(SET_CLIENT_DH_PARAMS_CONSTRUCTOR);
-    request.write_i128_bytes(&data.nonce);
-    request.write_i128_bytes(&data.server_nonce);
-    request.write_bytes(&encrypted_data)?;
+    let request_body =
+        build_set_client_dh_params(&data.nonce, &data.server_nonce, &encrypted_data)?;
     Ok(PreparedClientDh {
-        request_body: request.into_bytes(),
+        request_body,
         auth_key,
         auth_key_aux_hash,
         server_salt,
