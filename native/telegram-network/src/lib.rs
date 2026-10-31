@@ -24,7 +24,6 @@ const DEFAULT_MAX_DH_RETRIES: usize = 3;
 const DEFAULT_MAX_SERVICE_MESSAGES: usize = 8;
 const PING_CONSTRUCTOR: u32 = 0x7abe_77ec;
 const PONG_CONSTRUCTOR: u32 = 0x3477_73c5;
-const NEW_SESSION_CREATED_CONSTRUCTOR: u32 = 0x9ec2_0908;
 const MSG_DETAILED_INFO_CONSTRUCTOR: u32 = 0x276d_3ec6;
 const MSGS_STATE_INFO_CONSTRUCTOR: u32 = 0x04de_b57d;
 const MSGS_ALL_INFO_CONSTRUCTOR: u32 = 0x8cc0_d131;
@@ -390,11 +389,14 @@ impl EstablishedSession {
                     acknowledgement_mentions_request(&message_ids, request_message_id);
                 Ok(RpcOutcome::Continue)
             }
-            NEW_SESSION_CREATED_CONSTRUCTOR => {
-                let first_message_id = read_i64_at(body, 4)?;
-                self.server_salt = read_i64_at(body, 20)?;
-                if new_session_requires_replay(request_message_id, first_message_id) {
-                    Ok(RpcOutcome::RetryNewSession { first_message_id })
+            fabushi_telegram_protocol::NEW_SESSION_CREATED_CONSTRUCTOR => {
+                let new_session = fabushi_telegram_protocol::parse_new_session_created(body)
+                    .map_err(|_| NetworkError::InvalidServiceMessage)?;
+                self.server_salt = new_session.server_salt;
+                if new_session_requires_replay(request_message_id, new_session.first_message_id) {
+                    Ok(RpcOutcome::RetryNewSession {
+                        first_message_id: new_session.first_message_id,
+                    })
                 } else {
                     Ok(RpcOutcome::Continue)
                 }
@@ -647,8 +649,10 @@ impl EstablishedSession {
                 }
                 Ok(ServiceOutcome::Pong(pong.message_id))
             }
-            NEW_SESSION_CREATED_CONSTRUCTOR => {
-                self.server_salt = read_i64_at(body, 20)?;
+            fabushi_telegram_protocol::NEW_SESSION_CREATED_CONSTRUCTOR => {
+                let new_session = fabushi_telegram_protocol::parse_new_session_created(body)
+                    .map_err(|_| NetworkError::InvalidServiceMessage)?;
+                self.server_salt = new_session.server_salt;
                 Ok(ServiceOutcome::Continue)
             }
             BAD_SERVER_SALT_CONSTRUCTOR => {
