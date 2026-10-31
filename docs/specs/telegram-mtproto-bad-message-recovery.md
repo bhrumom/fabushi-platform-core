@@ -26,7 +26,7 @@ Implement bounded source-neutral recovery for the fixed-U recoverable bad-messag
 - `Telegram/SourceFiles/mtproto/session_private.cpp@13cbc76ec723386027b5b4dcac79999b791c4614`
   - codes 16/17: correct server time and resend;
   - codes 32/33: reset the session because message-id/sequence state is inconsistent;
-  - code 64: resend a rejected container/message;
+  - code 64: correct server time and resend a rejected container/message;
   - other codes remain fatal/protocol-error behavior.
 - `Telegram/SourceFiles/mtproto/scheme/mtproto.tl@76225965bfc794388db241f3f760db8ab79e84f8`
   - `bad_msg_notification#a7eff811`;
@@ -37,12 +37,12 @@ Implement bounded source-neutral recovery for the fixed-U recoverable bad-messag
 ## 5. Requirements
 
 - R1: `telegram-network::EstablishedSession` SHALL recognize only recoverable bad-message codes 16, 17, 32, 33, and 64.
-- R2: Codes 16/17 SHALL derive the current server time from the authenticated server message id, update the session clock offset, and retry the same RPC at most once with a fresh client message id.
+- R2: Codes 16/17/64 SHALL derive the current server time from the authenticated server message id, update the session clock offset, clear the prior client-message-id monotonic floor, and retry the same RPC at most once with a fresh client message id. Clearing that floor SHALL NOT clear the server replay window.
 - R3: Codes 32/33 SHALL reset the session id and content-related sequence counter, preserve the existing auth key/server salt/transport, and retry the same RPC at most once.
-- R4: Code 64 SHALL perform one bounded fresh-message retry; it SHALL NOT create an unbounded container replay loop.
+- R4: Code 64 SHALL perform the same trusted server-time correction as the fixed-U resend path and one bounded fresh-message retry; it SHALL NOT create an unbounded container replay loop.
 - R5: Unknown/fatal codes SHALL remain `NetworkError::BadServerMessage`.
 - R6: A recoverable bad-message notification SHALL apply only when its `bad_msg_id` equals the current request message id; unrelated notifications fail closed.
-- R7: Server-message replay/parity protection SHALL remain active. A direct authenticated bad-message notification may use its own server message time as the narrow reference when local-clock validation would otherwise reject it as outside the -300/+30 second window.
+- R7: Server-message replay/parity protection SHALL remain active. A direct authenticated bad-message notification with code 16, 17, or 64 may use its own server message time as the narrow reference when local-clock validation would otherwise reject it as outside the -300/+30 second window.
 - R8: Outgoing encrypted RPC and ping message ids SHALL use the current in-session clock offset after a time correction.
 - R9: Existing `bad_server_salt`, acknowledgement, auth-key, encryption, and one-session ownership semantics SHALL remain intact.
 - R10: Stage-A tests SHALL be authored but not executed.
@@ -53,7 +53,7 @@ The existing `native/telegram-network` crate remains the unique owner for socket
 
 ## 7. Failure and recovery contract
 
-Recovery is bounded to one retry per `invoke_raw`/ping call. A second recoverable rejection in the same call returns `BadServerMessage`. Failure to produce a new session id, invalid/malformed service messages, replayed server messages, mismatched bad_msg_id, or fatal codes fail closed.
+Recovery is bounded to one retry per `invoke_raw`/ping call. A second recoverable rejection in the same call returns `BadServerMessage`. Trusted clock correction resets only the client message-id monotonic floor so a prior locally-future id cannot pin later ids above the server window; the server replay set remains intact. Failure to produce a new session id, invalid/malformed service messages, replayed server messages, mismatched bad_msg_id, or fatal codes fail closed.
 
 ## 8. Verification strategy
 
