@@ -97,3 +97,15 @@ No executable validation is permitted in this stage.
 - fixed-U `mtproto.tl@76225965bfc794388db241f3f760db8ab79e84f8`
 - fixed-U `session_private.cpp@13cbc76ec723386027b5b4dcac79999b791c4614`
 - `docs/specs/spec-first-ai-development.md`
+
+
+## Source-level implementation review
+
+Canonical implementation commit: `96bb0e2cd31cdfc82aaa44e0f8e25acf8c30a204`. Canonical blobs: protocol api `7b731b6d6bbd2009453c5107a24ebea58cc2ece3`, protocol lib `4d8b7198fbe7aa8cbb71180587970760f6ebd1d9`. Desktop synchronization commit: `1495975bbdd2e5d56826a95854def198862e2c5b`; desktop bookkeeping/evidence commit: `60fa3f0ad601bcffaa8acdc6e0f26a7a52bea24e`.
+
+- R1-R4: satisfied by source inspection — the protocol owner exports `HTTP_WAIT_CONSTRUCTOR`, typed `HttpWait`, and `parse_http_wait`; the parser requires the fixed-U constructor, consumes exactly three signed TL ints in schema order, preserves arbitrary i32 values, and rejects wrong constructors, truncation, and trailing bytes.
+- R5-R6: satisfied by source inspection and repository state — the parser is side-effect free; no HTTP scheduler, `usingHttpWait()` lifecycle, session/request mutation, or historical sent/container bookkeeping was added. Connection-wait scheduling remains an explicit blocker instead of being inferred.
+- R7: satisfied by remote blob readback — desktop provider api/lib blobs are byte-identical to canonical api/lib blobs.
+- R8: satisfied for Stage A process — contracts were authored only; no build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried.
+
+Acceptance criteria AC1-AC6 are satisfied at source/implementation/bookkeeping level. AC7 remains intentionally **blocked/not-run** until Stage B executable validation. No runtime claim is made for the HTTP connection-wait lifecycle.
