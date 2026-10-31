@@ -21,6 +21,7 @@ pub const USER_EMPTY_CONSTRUCTOR: u32 = 0xd3bc_4b7a;
 pub const USER_CONSTRUCTOR: u32 = 0xb1b8_cc83;
 pub const MSGS_ACK_CONSTRUCTOR: u32 = 0x62d6_b459;
 pub const PONG_CONSTRUCTOR: u32 = 0x3477_73c5;
+pub const PING_DELAY_DISCONNECT_CONSTRUCTOR: u32 = 0xf342_7b8c;
 pub const RPC_RESULT_CONSTRUCTOR: u32 = 0xf35c_6d01;
 pub const RPC_ANSWER_UNKNOWN_CONSTRUCTOR: u32 = 0x5e2a_d36e;
 pub const RPC_ANSWER_DROPPED_RUNNING_CONSTRUCTOR: u32 = 0xcd78_e586;
@@ -520,6 +521,14 @@ pub fn build_auth_check_password(proof: &PasswordSrpProof) -> Result<Vec<u8>, Ap
     output.extend_from_slice(&AUTH_CHECK_PASSWORD_CONSTRUCTOR.to_le_bytes());
     output.extend_from_slice(&encoded_proof);
     Ok(output)
+}
+
+pub fn build_ping_delay_disconnect(ping_id: i64, disconnect_delay: i32) -> Vec<u8> {
+    let mut writer = TlWriter::new();
+    writer.write_u32(PING_DELAY_DISCONNECT_CONSTRUCTOR);
+    writer.write_i64(ping_id);
+    writer.write_i32(disconnect_delay);
+    writer.into_bytes()
 }
 
 pub fn build_msgs_ack(message_ids: &[i64]) -> Result<Vec<u8>, ApiRequestError> {
@@ -1508,7 +1517,8 @@ mod authorization_identity_contract_tests {
 #[cfg(test)]
 mod mtproto_service_builder_contract_tests {
     use super::{
-        build_msg_resend_req, build_msgs_ack, build_msgs_state_req, parse_bad_msg_notification,
+        build_msg_resend_req, build_msgs_ack, build_msgs_state_req, build_ping_delay_disconnect,
+        parse_bad_msg_notification,
         parse_bad_server_salt,
         parse_future_salts, parse_msg_detailed_info, parse_msg_new_detailed_info, parse_msgs_ack,
         parse_access_point_rule, parse_destroy_session_result, parse_help_config_simple,
@@ -1524,7 +1534,7 @@ mod mtproto_service_builder_contract_tests {
         MSG_NEW_DETAILED_INFO_CONSTRUCTOR, MSGS_ACK_CONSTRUCTOR,
         MSGS_ALL_INFO_CONSTRUCTOR,
         MSGS_STATE_INFO_CONSTRUCTOR, MSGS_STATE_REQ_CONSTRUCTOR, MSG_RESEND_REQ_CONSTRUCTOR,
-        PONG_CONSTRUCTOR, RPC_RESULT_CONSTRUCTOR,
+        PING_DELAY_DISCONNECT_CONSTRUCTOR, PONG_CONSTRUCTOR, RPC_RESULT_CONSTRUCTOR,
     };
     use crate::tl::TlWriter;
 
@@ -1542,6 +1552,34 @@ mod mtproto_service_builder_contract_tests {
         let mut encoded = build_msgs_ack(&[0x2122_2324_2526_2728_i64]).expect("encode ack");
         encoded.extend_from_slice(&0_i32.to_le_bytes());
         assert!(parse_msgs_ack(&encoded).is_err());
+    }
+
+    #[test]
+    fn ping_delay_disconnect_serializes_fixed_u_fields_exactly() {
+        let ping_id = 0x0102_0304_0506_0708_i64;
+        let disconnect_delay = 60_i32;
+        let encoded = build_ping_delay_disconnect(ping_id, disconnect_delay);
+        assert_eq!(encoded.len(), 16);
+        assert_eq!(&encoded[0..4], &PING_DELAY_DISCONNECT_CONSTRUCTOR.to_le_bytes());
+        assert_eq!(&encoded[4..12], &ping_id.to_le_bytes());
+        assert_eq!(&encoded[12..16], &disconnect_delay.to_le_bytes());
+    }
+
+    #[test]
+    fn ping_delay_disconnect_preserves_signed_boundaries_and_exact_layout() {
+        let encoded = build_ping_delay_disconnect(i64::MIN, i32::MIN);
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&PING_DELAY_DISCONNECT_CONSTRUCTOR.to_le_bytes());
+        expected.extend_from_slice(&i64::MIN.to_le_bytes());
+        expected.extend_from_slice(&i32::MIN.to_le_bytes());
+        assert_eq!(encoded, expected);
+
+        let encoded = build_ping_delay_disconnect(i64::MAX, i32::MAX);
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&PING_DELAY_DISCONNECT_CONSTRUCTOR.to_le_bytes());
+        expected.extend_from_slice(&i64::MAX.to_le_bytes());
+        expected.extend_from_slice(&i32::MAX.to_le_bytes());
+        assert_eq!(encoded, expected);
     }
 
     #[test]
