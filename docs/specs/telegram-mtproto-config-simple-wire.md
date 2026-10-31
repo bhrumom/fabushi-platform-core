@@ -138,3 +138,18 @@ Canonical implementation commits: `cde1297cacd3861764d74a111629d002e74c9d71`, fa
 - R10: satisfied for Stage A process — contracts were authored only; no build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried.
 
 Acceptance criteria AC1-AC7 are satisfied at source/implementation/bookkeeping level. AC8 remains intentionally **blocked/not-run** until Stage B executable validation. No runtime claim is made for special-config acquisition/decryption/expiry/phone-prefix/DC endpoint application.
+
+
+## Round 65 adjacent revalidation (2026-11-01)
+
+Task round: `7457eb1c-11a3-4626-8563-a3e495872536 / 65`.
+
+The live checkpoint was reread before this write at `a9cca9a441ada6738bf3418f389c58293b3ec54e`. Fixed U remains `telegramdesktop/tdesktop@f985723b552b30fe1c17d377d57f44e61a15a8c4`. The fixed-U schema still places `ipPort#d433ad73`, `ipPortSecret#37982646`, `accessPointRule#4679b65f`, and `help.configSimple#5a592a6c` immediately after `http_wait#9299359f` in `mtproto.tl@76225965bfc794388db241f3f760db8ab79e84f8`. `session_private.cpp@13cbc76ec723386027b5b4dcac79999b791c4614` still has no `help.configSimple` receive/application branch. The higher lifecycle remains in `special_config_request.cpp@fdb65506b0a886bc2daeccb61090bc44be7e2d88` / `special_config_request.h@91901489e778089b03187682a9556e929867b94f`, where acquisition/decryption, HTTP-derived time, expiry/non-empty policy, phone-prefix filtering, IPv4 conversion, and DC endpoint callbacks are applied.
+
+Current source inspection confirms the existing `telegram-protocol` owner still exports all four exact constructor IDs, typed `IpPort`, `AccessPointRule`, and `HelpConfigSimple`, plus `parse_ip_port`, `parse_access_point_rule`, and `parse_help_config_simple`. Nested vectors continue to use the bounded `TlReader`; raw signed integers, TL strings/bytes, and vector order are preserved; standalone entrypoints require strict EOF. Existing internal authored-only contracts in `api.rs` still cover both IpPort variants, nested rules/config, malformed vector/string framing, wrong top-level/nested constructors, every-byte truncation, and trailing bytes.
+
+Disposition remains **no production delta**. Live canonical production blobs are `native/telegram-protocol/src/api.rs@ebfb3670b5cd097b9ce288782c7954f5cfe9fc43` and `native/telegram-protocol/src/lib.rs@abab39e42f100972484191f0e52e9edd9b88c6cf`; the desktop provider copies were reread byte-identically at the same blob SHAs. This round SHALL add only an external public-API regression contract that independently pins nested exact values, strict framing/EOF, and the absence of expiry/non-empty/phone/DC-application policy from the wire parser. It SHALL be mirrored to the existing desktop provider tests and SHALL NOT be executed in Stage A.
+
+Special-config acquisition/decryption/expiry/phone-prefix/DC endpoint application, connection scheduling, arbitrary request/container history, auth-key binding/persistence, `gzip_packed`, and complete difference/differenceSlice decoding/application remain outside this wire-only responsibility and must not be synthesized here.
+
+No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, or runtime acceptance is permitted or claimed by this revalidation.
