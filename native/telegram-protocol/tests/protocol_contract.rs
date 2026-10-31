@@ -13,7 +13,8 @@ use fabushi_telegram_protocol::{
     EncryptedEnvelope, HandshakeError, MessageIdError, MessageIdGuard, PasswordSrpParameters,
     PlainMessage, PlaintextEnvelope, RequestSequencer, ResPq, RsaPublicKey, SchemaParseError,
     SchemaStats, ServerDhInnerData, ServerDhParams, SessionSequence, TlError, TlReader, TlWriter,
-    TransportError, TransportFrameCodec, TransportMode, WireSchema, DH_GEN_OK_CONSTRUCTOR,
+    TransportError, TransportFrameCodec, TransportMode, WireSchema, DH_GEN_FAIL_CONSTRUCTOR,
+    DH_GEN_OK_CONSTRUCTOR, DH_GEN_RETRY_CONSTRUCTOR,
     CLIENT_DH_INNER_DATA_CONSTRUCTOR, KNOWN_DH_PRIME_HEX, P_Q_INNER_DATA_DC_CONSTRUCTOR,
     P_Q_INNER_DATA_TEMP_DC_CONSTRUCTOR, REQ_DH_PARAMS_CONSTRUCTOR, REQ_PQ_MULTI_CONSTRUCTOR,
     RES_PQ_CONSTRUCTOR,
@@ -1502,6 +1503,133 @@ fn client_dh_derives_auth_key_and_authenticates_dh_gen_ok() {
         .unwrap_err(),
         HandshakeError::DhGenHashMismatch
     );
+}
+
+#[test]
+fn dh_gen_result_parser_is_exact_for_all_fixed_u_variants() {
+    let nonce = [0x21; 16];
+    let server_nonce = [0x43; 16];
+    let new_nonce = [0x65; 32];
+    let auth_key_aux_hash = 0x8877_6655_4433_2211_u64;
+
+    let encode = |constructor: u32, tag: u8, body_nonce: [u8; 16], body_server_nonce: [u8; 16]| {
+        let mut material = Vec::from(new_nonce);
+        material.push(tag);
+        material.extend_from_slice(&auth_key_aux_hash.to_le_bytes());
+        let digest = Sha1::digest(&material);
+        let expected_hash: [u8; 16] = digest[4..20].try_into().unwrap();
+
+        let mut writer = TlWriter::new();
+        writer.write_u32(constructor);
+        writer.write_i128_bytes(&body_nonce);
+        writer.write_i128_bytes(&body_server_nonce);
+        writer.write_i128_bytes(&expected_hash);
+        writer.into_bytes()
+    };
+
+    for (constructor, tag, expected) in [
+        (DH_GEN_OK_CONSTRUCTOR, 1_u8, DhGenResult::Ok),
+        (DH_GEN_RETRY_CONSTRUCTOR, 2_u8, DhGenResult::Retry),
+        (DH_GEN_FAIL_CONSTRUCTOR, 3_u8, DhGenResult::Fail),
+    ] {
+        let body = encode(constructor, tag, nonce, server_nonce);
+        assert_eq!(
+            parse_dh_gen_result(
+                &body,
+                &nonce,
+                &server_nonce,
+                &new_nonce,
+                auth_key_aux_hash,
+            )
+            .unwrap(),
+            expected
+        );
+
+        for cut in 0..body.len() {
+            assert!(
+                parse_dh_gen_result(
+                    &body[..cut],
+                    &nonce,
+                    &server_nonce,
+                    &new_nonce,
+                    auth_key_aux_hash,
+                )
+                .is_err(),
+                "truncation cut {cut} unexpectedly accepted for constructor 0x{constructor:08x}"
+            );
+        }
+
+        let mut trailing = body.clone();
+        trailing.push(0x99);
+        assert_eq!(
+            parse_dh_gen_result(
+                &trailing,
+                &nonce,
+                &server_nonce,
+                &new_nonce,
+                auth_key_aux_hash,
+            )
+            .unwrap_err(),
+            HandshakeError::TrailingBodyBytes(1)
+        );
+    }
+
+    assert_eq!(
+        parse_dh_gen_result(
+            &0x1122_3344_u32.to_le_bytes(),
+            &nonce,
+            &server_nonce,
+            &new_nonce,
+            auth_key_aux_hash,
+        )
+        .unwrap_err(),
+        HandshakeError::UnexpectedDhGenConstructor(0x1122_3344)
+    );
+
+    let wrong_nonce = encode(DH_GEN_OK_CONSTRUCTOR, 1, [0x20; 16], server_nonce);
+    assert_eq!(
+        parse_dh_gen_result(
+            &wrong_nonce,
+            &nonce,
+            &server_nonce,
+            &new_nonce,
+            auth_key_aux_hash,
+        )
+        .unwrap_err(),
+        HandshakeError::NonceMismatch
+    );
+
+    let wrong_server_nonce = encode(DH_GEN_RETRY_CONSTRUCTOR, 2, nonce, [0x42; 16]);
+    assert_eq!(
+        parse_dh_gen_result(
+            &wrong_server_nonce,
+            &nonce,
+            &server_nonce,
+            &new_nonce,
+            auth_key_aux_hash,
+        )
+        .unwrap_err(),
+        HandshakeError::ServerNonceMismatch
+    );
+
+    for (constructor, wrong_tag) in [
+        (DH_GEN_OK_CONSTRUCTOR, 2_u8),
+        (DH_GEN_RETRY_CONSTRUCTOR, 3_u8),
+        (DH_GEN_FAIL_CONSTRUCTOR, 1_u8),
+    ] {
+        let body = encode(constructor, wrong_tag, nonce, server_nonce);
+        assert_eq!(
+            parse_dh_gen_result(
+                &body,
+                &nonce,
+                &server_nonce,
+                &new_nonce,
+                auth_key_aux_hash,
+            )
+            .unwrap_err(),
+            HandshakeError::DhGenHashMismatch
+        );
+    }
 }
 
 #[test]
