@@ -30,6 +30,8 @@ pub const MSGS_STATE_INFO_CONSTRUCTOR: u32 = 0x04de_b57d;
 pub const MSGS_ALL_INFO_CONSTRUCTOR: u32 = 0x8cc0_d131;
 pub const MSG_DETAILED_INFO_CONSTRUCTOR: u32 = 0x276d_3ec6;
 pub const MSG_NEW_DETAILED_INFO_CONSTRUCTOR: u32 = 0x809d_b6df;
+pub const FUTURE_SALT_CONSTRUCTOR: u32 = 0x0949_d9dc;
+pub const FUTURE_SALTS_CONSTRUCTOR: u32 = 0xae50_0895;
 pub const CONFIG_CONSTRUCTOR: u32 = 0xcc1a_241e;
 pub const DC_OPTION_CONSTRUCTOR: u32 = 0x18b7_a10d;
 pub const AUTH_SENT_CODE_CONSTRUCTOR: u32 = 0x5e00_2502;
@@ -201,6 +203,20 @@ pub struct MsgNewDetailedInfo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FutureSalt {
+    pub valid_since: i32,
+    pub valid_until: i32,
+    pub salt: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FutureSalts {
+    pub request_message_id: i64,
+    pub now: i32,
+    pub salts: Vec<FutureSalt>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pong {
     pub message_id: i64,
     pub ping_id: i64,
@@ -242,6 +258,8 @@ pub enum ApiRequestError {
     InvalidRpcResultBodyLength(usize),
     #[error("Telegram MTProto message container is malformed")]
     InvalidMessageContainer,
+    #[error("Telegram MTProto future-salts payload is malformed")]
+    InvalidFutureSalts,
     #[error("Telegram Config contains an invalid IP address: {0}")]
     InvalidIpAddress(String),
     #[error("Telegram Config contains an invalid port: {0}")]
@@ -642,6 +660,52 @@ pub fn parse_msg_new_detailed_info(
         return Err(ApiRequestError::TrailingBytes(reader.remaining()));
     }
     Ok(info)
+}
+
+pub fn parse_future_salts(input: &[u8]) -> Result<FutureSalts, ApiRequestError> {
+    const FUTURE_SALT_WIRE_BYTES: usize = 20;
+
+    let mut reader = TlReader::new(input);
+    let constructor = reader.read_u32()?;
+    if constructor != FUTURE_SALTS_CONSTRUCTOR {
+        return Err(ApiRequestError::Tl(TlError::UnexpectedConstructor {
+            expected: FUTURE_SALTS_CONSTRUCTOR,
+            actual: constructor,
+        }));
+    }
+    let request_message_id = reader.read_i64()?;
+    let now = reader.read_i32()?;
+    let count = reader.read_vector_length()?;
+    let required_bytes = count
+        .checked_mul(FUTURE_SALT_WIRE_BYTES)
+        .ok_or(ApiRequestError::InvalidFutureSalts)?;
+    if required_bytes > reader.remaining() {
+        return Err(ApiRequestError::InvalidFutureSalts);
+    }
+
+    let mut salts = Vec::with_capacity(count);
+    for _ in 0..count {
+        let constructor = reader.read_u32()?;
+        if constructor != FUTURE_SALT_CONSTRUCTOR {
+            return Err(ApiRequestError::Tl(TlError::UnexpectedConstructor {
+                expected: FUTURE_SALT_CONSTRUCTOR,
+                actual: constructor,
+            }));
+        }
+        salts.push(FutureSalt {
+            valid_since: reader.read_i32()?,
+            valid_until: reader.read_i32()?,
+            salt: reader.read_i64()?,
+        });
+    }
+    if !reader.is_finished() {
+        return Err(ApiRequestError::TrailingBytes(reader.remaining()));
+    }
+    Ok(FutureSalts {
+        request_message_id,
+        now,
+        salts,
+    })
 }
 
 /// Parses the stable prefix of Telegram `Config` through `dc_options`.
@@ -1177,10 +1241,12 @@ mod authorization_identity_contract_tests {
 #[cfg(test)]
 mod mtproto_service_builder_contract_tests {
     use super::{
-        build_msg_resend_req, build_msgs_ack, build_msgs_state_req, parse_msg_detailed_info,
-        parse_msg_new_detailed_info, parse_msgs_ack, parse_message_container, parse_msgs_all_info,
-        parse_msgs_state_info, parse_pong, parse_rpc_result, MESSAGE_CONTAINER_CONSTRUCTOR,
-        MSG_DETAILED_INFO_CONSTRUCTOR, MSG_NEW_DETAILED_INFO_CONSTRUCTOR, MSGS_ACK_CONSTRUCTOR,
+        build_msg_resend_req, build_msgs_ack, build_msgs_state_req, parse_future_salts,
+        parse_msg_detailed_info, parse_msg_new_detailed_info, parse_msgs_ack,
+        parse_message_container, parse_msgs_all_info, parse_msgs_state_info, parse_pong,
+        parse_rpc_result, FUTURE_SALTS_CONSTRUCTOR, FUTURE_SALT_CONSTRUCTOR,
+        MESSAGE_CONTAINER_CONSTRUCTOR, MSG_DETAILED_INFO_CONSTRUCTOR,
+        MSG_NEW_DETAILED_INFO_CONSTRUCTOR, MSGS_ACK_CONSTRUCTOR,
         MSGS_ALL_INFO_CONSTRUCTOR,
         MSGS_STATE_INFO_CONSTRUCTOR, MSGS_STATE_REQ_CONSTRUCTOR, MSG_RESEND_REQ_CONSTRUCTOR,
         PONG_CONSTRUCTOR, RPC_RESULT_CONSTRUCTOR,
@@ -1428,5 +1494,65 @@ mod mtproto_service_builder_contract_tests {
         let mut trailing = exact;
         trailing.extend_from_slice(&0_u32.to_le_bytes());
         assert!(parse_msg_new_detailed_info(&trailing).is_err());
+    }
+
+    fn future_salts_fixture() -> Vec<u8> {
+        let mut writer = TlWriter::new();
+        writer.write_u32(FUTURE_SALTS_CONSTRUCTOR);
+        writer.write_i64(0x1112_1314_1516_1718_i64);
+        writer.write_i32(1_700_000_000);
+        writer.write_vector_length(2).expect("write salts vector");
+        writer.write_u32(FUTURE_SALT_CONSTRUCTOR);
+        writer.write_i32(1_700_000_100);
+        writer.write_i32(1_700_000_200);
+        writer.write_i64(0x2122_2324_2526_2728_i64);
+        writer.write_u32(FUTURE_SALT_CONSTRUCTOR);
+        writer.write_i32(1_700_000_300);
+        writer.write_i32(1_700_000_400);
+        writer.write_i64(0x3132_3334_3536_3738_i64);
+        writer.into_bytes()
+    }
+
+    #[test]
+    fn future_salts_parses_all_fixed_u_fields() {
+        let parsed = parse_future_salts(&future_salts_fixture()).expect("parse future salts");
+        assert_eq!(parsed.request_message_id, 0x1112_1314_1516_1718_i64);
+        assert_eq!(parsed.now, 1_700_000_000);
+        assert_eq!(parsed.salts.len(), 2);
+        assert_eq!(parsed.salts[0].valid_since, 1_700_000_100);
+        assert_eq!(parsed.salts[0].valid_until, 1_700_000_200);
+        assert_eq!(parsed.salts[0].salt, 0x2122_2324_2526_2728_i64);
+        assert_eq!(parsed.salts[1].valid_since, 1_700_000_300);
+        assert_eq!(parsed.salts[1].valid_until, 1_700_000_400);
+        assert_eq!(parsed.salts[1].salt, 0x3132_3334_3536_3738_i64);
+    }
+
+    #[test]
+    fn future_salts_rejects_wrong_constructors_truncation_impossible_count_and_trailing() {
+        let exact = future_salts_fixture();
+
+        let mut wrong_top = exact.clone();
+        wrong_top[..4].copy_from_slice(&0_u32.to_le_bytes());
+        assert!(parse_future_salts(&wrong_top).is_err());
+
+        let mut wrong_vector = exact.clone();
+        wrong_vector[16..20].copy_from_slice(&0_u32.to_le_bytes());
+        assert!(parse_future_salts(&wrong_vector).is_err());
+
+        let mut wrong_nested = exact.clone();
+        wrong_nested[24..28].copy_from_slice(&0_u32.to_le_bytes());
+        assert!(parse_future_salts(&wrong_nested).is_err());
+
+        for cut in [1_usize, 4, 8, 12, 16, 20, 24, 28, exact.len() - 1] {
+            assert!(parse_future_salts(&exact[..cut]).is_err());
+        }
+
+        let mut impossible_count = exact.clone();
+        impossible_count[20..24].copy_from_slice(&3_i32.to_le_bytes());
+        assert!(parse_future_salts(&impossible_count).is_err());
+
+        let mut trailing = exact;
+        trailing.extend_from_slice(&0_u32.to_le_bytes());
+        assert!(parse_future_salts(&trailing).is_err());
     }
 }

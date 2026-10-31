@@ -30,7 +30,6 @@ const BAD_SERVER_SALT_CONSTRUCTOR: u32 = 0xedab_447b;
 const BAD_MSG_NOTIFICATION_CONSTRUCTOR: u32 = 0xa7ef_f811;
 const MSGS_ACK_CONSTRUCTOR: u32 = 0x62d6_b459;
 const RPC_RESULT_CONSTRUCTOR: u32 = 0xf35c_6d01;
-const FUTURE_SALTS_CONSTRUCTOR: u32 = 0xae50_0895;
 const DEFAULT_MAX_RPC_MESSAGES: usize = 64;
 
 #[derive(Debug, Clone, Copy)]
@@ -366,9 +365,13 @@ impl EstablishedSession {
                     body: result.result_body,
                 }))
             }
-            FUTURE_SALTS_CONSTRUCTOR => {
-                let request_id = read_i64_at(body, 4)?;
-                if request_id != request_message_id {
+            fabushi_telegram_protocol::FUTURE_SALTS_CONSTRUCTOR => {
+                let future_salts = fabushi_telegram_protocol::parse_future_salts(body)
+                    .map_err(|_| NetworkError::InvalidServiceMessage)?;
+                if !future_salts_matches_request(
+                    future_salts.request_message_id,
+                    request_message_id,
+                ) {
                     return Ok(RpcOutcome::Continue);
                 }
                 Ok(RpcOutcome::Result(RpcResult {
@@ -772,6 +775,13 @@ fn rpc_result_matches_request(
     response_request_message_id == request_message_id
 }
 
+fn future_salts_matches_request(
+    response_request_message_id: i64,
+    request_message_id: i64,
+) -> bool {
+    response_request_message_id == request_message_id
+}
+
 fn request_state_requires_resend(state: u8) -> bool {
     (state & 0x07) != 0x04
 }
@@ -997,8 +1007,9 @@ mod recovery_contract_tests {
         acknowledgement_mentions_request, bad_message_recovery_action,
         contained_message_requires_ack,
         direct_bad_message_time_recovery, detailed_info_matches_request,
-        new_session_requires_replay, pong_matches_request, request_state_requires_resend,
-        rpc_result_matches_request, state_reconciliation_requires_resend, BadMessageRecoveryAction,
+        future_salts_matches_request, new_session_requires_replay, pong_matches_request,
+        request_state_requires_resend, rpc_result_matches_request,
+        state_reconciliation_requires_resend, BadMessageRecoveryAction,
         BAD_MSG_NOTIFICATION_CONSTRUCTOR,
     };
 
@@ -1078,6 +1089,13 @@ mod recovery_contract_tests {
         assert!(detailed_info_matches_request(123, 123));
         assert!(!detailed_info_matches_request(122, 123));
         assert!(!detailed_info_matches_request(124, 123));
+    }
+
+    #[test]
+    fn future_salts_settles_only_the_current_outstanding_rpc() {
+        assert!(future_salts_matches_request(123, 123));
+        assert!(!future_salts_matches_request(122, 123));
+        assert!(!future_salts_matches_request(124, 123));
     }
 
     #[test]
