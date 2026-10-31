@@ -32,7 +32,7 @@ The temporary lifetime is request-preparation input, not a new durable state own
 
 - Factor mismatch fails with the existing `PqFactorsDoNotMatch` error before serialization.
 - A temporary preparation request with `expires_in <= 0` fails closed before mutating the handshake out of `ResPqReceived`.
-- Invalid runtime `temporaryExpiresIn` values fail as an invalid request parameter rather than silently falling back to persistent mode.
+- Network/runtime temporary establishment is not exposed by this slice; any future temporary-lifetime input must remain unavailable or fail closed until the existing persistence/session owner represents expiry and binding semantics.
 - Existing persistent callers remain source-compatible and continue to select `p_q_inner_data_dc`.
 - Network/runtime temporary-key establishment remains fail-closed until the existing persistence/session owner can represent expiry and binding semantics; no temporary key is written into the current permanent transport snapshot.
 
@@ -66,3 +66,8 @@ This is source/ownership/bookkeeping compliance, not executable verification or 
 Broader temporary-key expiry enforcement, permanent-key binding, renewal/persistence, network/runtime temporary establishment, connection scheduling/racing, plaintext/send lifecycle, arbitrary sent/resend/container histories, gzip, complete difference decoding/application, broader fixed-U source/legal closure, Stage-B evidence and independent release ACCEPT remain open/fail-closed.
 
 No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation or runtime acceptance was performed.
+
+
+## Round 75 wording correction
+
+Final readback removed the stale pre-boundary statement that implied runtime `temporaryExpiresIn` input already existed. The implemented contract is unambiguous: this slice ends at the existing `AuthKeyHandshake::prepare_temporary_req_dh_params*` request-preparation lifecycle; telegram-network/runtime temporary establishment is not exposed and remains fail-closed pending expiry/binding-aware persistence/session ownership. No production code changed in this correction and no executable validation was performed.
