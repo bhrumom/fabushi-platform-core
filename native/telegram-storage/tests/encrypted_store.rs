@@ -329,3 +329,55 @@ fn schema_v2_database_migrates_to_secure_runtime_value_slot() {
         Some(b"pending-auth".as_slice())
     );
 }
+
+
+#[test]
+fn schema_v3_private_metadata_database_migrates_to_unified_v4() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("schema-v3-private.sqlite3");
+    let mut store = EncryptedSqliteStore::open(&path, key(13)).unwrap();
+    store
+        .save_private_metadata("authorization.v1", b"identity-before-v4", 7)
+        .unwrap();
+    drop(store);
+
+    let store = EncryptedSqliteStore::open(&path, key(13)).unwrap();
+    assert_eq!(
+        store.load_private_metadata("authorization.v1").unwrap().as_deref(),
+        Some(b"identity-before-v4".as_slice())
+    );
+    assert_eq!(
+        store.load_secure_value("authorization-runtime-v1").unwrap(),
+        None
+    );
+}
+
+#[test]
+fn unified_v4_storage_keeps_private_metadata_and_secure_value_encrypted() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("schema-v4-unified.sqlite3");
+    {
+        let mut store = EncryptedSqliteStore::open(&path, key(14)).unwrap();
+        store
+            .save_private_metadata("transport.v1", b"private-transport-secret", 8)
+            .unwrap();
+        store
+            .save_secure_value("authorization-runtime-v1", b"secure-auth-secret")
+            .unwrap();
+        assert_eq!(
+            store.load_private_metadata("transport.v1").unwrap().as_deref(),
+            Some(b"private-transport-secret".as_slice())
+        );
+        assert_eq!(
+            store
+                .load_secure_value("authorization-runtime-v1")
+                .unwrap()
+                .as_deref(),
+            Some(b"secure-auth-secret".as_slice())
+        );
+    }
+    let bytes = std::fs::read(path).unwrap();
+    let database_text = String::from_utf8_lossy(&bytes);
+    assert!(!database_text.contains("private-transport-secret"));
+    assert!(!database_text.contains("secure-auth-secret"));
+}
