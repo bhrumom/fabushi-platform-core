@@ -81,4 +81,6 @@ Canonical blobs: protocol api `75959eb82460cb36bf5f43c6e4470ef8814ea2a9`, protoc
 - R9: passed by ownership/scope inspection — changes stay in existing protocol/network owners; no gzip, full difference decoder, or historical `wasSent/haveSent/_resendingIds/toSend/_sentContainers` owner was introduced.
 - R10: passed as an authored-only Stage-A artifact — exact-field, wrong-constructor, truncation, trailing-byte, and current-request contracts were added but not run.
 
-Acceptance criteria AC1-AC4 and AC6 are satisfied at source/implementation level. AC5 is pending desktop synchronization in this round. AC7 remains intentionally **blocked/not-run** until Stage B executable validation. No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried in this review.
+Desktop synchronization commit: `131980d0bc3c5b6e8fad3ad2e394715426cd1529`; desktop provider blobs are byte-identical to the canonical api/lib/network blobs above.
+
+Acceptance criteria AC1-AC6 are satisfied at source/implementation level. AC7 remains intentionally **blocked/not-run** until Stage B executable validation. No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried in this review.
