@@ -142,6 +142,18 @@ source-neutral Rust and does not copy Telegram Desktop C++ implementation text.
 
 ## 12. Stage-A compliance record
 
-Initial spec-first disposition: source review confirms no production delta is required.
-Authored contract commit/blob, desktop mirror commit/blob, ledger/evidence commit and final compliance readback
-will be recorded here after those writes are durably saved. Executable validation remains `not-run`.
+| Requirement / AC | Status | Evidence / reason |
+| --- | --- | --- |
+| R1-R5 | passed | Remote source readback confirms `api.rs@ebfb3670b5cd097b9ce288782c7954f5cfe9fc43` preserves constructor 0x276d3ec6, signed i64/i64/i32/i32 field order and exact EOF; `tl.rs@89256ab35184b6dc06a095ab34abb9f44e95a264` preserves exact 8-byte i64 / 4-byte i32 little-endian reads and fail-closed truncation; `lib.rs@abab39e42f100972484191f0e52e9edd9b88c6cf` exports the same parser/type/constructor. |
+| R6 | passed | Fixed-U `SessionPrivate::handle` performs `MTPMsgDetailedInfo::read(from,end)` before bad-time recovery, `requestsAcked`, `_receivedMessageIds` lookup or ack/resend enqueueing; Fabushi parser remains side-effect free and owns no request-history/application semantics. |
+| R7 | passed | Stage A performed source/blob readback and authored/saved code/docs only. No build, typecheck, lint, validator, generator, unit/contract/integration/E2E execution, Actions/status/check query, package, deploy, install or runtime acceptance was performed. |
+| AC-1 | passed | Production api/tl/lib blobs remain ebfb3670b5cd097b9ce288782c7954f5cfe9fc43 / 89256ab35184b6dc06a095ab34abb9f44e95a264 / abab39e42f100972484191f0e52e9edd9b88c6cf; no production behavior delta was made. |
+| AC-2 | passed | Canonical authored-only contract commit `688ccb1acd5afb4e3d8c76c1c898148f721e3d48` / blob `d1d4ed680d297b778516ec52d3b3746fe9687135` covers exact 28-byte layout, signed i64/i64/i32/i32 extremes, wrong constructor, truncation at constructor/each field boundary, trailing bytes and exact EOF. It was not executed. |
+| AC-3 | passed | Desktop mirror commit `1d82ac67b4a86f1fd8b0584cbf8b76fb9252de2a` has byte-identical contract blob `d1d4ed680d297b778516ec52d3b3746fe9687135`; desktop production api/lib remain ebfb3670b5cd097b9ce288782c7954f5cfe9fc43 / abab39e42f100972484191f0e52e9edd9b88c6cf. |
+| AC-4 | passed | Desktop ledger/evidence/P0/source-closure commit `ec2a2063641d07c71ee13869355a586ab3413b41` records fixed-U identities, no-production-delta disposition, exact 8/8/4/4 widths, strict EOF and application/history separation. |
+| AC-5 | passed | Existing parity ledger records `TDRP-R9-MTPROTO-MSG-DETAILED-INFO-WIRE-001` as `implemented / validation_status=not-run / accepted=false`; coverage is responsibilities_total=96, unknown=16172, unread=16145, omitted=0. |
+| AC-6 | passed | `requestsAcked`, bad-time recovery, `_receivedMessageIds`, ack/resend application, arbitrary request history, connection scheduling/racing/send retry, auth-key binding/expiry/persistence/teardown, gzip and complete difference/differenceSlice decoding/application remain explicitly open/fail-closed. |
+
+Source-level compliance is complete for this isolated `msg_detailed_info` wire slice. This is not executable
+verification, candidate readiness, release acceptance, request-history/application closure, broader source/legal
+closure, or independent release ACCEPT.
