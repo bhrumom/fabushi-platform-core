@@ -22,10 +22,10 @@ The temporary lifetime is request-preparation input, not a new durable state own
 2. Add public pure `build_p_q_inner_data_temp_dc(response, factors, new_nonce, dc_id, expires_in)` that emits exactly the fixed-U constructor and fields in TL order, using the existing factor-match validation and canonical TL bytes/int encoders.
 3. Add explicit temporary request preparation on `AuthKeyHandshake` with an `expires_in: i32` input. The temporary path must reject non-positive lifetimes and must reuse the existing Req_DH_params preparation state machine, trusted RSA key selection, new_nonce generation, RSA_PAD encryption and state transition rather than duplicating a second handshake.
 4. Keep existing persistent `prepare_req_dh_params*` behavior byte-for-byte and semantically unchanged; it must continue using `p_q_inner_data_dc#a9f55f95`.
-5. Add a source-neutral `AuthKeyLifetime` selector in the existing telegram-network owner and a compatibility-preserving `establish_auth_key_with_lifetime` entrypoint. Existing `establish_auth_key` remains the persistent default.
-6. Wire the existing runtime `bootstrap_transport` request to accept optional positive `temporaryExpiresIn` and route that value through `AuthKeyLifetime::Temporary` to the same network/handshake chain. Absence keeps the existing persistent behavior. This is live request-preparation wiring only; it does not claim local expiration persistence or permanent-key binding.
-7. Re-export the new protocol builder/constructor through the canonical public facade. Mirror affected protocol/network/runtime facade and authored-contract files into the desktop tracked provider copies without creating another state owner.
-8. Author, but do not execute during Stage A, contracts for exact constructor/field order/TL padding/no trailing bytes, positive temporary lifetime routing, non-positive lifetime rejection, and persistent-path non-regression.
+5. Treat `AuthKeyHandshake::prepare_temporary_req_dh_params*` as the production request-preparation wiring for this slice: it must consume the same `ResPqReceived` state and transition to the same `AwaitingServerDh` state as the persistent path, while selecting the temporary inner-object constructor. This is not a dead standalone serializer.
+6. Keep `telegram-network::establish_auth_key` and runtime `bootstrap_transport` on the persistent path. The current runtime persists transport auth-key material without expiry/binding metadata, so routing a temporary key there would overclaim broader auth-key lifetime parity. Record that boundary fail-closed instead of silently persisting a temporary key as permanent material.
+7. Re-export the new protocol builder/constructor through the canonical public facade and mirror the affected protocol facade/contract files into the desktop tracked provider copies without creating another state owner.
+8. Author, but do not execute during Stage A, contracts for exact constructor/field order/TL padding/no trailing bytes, positive temporary request preparation, non-positive lifetime rejection before state mutation, and persistent-path non-regression.
 9. Do not expand into connection scheduling/racing, message-id policy, plaintext transport framing, send/retry/timeout, arbitrary multi-request history, gzip, complete difference decoding, auth-key persistence/binding/renewal, packaging or release acceptance.
 
 ## Failure behavior
@@ -34,6 +34,7 @@ The temporary lifetime is request-preparation input, not a new durable state own
 - A temporary preparation request with `expires_in <= 0` fails closed before mutating the handshake out of `ResPqReceived`.
 - Invalid runtime `temporaryExpiresIn` values fail as an invalid request parameter rather than silently falling back to persistent mode.
 - Existing persistent callers remain source-compatible and continue to select `p_q_inner_data_dc`.
+- Network/runtime temporary-key establishment remains fail-closed until the existing persistence/session owner can represent expiry and binding semantics; no temporary key is written into the current permanent transport snapshot.
 
 ## Stage A acceptance state
 
