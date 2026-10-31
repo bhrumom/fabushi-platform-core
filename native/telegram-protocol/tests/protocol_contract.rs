@@ -28,7 +28,7 @@ use fabushi_telegram_protocol::{
     compute_password_srp_proof_with_random,
     parse_account_email_verified, parse_account_password_prefix, parse_account_sent_email_code,
     parse_auth_password_recovery, parse_auth_sent_code, parse_bool, parse_config_dc_directory_prefix,
-    parse_destroy_auth_key_result, parse_msgs_all_info, parse_msgs_state_info, try_parse_rpc_error, ApiRequestError, DestroyAuthKeyResult,
+    parse_destroy_auth_key_result, parse_msg_detailed_info, parse_msgs_all_info, parse_msgs_state_info, try_parse_rpc_error, ApiRequestError, DestroyAuthKeyResult,
     EmailVerifiedResult, InitConnection, NextCodeType,
     SentCode, SentCodeDelivery, SentCodeResult, ACCOUNT_EMAIL_VERIFIED_LOGIN_CONSTRUCTOR,
     ACCOUNT_GET_PASSWORD_CONSTRUCTOR, ACCOUNT_PASSWORD_CONSTRUCTOR,
@@ -37,7 +37,7 @@ use fabushi_telegram_protocol::{
     CONFIG_CONSTRUCTOR, DC_OPTION_CONSTRUCTOR, DESTROY_AUTH_KEY_FAIL_CONSTRUCTOR,
     DESTROY_AUTH_KEY_NONE_CONSTRUCTOR, DESTROY_AUTH_KEY_OK_CONSTRUCTOR, HELP_GET_CONFIG_CONSTRUCTOR,
     INIT_CONNECTION_CONSTRUCTOR, INPUT_CHECK_PASSWORD_SRP_CONSTRUCTOR,
-    INVOKE_WITH_LAYER_CONSTRUCTOR, MSG_RESEND_REQ_CONSTRUCTOR, MSGS_ACK_CONSTRUCTOR, MSGS_ALL_INFO_CONSTRUCTOR, MSGS_STATE_INFO_CONSTRUCTOR, MSGS_STATE_REQ_CONSTRUCTOR, MTPROTO_LAYER,
+    INVOKE_WITH_LAYER_CONSTRUCTOR, MSG_DETAILED_INFO_CONSTRUCTOR, MSG_RESEND_REQ_CONSTRUCTOR, MSGS_ACK_CONSTRUCTOR, MSGS_ALL_INFO_CONSTRUCTOR, MSGS_STATE_INFO_CONSTRUCTOR, MSGS_STATE_REQ_CONSTRUCTOR, MTPROTO_LAYER,
     PASSWORD_KDF_ALGO_CONSTRUCTOR,
 };
 use fabushi_telegram_protocol::{
@@ -573,6 +573,71 @@ fn msgs_all_info_parser_rejects_truncation_mismatch_padding_and_trailing_bytes()
     assert_eq!(
         parse_msgs_all_info(&trailing.into_bytes()).unwrap_err(),
         ApiRequestError::InvalidMessageState
+    );
+}
+
+
+#[test]
+fn msg_detailed_info_parser_preserves_exact_field_widths_and_eof() {
+    let mut encoded = Vec::new();
+    encoded.extend_from_slice(&MSG_DETAILED_INFO_CONSTRUCTOR.to_le_bytes());
+    encoded.extend_from_slice(&i64::MIN.to_le_bytes());
+    encoded.extend_from_slice(&i64::MAX.to_le_bytes());
+    encoded.extend_from_slice(&i32::MIN.to_le_bytes());
+    encoded.extend_from_slice(&i32::MAX.to_le_bytes());
+
+    assert_eq!(encoded.len(), 28);
+    assert_eq!(&encoded[0..4], &MSG_DETAILED_INFO_CONSTRUCTOR.to_le_bytes());
+    assert_eq!(&encoded[4..12], &i64::MIN.to_le_bytes());
+    assert_eq!(&encoded[12..20], &i64::MAX.to_le_bytes());
+    assert_eq!(&encoded[20..24], &i32::MIN.to_le_bytes());
+    assert_eq!(&encoded[24..28], &i32::MAX.to_le_bytes());
+
+    let parsed = parse_msg_detailed_info(&encoded).unwrap();
+    assert_eq!(parsed.message_id, i64::MIN);
+    assert_eq!(parsed.answer_message_id, i64::MAX);
+    assert_eq!(parsed.bytes, i32::MIN);
+    assert_eq!(parsed.status, i32::MAX);
+
+    let mut reader = TlReader::new(&encoded);
+    assert_eq!(reader.read_u32().unwrap(), MSG_DETAILED_INFO_CONSTRUCTOR);
+    assert_eq!(reader.read_i64().unwrap(), i64::MIN);
+    assert_eq!(reader.read_i64().unwrap(), i64::MAX);
+    assert_eq!(reader.read_i32().unwrap(), i32::MIN);
+    assert_eq!(reader.read_i32().unwrap(), i32::MAX);
+    assert!(reader.is_finished());
+}
+
+#[test]
+fn msg_detailed_info_parser_rejects_wrong_constructor_truncation_and_trailing_bytes() {
+    assert_eq!(
+        parse_msg_detailed_info(&MSGS_ALL_INFO_CONSTRUCTOR.to_le_bytes()).unwrap_err(),
+        ApiRequestError::Tl(TlError::UnexpectedConstructor {
+            expected: MSG_DETAILED_INFO_CONSTRUCTOR,
+            actual: MSGS_ALL_INFO_CONSTRUCTOR,
+        })
+    );
+
+    let mut valid = Vec::new();
+    valid.extend_from_slice(&MSG_DETAILED_INFO_CONSTRUCTOR.to_le_bytes());
+    valid.extend_from_slice(&11_i64.to_le_bytes());
+    valid.extend_from_slice(&22_i64.to_le_bytes());
+    valid.extend_from_slice(&33_i32.to_le_bytes());
+    valid.extend_from_slice(&44_i32.to_le_bytes());
+    assert_eq!(valid.len(), 28);
+
+    for cut in [0_usize, 1, 3, 4, 5, 11, 12, 13, 19, 20, 21, 23, 24, 25, 27] {
+        assert!(matches!(
+            parse_msg_detailed_info(&valid[..cut]),
+            Err(ApiRequestError::Tl(TlError::UnexpectedEof { .. }))
+        ));
+    }
+
+    let mut trailing = valid.clone();
+    trailing.push(0xff);
+    assert_eq!(
+        parse_msg_detailed_info(&trailing).unwrap_err(),
+        ApiRequestError::TrailingBytes(1)
     );
 }
 
