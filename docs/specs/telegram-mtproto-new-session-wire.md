@@ -100,5 +100,10 @@ Git blob identities, commit identities, manual source review, and authored contr
 
 | Requirement / AC | Status | Evidence / reason |
 | --- | --- | --- |
-| R1-R10 | blocked | Spec authored before implementation. |
-| AC-1..AC-6 | blocked | Implementation/desktop sync/bookkeeping not yet applied at this checkpoint. |
+| R1-R10 | passed | Canonical implementation `dc66cc7aae7644530fa03160438df5174809beb4` adds the exact typed parser in `updates.rs@23a09bb6e4e78ef526823cf01d0a207565fb2a3e`, re-export in `lib.rs@7b9c641eabccb7dba8c5a425904b6a676b12d866`, and uses it before salt/replay side effects in both network receive paths at `lib.rs@234c6c0070a1a92218fe5c974658d16d37fee46a`; contracts are authored but not run, no historical request owner is added, and the separate high-level difference responsibility remains blocked rather than claimed complete. |
+| AC-1 | passed | Platform-core implementation is committed at `dc66cc7aae7644530fa03160438df5174809beb4` on the existing checkpoint. |
+| AC-2 | passed | `parse_new_session_created` consumes constructor plus first_msg_id/unique_id/server_salt and rejects wrong/truncated/trailing objects before the existing network salt/replay side effects. |
+| AC-3 | passed | Desktop implementation `23b24ab2db29697071d21eb747f475b2196d891f` synchronizes provider updates/lib/network blobs byte-for-byte to `23a09bb6e4e78ef526823cf01d0a207565fb2a3e`, `7b9c641eabccb7dba8c5a425904b6a676b12d866`, and `234c6c0070a1a92218fe5c974658d16d37fee46a`. |
+| AC-4 | passed | Desktop bookkeeping `2a07441ec1deba938b706d5298ec0b21b98c2a7a` records `TDRP-R9-MTPROTO-NEW-SESSION-WIRE-001` as implemented with `test_execution_evidence=[]`, notes `validation_status=not-run` / `accepted=false`, and `responsibilities_total=67`. |
+| AC-5 | passed | High-level new-session difference recovery is explicitly fail-closed in `telegram-new-session-update-difference-recovery.md`: full/slice TL object decoding and canonical application are missing, so this wire slice does not claim that responsibility complete. |
+| AC-6 | passed | Round 25 performed source/ref/blob reads, authored contracts, and conditional Git writes only; no Actions/status/check query or trigger and no build, lint, validator, generator, test, package, deployment, installation, or runtime acceptance was performed. |
