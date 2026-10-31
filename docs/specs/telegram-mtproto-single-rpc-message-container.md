@@ -104,9 +104,9 @@ Evidence is fixed-U source/blob identity, canonical Git blob identity, authored 
 
 | Requirement / AC | Status | Evidence / reason |
 | --- | --- | --- |
-| R1-R12 | blocked | Implementation and source review for round 23 not yet recorded. |
-| AC-1 | blocked | Implementation not yet recorded. |
-| AC-2 | blocked | Desktop synchronization not yet recorded. |
-| AC-3 | blocked | Ledger/P0/source-closure update not yet recorded. |
-| AC-4 | blocked | Final scope review not yet recorded. |
-| AC-5 | blocked | Final round-23 zero-CI review not yet recorded. |
+| R1-R12 | passed | Source review at platform-core implementation `98a2ff425407725571966a4ed17b1643fba87b4d`: bounded typed `parse_message_container`, 1024-entry cap, minimum/aligned inner-body checks, exact full-buffer consumption, existing MessageIdGuard validation, current-RPC odd-sequence ACK accumulation, current-RPC/current-ping recursive dispatch, no outbound sent-container/request-history owner, and contracts authored but not run. |
+| AC-1 | passed | Canonical blobs: protocol api `14c282bfc20a33446c69a47db4fdd6f0b887348a`, protocol lib `f21d38495e5a7f5c6e2a35f28a633ac6e3433d4b`, network `bab8893bd8a2a0632014d826503a8091cfe64d46`. |
+| AC-2 | passed | Desktop implementation `e8091133b85eb7e368839e6c9b09547620be17c2`; remote provider blobs match the canonical three blob identities. |
+| AC-3 | passed | Desktop ledger/P0/source-closure/evidence commit `b3ed649d1fc8d0ed1af6d0229489df82ecd42a78`; row `TDRP-R9-MTPROTO-SINGLE-RPC-MESSAGE-CONTAINER-001` is implemented with empty execution evidence and records `validation_status=not-run`, `accepted=false`. |
+| AC-4 | passed | Desktop ledger/evidence explicitly retain outbound `wasSent/haveSent/_resendingIds/toSend/_sentContainers`, multi-request fan-out, and `gzip_packed` as open/fail-closed. |
+| AC-5 | passed | Round 23 performed Git/ref/blob/source reads and safe writes only; no Actions/status/check query or trigger and no build, lint, generator, test, package, deployment, installation, or runtime acceptance was performed. |
