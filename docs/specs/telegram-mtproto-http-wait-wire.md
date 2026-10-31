@@ -122,3 +122,16 @@ Round-64 authored-only external contracts SHALL pin exact length 16, offsets `0.
 The wire-only parser remains intentionally separate from `usingHttpWait()` transport selection/scheduling, timeout/retry/backoff, request queues/history, `wasSent/haveSent/_resendingIds/toSend/_sentContainers`, auth-key binding/persistence, `gzip_packed`, and complete difference/differenceSlice decoding/application. The existing ledger responsibility `TDRP-R9-MTPROTO-HTTP-WAIT-WIRE-001` remains the sole row and stays `implemented / validation_status=not-run / accepted=false`; coverage remains `responsibilities_total=97, unknown=16172, unread=16145, omitted=0`.
 
 No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, or runtime acceptance was performed.
+
+
+## Round 64 final source-level compliance
+
+Platform-core spec-first revalidation is commit `63743d4c188402e812e2f9ba9e7a46ea9ba3ff6c`; the full-tree recovery fast-forward is `50f3ef5f748e0008c70f990e8dbd0e3896a66455`. The authored-only external contract is commit `e3c19abe76b58742e80ef97713049b121e5831c1` / blob `71449041d7a7ae60be5b13379b7b8e7f417dfb8f`, and the desktop provider mirror is commit `e556ba8ee47dfad52aeaab37b622b90b92cf87b2` with the same blob.
+
+Source-level disposition remains **no production delta**. Canonical production protocol api/lib/tl blobs remain `ebfb3670b5cd097b9ce288782c7954f5cfe9fc43` / `abab39e42f100972484191f0e52e9edd9b88c6cf` / `89256ab35184b6dc06a095ab34abb9f44e95a264`. The existing `TDRP-R9-MTPROTO-HTTP-WAIT-WIRE-001` responsibility remains `implemented / validation_status=not-run / accepted=false`; executable validation is still intentionally deferred.
+
+The earlier temporary single-file tree at `63743d4c188402e812e2f9ba9e7a46ea9ba3ff6c` was immediately repaired by the non-force fast-forward commit `50f3ef5f748e0008c70f990e8dbd0e3896a66455` using the prior complete tree plus the new spec blob; current branch readback contains the complete repository tree. No force push occurred.
+
+HTTP transport selection/scheduling, timeout/retry/backoff, arbitrary request history, auth-key binding/persistence, gzip, complete difference/differenceSlice decoding/application, broader source/legal closure, Stage-B executable evidence, and independent release ACCEPT remain outside this wire-only closure or open.
+
+No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, or runtime acceptance was performed.
