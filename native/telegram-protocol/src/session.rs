@@ -102,6 +102,10 @@ impl MessageIdGuard {
         Ok(())
     }
 
+    pub fn reset_client_message_id_floor(&mut self) {
+        self.last_client_message_id = None;
+    }
+
     pub fn recent_server_message_ids(&self) -> &BTreeSet<i64> {
         &self.recent_server_message_ids
     }
@@ -143,5 +147,30 @@ impl SessionSequence {
 
     pub fn content_related_count(&self) -> u32 {
         self.content_related_count
+    }
+}
+
+#[cfg(test)]
+mod message_id_recovery_contract_tests {
+    use super::MessageIdGuard;
+
+    #[test]
+    fn trusted_clock_recovery_resets_only_client_floor() {
+        let mut guard = MessageIdGuard::new(4);
+        let first = guard
+            .generate_client_message_id(1_700_000_200, 1)
+            .expect("first client id");
+        let server_id = (1_700_000_100_i64 << 32) | 1;
+        guard
+            .validate_server_message_id(server_id, 1_700_000_100)
+            .expect("server id");
+
+        guard.reset_client_message_id_floor();
+
+        let corrected = guard
+            .generate_client_message_id(1_700_000_100, 1)
+            .expect("corrected client id");
+        assert!(corrected < first);
+        assert!(guard.recent_server_message_ids().contains(&server_id));
     }
 }

@@ -348,9 +348,6 @@ impl EstablishedSession {
                         self.reset_session_state()?;
                         Ok(RpcOutcome::RetryBadMessage { message_id, code })
                     }
-                    Some(BadMessageRecoveryAction::Retry) => {
-                        Ok(RpcOutcome::RetryBadMessage { message_id, code })
-                    }
                     None => Err(NetworkError::BadServerMessage { message_id, code }),
                 }
             },
@@ -377,9 +374,7 @@ impl EstablishedSession {
                     let inner = body
                         .get(body_start..body_end)
                         .ok_or(NetworkError::InvalidServiceMessage)?;
-                    let (now, _) = unix_time()?;
-                    self.message_ids
-                        .validate_server_message_id(message_id, now)?;
+                    self.validate_incoming_message_id(message_id, inner)?;
                     if sequence_number.rem_euclid(2) == 1 {
                         acknowledgements.push(message_id);
                     }
@@ -449,6 +444,7 @@ impl EstablishedSession {
             .ok_or(NetworkError::InvalidSystemClock)?;
         self.server_time =
             i32::try_from(server_seconds).map_err(|_| NetworkError::InvalidSystemClock)?;
+        self.message_ids.reset_client_message_id_floor();
         Ok(())
     }
 
@@ -577,9 +573,6 @@ impl EstablishedSession {
                         self.reset_session_state()?;
                         Ok(ServiceOutcome::RetryBadMessage { message_id, code })
                     }
-                    Some(BadMessageRecoveryAction::Retry) => {
-                        Ok(ServiceOutcome::RetryBadMessage { message_id, code })
-                    }
                     None => Err(NetworkError::BadServerMessage { message_id, code }),
                 }
             }
@@ -605,9 +598,7 @@ impl EstablishedSession {
                     let inner = body
                         .get(body_start..body_end)
                         .ok_or(NetworkError::InvalidServiceMessage)?;
-                    let (now, _) = unix_time()?;
-                    self.message_ids
-                        .validate_server_message_id(message_id, now)?;
+                    self.validate_incoming_message_id(message_id, inner)?;
                     let inner_outcome = self.process_service_body(
                         inner,
                         ping_id,
@@ -649,21 +640,19 @@ enum RpcOutcome {
 enum BadMessageRecoveryAction {
     CorrectTimeAndRetry,
     ResetSessionAndRetry,
-    Retry,
 }
 
 fn bad_message_recovery_action(code: i32) -> Option<BadMessageRecoveryAction> {
     match code {
-        16 | 17 => Some(BadMessageRecoveryAction::CorrectTimeAndRetry),
+        16 | 17 | 64 => Some(BadMessageRecoveryAction::CorrectTimeAndRetry),
         32 | 33 => Some(BadMessageRecoveryAction::ResetSessionAndRetry),
-        64 => Some(BadMessageRecoveryAction::Retry),
         _ => None,
     }
 }
 
 fn direct_bad_message_time_recovery(body: &[u8]) -> bool {
     read_u32_at(body, 0).ok() == Some(BAD_MSG_NOTIFICATION_CONSTRUCTOR)
-        && matches!(read_i32_at(body, 16).ok(), Some(16 | 17))
+        && matches!(read_i32_at(body, 16).ok(), Some(16 | 17 | 64))
 }
 
 fn clock_offset_seconds(server_time: i32) -> Result<i64, NetworkError> {
@@ -711,7 +700,7 @@ pub fn resume_auth_key(
         message_ids: MessageIdGuard::default(),
         sequence: SessionSequence::new(),
         session_id: random_i64()?,
-        clock_offset_seconds: clock_offset_seconds(server_time)?,
+        clock_offset_seconds: 0,
     })
 }
 
@@ -893,7 +882,7 @@ mod recovery_contract_tests {
         );
         assert_eq!(
             bad_message_recovery_action(64),
-            Some(BadMessageRecoveryAction::Retry)
+            Some(BadMessageRecoveryAction::CorrectTimeAndRetry)
         );
         assert_eq!(bad_message_recovery_action(48), None);
         assert_eq!(bad_message_recovery_action(99), None);
@@ -904,7 +893,7 @@ mod recovery_contract_tests {
         assert!(direct_bad_message_time_recovery(&bad_message(16)));
         assert!(direct_bad_message_time_recovery(&bad_message(17)));
         assert!(!direct_bad_message_time_recovery(&bad_message(32)));
-        assert!(!direct_bad_message_time_recovery(&bad_message(64)));
+        assert!(direct_bad_message_time_recovery(&bad_message(64)));
         assert!(!direct_bad_message_time_recovery(&[0_u8; 20]));
         assert!(!direct_bad_message_time_recovery(&[0_u8; 8]));
     }
