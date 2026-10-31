@@ -68,6 +68,27 @@ Do not run build, typecheck, lint, schema validation, generators, unit/contract/
 - AC8: Authored tests remain not-run and acceptance remains false until Stage B executable evidence exists.
 
 
+## Round 36 request-side extension
+
+At live HEAD `5e4a142d6090bcfd233b9913c1dbb16caa999a7b`, the response-side `FutureSalt` / `FutureSalts` typed parser and current-request correlation already exist, but the independently representable fixed-U request `get_future_salts#b921bd04 num:int = FutureSalts` has no canonical exact serializer. The existing network/session owners do not precisely model when to schedule salt refreshes or how to install/rotate future salts across historical/session state, so this extension closes request bytes only and keeps scheduling/salt lifecycle fail-closed.
+
+- R11: The canonical protocol owner SHALL export `GET_FUTURE_SALTS_CONSTRUCTOR = 0xb921bd04`.
+- R12: The canonical protocol owner SHALL expose `build_get_future_salts(num: i32) -> Vec<u8>`.
+- R13: The builder SHALL encode exactly the request constructor followed by `num:int`, little-endian, for exactly 8 bytes.
+- R14: The builder SHALL preserve the complete signed `i32` domain without applying scheduling, range, retry, or salt-lifecycle policy.
+- R15: The request builder and its contracts SHALL remain structurally separate from `parse_future_salts`, `FUTURE_SALTS_CONSTRUCTOR`, and the receive/current-request correlation path.
+- R16: Authored-only request contracts SHALL cover exact layout, a representative value, `i32::MIN` / `i32::MAX`, and request/response-parser separation; they SHALL NOT be executed in Stage A.
+- R17: Exact request serialization SHALL have no socket, session-salt, timer, retry, persistence, request-history, or response-settlement side effects. Live request scheduling and future-salt installation/rotation remain explicit fail-closed scope.
+
+Additional acceptance criteria:
+
+- AC9: Exact `get_future_salts` request serialization is owned by the existing source-neutral `telegram-protocol` owner.
+- AC10: The serializer emits exactly 8 bytes and preserves signed `num:int` without policy transformation.
+- AC11: Request serialization stays separate from `FutureSalts` response parsing/current-request correlation.
+- AC12: Desktop protocol provider sources are synchronized byte-for-byte from canonical sources.
+- AC13: Live salt-refresh scheduling/installation lifecycle remains unclaimed/fail-closed until a precise existing owner can represent it; authored request tests remain not-run and accepted=false.
+
+
 ## Stage-A spec compliance review — 2026-11-01
 
 Implementation commit: `f631d7cc0c1a21db93ab647d3b6dcb29b42cb74e`  
