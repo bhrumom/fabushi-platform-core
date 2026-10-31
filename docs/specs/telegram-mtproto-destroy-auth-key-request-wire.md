@@ -34,3 +34,14 @@ This slice adds only the zero-field request serializer to the existing canonical
 ## Acceptance
 
 Source-level implementation may advance to `implemented / validation_status=not-run / accepted=false`. No build, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses are executed or queried in Stage A.
+
+
+## Round 39 source-level compliance readback
+
+Canonical implementation commit: `8eafd0cc7a84ab9af6b402665670b38f3ad72406`. Desktop synchronization commit: `fe0093d767ad2a12e049b4d0a474c0145d3468ab`. Desktop bookkeeping commit: `36d0f218cf5320d292250ec8beea3a641838f072`.
+
+Remote source readback confirms canonical and desktop provider api/lib blobs are byte-identical at `fbca9b0ebb85d0edd5c01ceea9896d0977294b53` / `ed581d8356375e264fabe85a2e5cccbd9b772f21`. `DESTROY_AUTH_KEY_CONSTRUCTOR=0xd1435160` and public `build_destroy_auth_key()` are present and the authored contract asserts exactly four constructor bytes with no payload.
+
+R1-R5 are satisfied at source/ownership/bookkeeping level. R6 executable validation remains intentionally `not-run`, with ledger `accepted=false`. No auth-key destruction eligibility, remote-result application, local key deletion, persistence, teardown/reconnect, arbitrary sent/resend/container history, gzip, or complete difference lifecycle is claimed.
+
+No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried.
