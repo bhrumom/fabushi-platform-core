@@ -57,3 +57,13 @@ Do not run build, typecheck, lint, schema validation, generators, unit/contract/
 - AC4: No historical request/container semantics or second owner is introduced.
 - AC5: Desktop provider protocol sources are byte-identical to canonical protocol sources after synchronization.
 - AC6: Authored tests remain not-run and acceptance remains false until Stage B executable evidence exists.
+
+## Source-level implementation review
+
+Canonical implementation commit: `5251ab3eacd8035cb8bb86609d76641233dd22eb`. Canonical blobs: protocol api `77b9cc0a7d191ef9f197fb8fd718e29631197ddc`, protocol lib `9229c83fa6b484a5af657ee37f0bd827fecdc28d`. Desktop synchronization commit: `4257fc9c875526c4b49a1f3cfbbeec7cd5a3eb0f`; desktop bookkeeping/evidence commit: `28799f961c18d95e1b5786dce23c312390a535b6`.
+
+- R1-R5: satisfied by source inspection — the protocol owner exports all three fixed-U constructor IDs, typed `RpcDropAnswer`, and `parse_rpc_drop_answer`; Unknown and DroppedRunning are exact zero-field variants; Dropped consumes `msg_id`, `seq_no`, and `bytes`; unknown constructors, truncation, and trailing bytes fail closed.
+- R6-R7: satisfied by source inspection and repository search — no outbound `rpc_drop_answer` builder/call site or historical request/drop mutation was added. The missing canonical historical request lifecycle remains an explicit blocker rather than being synthesized in telegram-network.
+- R8: satisfied by remote blob readback — desktop provider api/lib blobs are byte-identical to canonical api/lib blobs.
+
+Acceptance criteria AC1-AC5 are satisfied at source/implementation level. AC6 remains intentionally **blocked/not-run** until Stage B executable validation. No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried in this review.
