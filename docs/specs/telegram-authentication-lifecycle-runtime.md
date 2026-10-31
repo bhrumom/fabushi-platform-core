@@ -118,6 +118,22 @@ Repository commits and exact blob SHAs are the Stage A evidence. Runtime RPC err
 | AC-4 | implemented / not-run | Desktop checkpoint 169d6cc7798507f0302d6c93fef7deef1a302d28 wires all seven commands through the existing TelegramClientLease and feature.auth chain. |
 | AC-5-AC-6 | implemented / not-run | Test execution evidence remains empty; migration ledger/evidence update is performed in the desktop checkpoint and acceptance remains false. |
 
+## 17A. Composition authority reconciliation (round 17)
+
+Current repository evidence establishes that the shipping desktop Cargo authority is the `source/mahayana/mahayana-rs` workspace in `bhrumom/fabushi-desktop`: the workspace lists `mahayana-telegram` and `providers/telegram-runtime`; `mahayana-telegram/Cargo.toml` depends on `fabushi-telegram-runtime = { path = "../providers/telegram-runtime" }`; and the runtime path-depends on sibling protocol, network, storage, and core crates. The isolated Stage-A desktop checkpoint is a sparse overlay and omits these Cargo/provider files, so that sparse tree alone is not composition authority.
+
+The current desktop migration lineage also contains the later authorization/identity baseline at `bhrumom/fabushi-desktop@d19fc3742b9a2d5076513ec444383d7683a35ea2`: runtime blob `95d27ee01f5cf1da15f595ab54e3660b24321128`, protocol API blob `c383b3ebb1eade1dd1b4eb1686cec04d6856867e`, network blob `520bf4e0e2094e74c878ad1f32f3eb32b6edae32`, and storage blob `84387005dc1d51962980a4cb4c6ce69e0b308695`. That baseline introduced `AuthorizationSnapshot { state, self_user_id }`, persisted canonical self-user identity, resumable MTProto auth-key transport, and live `authorization_snapshot()` handoff. Those responsibilities must be preserved while adding this specification's lifecycle primitives.
+
+Storage has a historical schema-number collision: the identity/transport baseline used schema v3 for encrypted `private_metadata`, while this lifecycle checkpoint independently used schema v3 for encrypted `secure_value`. The fused authority SHALL move to schema v4, contain both encrypted tables, and migrate either recognized v3 shape forward without discarding data or treating one historical shape as proof that the other table exists.
+
+Additional requirements:
+
+- R11: the fused runtime SHALL preserve `authorization_snapshot()`, canonical `self_user_id`, persisted resumable transport, and the single-client lease semantics from the existing desktop baseline.
+- R12: `auth.sentCodeSuccess`, successful password authentication, registration, and login-email success SHALL parse the returned `auth.Authorization` user and settle Ready with its canonical self user id; Ready without canonical identity or resumable transport remains fail-closed.
+- R13: the storage schema SHALL be v4 and support migration from both recognized v3 layouts (`private_metadata`-only and `secure_value`-only), preserving encrypted contents while adding the missing table.
+- R14: the actual desktop Cargo provider path SHALL receive the same fused protocol/network/storage/runtime implementation so the shipping workspace consumes the unique runtime behavior rather than a disconnected parallel copy.
+- R15: integration/migration contracts for composition, identity preservation, lifecycle persistence, and v3-to-v4 compatibility SHALL be authored only; executable evidence remains not-run in Stage A.
+
 ## 18. Stage-A implementation evidence
 
 Canonical platform-core checkpoint: `checkpoint/tdrp-telegram-auth-lifecycle-7457eb1c-r16`.
