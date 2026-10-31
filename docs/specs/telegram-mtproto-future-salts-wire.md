@@ -142,3 +142,16 @@ Source-level findings at live checkpoint `3db5c55a946a466d157e37b95d2fce0eb57065
 - fixed-U `session_private.cpp@13cbc76ec723386027b5b4dcac79999b791c4614` has no dedicated `future_salts` application branch; its adjacent service-message branches act on generated/decoded TL objects. Therefore this nested wire responsibility remains independently owned by the existing source-neutral protocol parser rather than by salt-adoption state.
 
 Disposition: **no production delta**. Add authored-only external contracts for signed 4/4/8 field boundaries, multiple fixed-size vector elements, wrong nested constructor, per-field truncation, impossible count, and trailing bytes. Do not run them in Stage A. The existing ledger row `TDRP-R9-MTPROTO-FUTURE-SALTS-WIRE-001` remains `implemented / validation_status=not-run / accepted=false`.
+
+## Round 59 final source-level compliance
+
+Canonical source inspection confirms the nested `future_salt#0949d9dc` element responsibility is already completely carried by the existing `future_salts#ae500895` parser and shipping network receive path with **no production delta**.
+
+- Canonical production blobs remain api `ebfb3670b5cd097b9ce288782c7954f5cfe9fc43`, tl `89256ab35184b6dc06a095ab34abb9f44e95a264`, lib `abab39e42f100972484191f0e52e9edd9b88c6cf`, network `1fc1b1f69e3e37377400d078f916599e0c7b20bc`.
+- Exact nested element wire shape is constructor 4 + signed fields 4/4/8 = 20 bytes. Count * 20 is checked against remaining bytes before allocation; every nested constructor is checked; fixed-width reads fail closed; strict EOF rejects trailing bytes.
+- Authored-only canonical external contract blob is `0f99a2c99b377920792316de433c2229bc781e60`, mirrored byte-identically in desktop commit `b5891b2907d6ca72fb1a5385f27f29ad4b0e215e`.
+- Desktop bookkeeping/evidence commit is `d8e6d8b9f7ed7e8434759fdaad91b7cfadf38e24`; the existing `TDRP-R9-MTPROTO-FUTURE-SALTS-WIRE-001` row remains `implemented / validation_status=not-run / accepted=false` and coverage remains `97 responsibilities / 16172 unknown / 16145 unread / 0 omitted`.
+- Future-salt adoption/installation/rotation, refresh scheduling, persistence, retry, arbitrary request history/application, gzip, complete difference decoding/application, broader source/legal closure, Stage-B executable evidence and independent release ACCEPT remain outside this wire-only claim or open.
+
+No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation or runtime acceptance was performed.
+
