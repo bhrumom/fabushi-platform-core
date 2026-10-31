@@ -27,6 +27,9 @@ const PONG_CONSTRUCTOR: u32 = 0x3477_73c5;
 const NEW_SESSION_CREATED_CONSTRUCTOR: u32 = 0x9ec2_0908;
 const MESSAGE_CONTAINER_CONSTRUCTOR: u32 = 0x73f1_f8dc;
 const MSG_DETAILED_INFO_CONSTRUCTOR: u32 = 0x276d_3ec6;
+const MSG_NEW_DETAILED_INFO_CONSTRUCTOR: u32 = 0x809d_b6df;
+const MSGS_STATE_INFO_CONSTRUCTOR: u32 = 0x04de_b57d;
+const MSGS_ALL_INFO_CONSTRUCTOR: u32 = 0x8cc0_d131;
 const BAD_SERVER_SALT_CONSTRUCTOR: u32 = 0xedab_447b;
 const BAD_MSG_NOTIFICATION_CONSTRUCTOR: u32 = 0xa7ef_f811;
 const MSGS_ACK_CONSTRUCTOR: u32 = 0x62d6_b459;
@@ -126,6 +129,8 @@ pub enum NetworkError {
         request_message_id: i64,
         first_message_id: i64,
     },
+    #[error("Telegram requested state-driven replay of message {request_message_id} more than once")]
+    StateReconciliationLimit { request_message_id: i64 },
     #[error("Telegram did not return an RPC result before the message limit")]
     RpcTimeout,
 }
@@ -213,7 +218,16 @@ impl EstablishedSession {
             let mut retry_with_new_salt = false;
             let mut retry_bad_message: Option<(i64, i32)> = None;
             let mut retry_new_session: Option<i64> = None;
-            for _ in 0..DEFAULT_MAX_RPC_MESSAGES {
+            let mut retry_state = false;
+            let mut state_query_message_id = None;
+            for message_index in 0..(DEFAULT_MAX_RPC_MESSAGES + DEFAULT_MAX_SERVICE_MESSAGES) {
+                if message_index == DEFAULT_MAX_RPC_MESSAGES {
+                    let state_query =
+                        fabushi_telegram_protocol::build_msgs_state_req(&[request_message_id])
+                            .map_err(|_| NetworkError::InvalidServiceMessage)?;
+                    state_query_message_id =
+                        Some(self.send_encrypted_message(&state_query, false)?);
+                }
                 let payload = self.transport.receive_payload()?;
                 let envelope = EncryptedEnvelope::from_bytes(&payload)?;
                 let response = decrypt_message(
@@ -230,6 +244,7 @@ impl EstablishedSession {
                 let outcome = self.scan_rpc_body(
                     &response.body,
                     request_message_id,
+                    state_query_message_id,
                     response.message_id,
                     &mut acknowledgements,
                 )?;
@@ -250,6 +265,10 @@ impl EstablishedSession {
                         retry_new_session = Some(first_message_id);
                         break;
                     }
+                    RpcOutcome::RetryState => {
+                        retry_state = true;
+                        break;
+                    }
                     RpcOutcome::Continue => {}
                 }
             }
@@ -267,6 +286,12 @@ impl EstablishedSession {
                     continue;
                 }
                 return Err(NetworkError::BadServerMessage { message_id, code });
+            }
+            if retry_state {
+                if attempt == 0 {
+                    continue;
+                }
+                return Err(NetworkError::StateReconciliationLimit { request_message_id });
             }
             if !(retry_with_new_salt && attempt == 0) {
                 return Err(NetworkError::RpcTimeout);
@@ -303,10 +328,32 @@ impl EstablishedSession {
         Ok(())
     }
 
+    fn reconcile_detailed_answer(
+        &mut self,
+        answer_message_id: i64,
+        acknowledgements: &mut Vec<i64>,
+    ) -> Result<(), NetworkError> {
+        if self
+            .message_ids
+            .recent_server_message_ids()
+            .contains(&answer_message_id)
+        {
+            if !acknowledgements.contains(&answer_message_id) {
+                acknowledgements.push(answer_message_id);
+            }
+        } else {
+            let resend = fabushi_telegram_protocol::build_msg_resend_req(&[answer_message_id])
+                .map_err(|_| NetworkError::InvalidServiceMessage)?;
+            self.send_encrypted_message(&resend, false)?;
+        }
+        Ok(())
+    }
+
     fn scan_rpc_body(
         &mut self,
         body: &[u8],
         request_message_id: i64,
+        state_query_message_id: Option<i64>,
         response_message_id: i64,
         acknowledgements: &mut Vec<i64>,
     ) -> Result<RpcOutcome, NetworkError> {
@@ -346,14 +393,46 @@ impl EstablishedSession {
                     Ok(RpcOutcome::Continue)
                 }
             }
+            MSGS_STATE_INFO_CONSTRUCTOR => {
+                let info = fabushi_telegram_protocol::parse_msgs_state_info(body)
+                    .map_err(|_| NetworkError::InvalidServiceMessage)?;
+                if state_query_message_id != Some(info.request_message_id) {
+                    return Ok(RpcOutcome::Continue);
+                }
+                let [state] = info.states.as_slice() else {
+                    return Err(NetworkError::InvalidServiceMessage);
+                };
+                if request_state_requires_resend(*state) {
+                    Ok(RpcOutcome::RetryState)
+                } else {
+                    Ok(RpcOutcome::Continue)
+                }
+            }
+            MSGS_ALL_INFO_CONSTRUCTOR => {
+                let info = fabushi_telegram_protocol::parse_msgs_all_info(body)
+                    .map_err(|_| NetworkError::InvalidServiceMessage)?;
+                if state_reconciliation_requires_resend(
+                    &info.message_ids,
+                    &info.states,
+                    request_message_id,
+                ) == Some(true)
+                {
+                    Ok(RpcOutcome::RetryState)
+                } else {
+                    Ok(RpcOutcome::Continue)
+                }
+            }
             MSG_DETAILED_INFO_CONSTRUCTOR => {
                 let sent_message_id = read_i64_at(body, 4)?;
                 let answer_message_id = read_i64_at(body, 12)?;
                 if detailed_info_matches_request(sent_message_id, request_message_id) {
-                    let resend = fabushi_telegram_protocol::build_msg_resend_req(&[answer_message_id])
-                        .map_err(|_| NetworkError::InvalidServiceMessage)?;
-                    self.send_encrypted_message(&resend, false)?;
+                    self.reconcile_detailed_answer(answer_message_id, acknowledgements)?;
                 }
+                Ok(RpcOutcome::Continue)
+            }
+            MSG_NEW_DETAILED_INFO_CONSTRUCTOR => {
+                let answer_message_id = read_i64_at(body, 4)?;
+                self.reconcile_detailed_answer(answer_message_id, acknowledgements)?;
                 Ok(RpcOutcome::Continue)
             }
             BAD_SERVER_SALT_CONSTRUCTOR => {
@@ -416,6 +495,7 @@ impl EstablishedSession {
                     let inner_outcome = self.scan_rpc_body(
                         inner,
                         request_message_id,
+                        state_query_message_id,
                         message_id,
                         acknowledgements,
                     )?;
@@ -669,6 +749,7 @@ enum RpcOutcome {
     NewSalt,
     RetryBadMessage { message_id: i64, code: i32 },
     RetryNewSession { first_message_id: i64 },
+    RetryState,
     Continue,
 }
 
@@ -684,6 +765,21 @@ fn new_session_requires_replay(request_message_id: i64, first_message_id: i64) -
 
 fn detailed_info_matches_request(sent_message_id: i64, request_message_id: i64) -> bool {
     sent_message_id == request_message_id
+}
+
+fn request_state_requires_resend(state: u8) -> bool {
+    (state & 0x07) != 0x04
+}
+
+fn state_reconciliation_requires_resend(
+    message_ids: &[i64],
+    states: &[u8],
+    request_message_id: i64,
+) -> Option<bool> {
+    message_ids
+        .iter()
+        .position(|message_id| *message_id == request_message_id)
+        .map(|index| request_state_requires_resend(states[index]))
 }
 
 fn bad_message_recovery_action(code: i32) -> Option<BadMessageRecoveryAction> {
@@ -894,7 +990,8 @@ fn read_i64_at(input: &[u8], offset: usize) -> Result<i64, NetworkError> {
 mod recovery_contract_tests {
     use super::{
         bad_message_recovery_action, direct_bad_message_time_recovery,
-        detailed_info_matches_request, new_session_requires_replay, BadMessageRecoveryAction,
+        detailed_info_matches_request, new_session_requires_replay, request_state_requires_resend,
+        state_reconciliation_requires_resend, BadMessageRecoveryAction,
         BAD_MSG_NOTIFICATION_CONSTRUCTOR,
     };
 
@@ -945,6 +1042,34 @@ mod recovery_contract_tests {
         assert!(detailed_info_matches_request(123, 123));
         assert!(!detailed_info_matches_request(122, 123));
         assert!(!detailed_info_matches_request(124, 123));
+    }
+
+    #[test]
+    fn fixed_u_message_state_low_bits_drive_bounded_resend() {
+        assert!(request_state_requires_resend(0x00));
+        assert!(request_state_requires_resend(0x01));
+        assert!(request_state_requires_resend(0x03));
+        assert!(!request_state_requires_resend(0x04));
+        assert!(!request_state_requires_resend(0x0c));
+        assert!(request_state_requires_resend(0x05));
+    }
+
+    #[test]
+    fn all_info_reconciles_only_the_current_outstanding_rpc() {
+        let ids = [100_i64, 200_i64];
+        let states = [0x04_u8, 0x01_u8];
+        assert_eq!(
+            state_reconciliation_requires_resend(&ids, &states, 100),
+            Some(false)
+        );
+        assert_eq!(
+            state_reconciliation_requires_resend(&ids, &states, 200),
+            Some(true)
+        );
+        assert_eq!(
+            state_reconciliation_requires_resend(&ids, &states, 300),
+            None
+        );
     }
 
     #[test]

@@ -21,6 +21,9 @@ pub const USER_EMPTY_CONSTRUCTOR: u32 = 0xd3bc_4b7a;
 pub const USER_CONSTRUCTOR: u32 = 0xb1b8_cc83;
 pub const MSGS_ACK_CONSTRUCTOR: u32 = 0x62d6_b459;
 pub const MSG_RESEND_REQ_CONSTRUCTOR: u32 = 0x7d86_1a08;
+pub const MSGS_STATE_REQ_CONSTRUCTOR: u32 = 0xda69_fb52;
+pub const MSGS_STATE_INFO_CONSTRUCTOR: u32 = 0x04de_b57d;
+pub const MSGS_ALL_INFO_CONSTRUCTOR: u32 = 0x8cc0_d131;
 pub const CONFIG_CONSTRUCTOR: u32 = 0xcc1a_241e;
 pub const DC_OPTION_CONSTRUCTOR: u32 = 0x18b7_a10d;
 pub const AUTH_SENT_CODE_CONSTRUCTOR: u32 = 0x5e00_2502;
@@ -164,6 +167,18 @@ pub struct AccountPasswordState {
     pub srp: Option<PasswordSrpParameters>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MsgsStateInfo {
+    pub request_message_id: i64,
+    pub states: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MsgsAllInfo {
+    pub message_ids: Vec<i64>,
+    pub states: Vec<u8>,
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ApiRequestError {
     #[error("Telegram api_id must be positive")]
@@ -176,6 +191,8 @@ pub enum ApiRequestError {
     InvalidPhoneCode,
     #[error("TL encoding failed: {0}")]
     Tl(#[from] TlError),
+    #[error("Telegram MTProto message-state payload is malformed")]
+    InvalidMessageState,
     #[error("Telegram Config contains an invalid IP address: {0}")]
     InvalidIpAddress(String),
     #[error("Telegram Config contains an invalid port: {0}")]
@@ -372,6 +389,60 @@ pub fn build_msg_resend_req(message_ids: &[i64]) -> Result<Vec<u8>, ApiRequestEr
         writer.write_i64(*message_id);
     }
     Ok(writer.into_bytes())
+}
+
+pub fn build_msgs_state_req(message_ids: &[i64]) -> Result<Vec<u8>, ApiRequestError> {
+    let mut writer = TlWriter::new();
+    writer.write_u32(MSGS_STATE_REQ_CONSTRUCTOR);
+    writer.write_vector_length(message_ids.len())?;
+    for message_id in message_ids {
+        writer.write_i64(*message_id);
+    }
+    Ok(writer.into_bytes())
+}
+
+pub fn parse_msgs_state_info(input: &[u8]) -> Result<MsgsStateInfo, ApiRequestError> {
+    let mut reader = TlReader::new(input);
+    let constructor = reader.read_u32()?;
+    if constructor != MSGS_STATE_INFO_CONSTRUCTOR {
+        return Err(ApiRequestError::Tl(TlError::UnexpectedConstructor {
+            expected: MSGS_STATE_INFO_CONSTRUCTOR,
+            actual: constructor,
+        }));
+    }
+    let request_message_id = reader.read_i64()?;
+    let states = reader.read_bytes()?.to_vec();
+    if !reader.is_finished() {
+        return Err(ApiRequestError::InvalidMessageState);
+    }
+    Ok(MsgsStateInfo {
+        request_message_id,
+        states,
+    })
+}
+
+pub fn parse_msgs_all_info(input: &[u8]) -> Result<MsgsAllInfo, ApiRequestError> {
+    let mut reader = TlReader::new(input);
+    let constructor = reader.read_u32()?;
+    if constructor != MSGS_ALL_INFO_CONSTRUCTOR {
+        return Err(ApiRequestError::Tl(TlError::UnexpectedConstructor {
+            expected: MSGS_ALL_INFO_CONSTRUCTOR,
+            actual: constructor,
+        }));
+    }
+    let count = reader.read_vector_length()?;
+    let mut message_ids = Vec::with_capacity(count);
+    for _ in 0..count {
+        message_ids.push(reader.read_i64()?);
+    }
+    let states = reader.read_bytes()?.to_vec();
+    if !reader.is_finished() || states.len() != message_ids.len() {
+        return Err(ApiRequestError::InvalidMessageState);
+    }
+    Ok(MsgsAllInfo {
+        message_ids,
+        states,
+    })
 }
 
 /// Parses the stable prefix of Telegram `Config` through `dc_options`.
@@ -906,7 +977,12 @@ mod authorization_identity_contract_tests {
 
 #[cfg(test)]
 mod mtproto_service_builder_contract_tests {
-    use super::{build_msg_resend_req, MSG_RESEND_REQ_CONSTRUCTOR};
+    use super::{
+        build_msg_resend_req, build_msgs_state_req, parse_msgs_all_info, parse_msgs_state_info,
+        MSGS_ALL_INFO_CONSTRUCTOR, MSGS_STATE_INFO_CONSTRUCTOR, MSGS_STATE_REQ_CONSTRUCTOR,
+        MSG_RESEND_REQ_CONSTRUCTOR,
+    };
+    use crate::tl::TlWriter;
 
     #[test]
     fn msg_resend_req_encodes_fixed_u_constructor_and_single_answer_id() {
@@ -916,5 +992,44 @@ mod mtproto_service_builder_contract_tests {
         assert_eq!(&encoded[4..8], &0x1cb5_c415_u32.to_le_bytes());
         assert_eq!(&encoded[8..12], &1_i32.to_le_bytes());
         assert_eq!(&encoded[12..20], &answer_id.to_le_bytes());
+    }
+
+    #[test]
+    fn msgs_state_req_encodes_fixed_u_constructor_and_current_request_id() {
+        let request_id = 0x1112_1314_1516_1718_i64;
+        let encoded = build_msgs_state_req(&[request_id]).expect("encode state request");
+        assert_eq!(&encoded[0..4], &MSGS_STATE_REQ_CONSTRUCTOR.to_le_bytes());
+        assert_eq!(&encoded[4..8], &0x1cb5_c415_u32.to_le_bytes());
+        assert_eq!(&encoded[8..12], &1_i32.to_le_bytes());
+        assert_eq!(&encoded[12..20], &request_id.to_le_bytes());
+    }
+
+    #[test]
+    fn msgs_state_info_parses_binary_state_bytes() {
+        let query_id = 0x2122_2324_2526_2728_i64;
+        let mut writer = TlWriter::new();
+        writer.write_u32(MSGS_STATE_INFO_CONSTRUCTOR);
+        writer.write_i64(query_id);
+        writer.write_bytes(&[0x04]).expect("write state byte");
+
+        let parsed = parse_msgs_state_info(writer.as_slice()).expect("parse state info");
+        assert_eq!(parsed.request_message_id, query_id);
+        assert_eq!(parsed.states, vec![0x04]);
+    }
+
+    #[test]
+    fn msgs_all_info_requires_one_state_byte_per_message_id() {
+        let first = 0x3132_3334_3536_3738_i64;
+        let second = 0x4142_4344_4546_4748_i64;
+        let mut writer = TlWriter::new();
+        writer.write_u32(MSGS_ALL_INFO_CONSTRUCTOR);
+        writer.write_vector_length(2).expect("write ids vector");
+        writer.write_i64(first);
+        writer.write_i64(second);
+        writer.write_bytes(&[0x04, 0x01]).expect("write state bytes");
+
+        let parsed = parse_msgs_all_info(writer.as_slice()).expect("parse all info");
+        assert_eq!(parsed.message_ids, vec![first, second]);
+        assert_eq!(parsed.states, vec![0x04, 0x01]);
     }
 }
