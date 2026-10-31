@@ -3370,3 +3370,52 @@ fn new_session_created_fails_closed_at_every_fixed_u_boundary_and_strict_eof() {
         fabushi_telegram_protocol::parse_new_session_created(&trailing).is_err()
     );
 }
+
+
+#[test]
+fn pong_preserves_exact_fixed_u_wire_boundaries_and_signed_fields() {
+    let constructor = fabushi_telegram_protocol::PONG_CONSTRUCTOR;
+    let message_id = i64::MIN;
+    let ping_id = i64::MAX;
+
+    let mut encoded = TlWriter::new();
+    encoded.write_u32(constructor);
+    encoded.write_i64(message_id);
+    encoded.write_i64(ping_id);
+    let bytes = encoded.into_bytes();
+
+    assert_eq!(bytes.len(), 20);
+    assert_eq!(&bytes[0..4], &constructor.to_le_bytes());
+    assert_eq!(&bytes[4..12], &message_id.to_le_bytes());
+    assert_eq!(&bytes[12..20], &ping_id.to_le_bytes());
+
+    assert_eq!(
+        fabushi_telegram_protocol::parse_pong(&bytes).unwrap(),
+        fabushi_telegram_protocol::Pong {
+            message_id,
+            ping_id,
+        }
+    );
+}
+
+#[test]
+fn pong_fails_closed_at_every_fixed_u_boundary_and_strict_eof() {
+    let mut encoded = TlWriter::new();
+    encoded.write_u32(fabushi_telegram_protocol::PONG_CONSTRUCTOR);
+    encoded.write_i64(i64::MIN);
+    encoded.write_i64(i64::MAX);
+    let exact = encoded.into_bytes();
+    assert_eq!(exact.len(), 20);
+
+    for cut in 0..exact.len() {
+        assert!(fabushi_telegram_protocol::parse_pong(&exact[..cut]).is_err());
+    }
+
+    let mut wrong_constructor = exact.clone();
+    wrong_constructor[0..4].copy_from_slice(&0_u32.to_le_bytes());
+    assert!(fabushi_telegram_protocol::parse_pong(&wrong_constructor).is_err());
+
+    let mut trailing = exact;
+    trailing.push(0);
+    assert!(fabushi_telegram_protocol::parse_pong(&trailing).is_err());
+}
