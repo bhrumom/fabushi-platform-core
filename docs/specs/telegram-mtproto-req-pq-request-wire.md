@@ -34,3 +34,14 @@ This slice adds only the exact `req_pq` TL request serializer to the existing ca
 ## Acceptance
 
 Source-level implementation may advance to `implemented / validation_status=not-run / accepted=false`. No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses are executed or queried in Stage A.
+
+## Round 40 source-level compliance readback
+
+Canonical implementation commit: `48b8dcb9fc7d6f7a79c1ccdce59041493a7a3b7a`. Desktop synchronization commit: `9e3065eddd2d0497dfb4ea2ed7a38d4ee7acb13f`. Desktop bookkeeping commit: `c86b437a5f574c7be81e02dba0a08aa0193a6688`.
+
+Remote source readback confirms canonical and desktop provider api/lib blobs are byte-identical at `54ab072495a4f8f1eca322a7f8f46c5dcd4396ee` / `8df4760c6bf6dbeeba3e8d8b72232bac6a410ff0`. `REQ_PQ_CONSTRUCTOR=0x60469778`, public `build_req_pq(nonce:&[u8;16])`, raw `write_i128_bytes` serialization, and both authored exact-layout/raw-nonce contracts are present. Ledger `TDRP-R9-MTPROTO-REQ-PQ-REQUEST-WIRE-001` is `implemented / validation_status=not-run / accepted=false` with `responsibilities_total=81`.
+
+R1-R5 are satisfied at source/ownership/bookkeeping level. R6 executable validation remains intentionally `not-run`. Live connection-probe scheduling/transport racing, nonce generation, not-secure packet/message-id construction, send/retry/timeout, response correlation, `req_pq_multi`, live ResPQ/auth-key handshake integration, arbitrary sent/resend/container history, gzip, complete difference lifecycle, broader source/legal closure and independent release ACCEPT remain open/fail-closed.
+
+No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried.
+
