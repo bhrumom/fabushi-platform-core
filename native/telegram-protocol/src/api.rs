@@ -26,6 +26,7 @@ pub const RPC_RESULT_CONSTRUCTOR: u32 = 0xf35c_6d01;
 pub const RPC_ANSWER_UNKNOWN_CONSTRUCTOR: u32 = 0x5e2a_d36e;
 pub const RPC_ANSWER_DROPPED_RUNNING_CONSTRUCTOR: u32 = 0xcd78_e586;
 pub const RPC_ANSWER_DROPPED_CONSTRUCTOR: u32 = 0xa43a_d8b7;
+pub const DESTROY_SESSION_CONSTRUCTOR: u32 = 0xe751_2126;
 pub const DESTROY_SESSION_OK_CONSTRUCTOR: u32 = 0xe220_45fc;
 pub const DESTROY_SESSION_NONE_CONSTRUCTOR: u32 = 0x62d3_50c9;
 pub const HTTP_WAIT_CONSTRUCTOR: u32 = 0x9299_359f;
@@ -528,6 +529,13 @@ pub fn build_ping_delay_disconnect(ping_id: i64, disconnect_delay: i32) -> Vec<u
     writer.write_u32(PING_DELAY_DISCONNECT_CONSTRUCTOR);
     writer.write_i64(ping_id);
     writer.write_i32(disconnect_delay);
+    writer.into_bytes()
+}
+
+pub fn build_destroy_session(session_id: i64) -> Vec<u8> {
+    let mut writer = TlWriter::new();
+    writer.write_u32(DESTROY_SESSION_CONSTRUCTOR);
+    writer.write_i64(session_id);
     writer.into_bytes()
 }
 
@@ -1517,7 +1525,8 @@ mod authorization_identity_contract_tests {
 #[cfg(test)]
 mod mtproto_service_builder_contract_tests {
     use super::{
-        build_msg_resend_req, build_msgs_ack, build_msgs_state_req, build_ping_delay_disconnect,
+        build_destroy_session, build_msg_resend_req, build_msgs_ack, build_msgs_state_req,
+        build_ping_delay_disconnect,
         parse_bad_msg_notification,
         parse_bad_server_salt,
         parse_future_salts, parse_msg_detailed_info, parse_msg_new_detailed_info, parse_msgs_ack,
@@ -1525,7 +1534,8 @@ mod mtproto_service_builder_contract_tests {
         parse_http_wait, parse_ip_port, parse_message_container, parse_msgs_all_info,
         parse_msgs_state_info, parse_pong, parse_rpc_drop_answer, parse_rpc_result,
         AccessPointRule, IpPort, BAD_MSG_NOTIFICATION_CONSTRUCTOR, BAD_SERVER_SALT_CONSTRUCTOR,
-        DESTROY_SESSION_NONE_CONSTRUCTOR, DESTROY_SESSION_OK_CONSTRUCTOR, DestroySessionResult,
+        DESTROY_SESSION_CONSTRUCTOR, DESTROY_SESSION_NONE_CONSTRUCTOR,
+        DESTROY_SESSION_OK_CONSTRUCTOR, DestroySessionResult,
         ACCESS_POINT_RULE_CONSTRUCTOR, FUTURE_SALTS_CONSTRUCTOR, HELP_CONFIG_SIMPLE_CONSTRUCTOR,
         HTTP_WAIT_CONSTRUCTOR, IP_PORT_CONSTRUCTOR, IP_PORT_SECRET_CONSTRUCTOR, RpcDropAnswer,
         RPC_ANSWER_DROPPED_CONSTRUCTOR,
@@ -1580,6 +1590,27 @@ mod mtproto_service_builder_contract_tests {
         expected.extend_from_slice(&i64::MAX.to_le_bytes());
         expected.extend_from_slice(&i32::MAX.to_le_bytes());
         assert_eq!(encoded, expected);
+    }
+
+    #[test]
+    fn destroy_session_serializes_fixed_u_request_exactly() {
+        let session_id = 0x0102_0304_0506_0708_i64;
+        let encoded = build_destroy_session(session_id);
+        assert_eq!(encoded.len(), 12);
+        assert_eq!(&encoded[0..4], &DESTROY_SESSION_CONSTRUCTOR.to_le_bytes());
+        assert_eq!(&encoded[4..12], &session_id.to_le_bytes());
+    }
+
+    #[test]
+    fn destroy_session_preserves_signed_boundaries_and_stays_separate_from_result_parser() {
+        for session_id in [i64::MIN, i64::MAX] {
+            let encoded = build_destroy_session(session_id);
+            let mut expected = Vec::new();
+            expected.extend_from_slice(&DESTROY_SESSION_CONSTRUCTOR.to_le_bytes());
+            expected.extend_from_slice(&session_id.to_le_bytes());
+            assert_eq!(encoded, expected);
+            assert!(parse_destroy_session_result(&encoded).is_err());
+        }
     }
 
     #[test]
