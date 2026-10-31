@@ -649,14 +649,14 @@ pub fn parse_http_wait(input: &[u8]) -> Result<HttpWait, ApiRequestError> {
 }
 
 fn read_ip_port(reader: &mut TlReader<'_>) -> Result<IpPort, ApiRequestError> {
-    let constructor = reader.read_u32()?;
-    let ipv4 = reader.read_i32()?;
-    let port = reader.read_i32()?;
-    match constructor {
-        IP_PORT_CONSTRUCTOR => Ok(IpPort::Plain { ipv4, port }),
+    match reader.read_u32()? {
+        IP_PORT_CONSTRUCTOR => Ok(IpPort::Plain {
+            ipv4: reader.read_i32()?,
+            port: reader.read_i32()?,
+        }),
         IP_PORT_SECRET_CONSTRUCTOR => Ok(IpPort::Secret {
-            ipv4,
-            port,
+            ipv4: reader.read_i32()?,
+            port: reader.read_i32()?,
             secret: reader.read_bytes()?.to_vec(),
         }),
         actual => Err(ApiRequestError::UnexpectedIpPortConstructor(actual)),
