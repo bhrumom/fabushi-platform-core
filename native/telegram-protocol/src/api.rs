@@ -19,6 +19,7 @@ pub const AUTH_AUTHORIZATION_CONSTRUCTOR: u32 = 0x2ea2_c0d4;
 pub const AUTH_AUTHORIZATION_SIGN_UP_REQUIRED_CONSTRUCTOR: u32 = 0x4474_7e9a;
 pub const USER_EMPTY_CONSTRUCTOR: u32 = 0xd3bc_4b7a;
 pub const USER_CONSTRUCTOR: u32 = 0xb1b8_cc83;
+pub const REQ_PQ_CONSTRUCTOR: u32 = 0x6046_9778;
 pub const MSGS_ACK_CONSTRUCTOR: u32 = 0x62d6_b459;
 pub const PONG_CONSTRUCTOR: u32 = 0x3477_73c5;
 pub const PING_CONSTRUCTOR: u32 = 0x7abe_77ec;
@@ -526,6 +527,13 @@ pub fn build_auth_check_password(proof: &PasswordSrpProof) -> Result<Vec<u8>, Ap
     output.extend_from_slice(&AUTH_CHECK_PASSWORD_CONSTRUCTOR.to_le_bytes());
     output.extend_from_slice(&encoded_proof);
     Ok(output)
+}
+
+pub fn build_req_pq(nonce: &[u8; 16]) -> Vec<u8> {
+    let mut writer = TlWriter::new();
+    writer.write_u32(REQ_PQ_CONSTRUCTOR);
+    writer.write_i128_bytes(nonce);
+    writer.into_bytes()
 }
 
 pub fn build_rpc_drop_answer(req_msg_id: i64) -> Vec<u8> {
@@ -1622,6 +1630,29 @@ mod mtproto_service_builder_contract_tests {
         expected.extend_from_slice(&i64::MAX.to_le_bytes());
         expected.extend_from_slice(&i32::MAX.to_le_bytes());
         assert_eq!(encoded, expected);
+    }
+
+    #[test]
+    fn req_pq_serializes_fixed_u_nonce_exactly() {
+        let nonce = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+            0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+        ];
+        let encoded = build_req_pq(&nonce);
+        assert_eq!(encoded.len(), 20);
+        assert_eq!(&encoded[0..4], &REQ_PQ_CONSTRUCTOR.to_le_bytes());
+        assert_eq!(&encoded[4..20], &nonce);
+    }
+
+    #[test]
+    fn req_pq_preserves_raw_int128_bytes_without_tl_bytes_framing() {
+        for nonce in [[0_u8; 16], [0xff_u8; 16]] {
+            let encoded = build_req_pq(&nonce);
+            let mut expected = Vec::with_capacity(20);
+            expected.extend_from_slice(&REQ_PQ_CONSTRUCTOR.to_le_bytes());
+            expected.extend_from_slice(&nonce);
+            assert_eq!(encoded, expected);
+        }
     }
 
     #[test]
