@@ -136,5 +136,19 @@ No executable evidence is produced.
 
 | Requirement / AC | Status | Evidence / reason |
 | --- | --- | --- |
-| R1-R9 | pending | Spec committed before implementation. |
-| AC-1-AC-6 | pending | Source-level compliance review follows implementation; executable validation remains deferred to Stage B. |
+| R1-R9 | passed | Source readback at canonical implementation commit `274bdb92bc7e4d5755bb87fd4996398ee6cf768b` confirms constructor-first union discrimination in `handshake.rs@ed9eda7732f4753b442de98ebf510b8a7558b823`, the existing `AuthKeyHandshake::receive_server_dh` consumer remains authoritative, and authored-only contracts are in `protocol_contract.rs@a19c4a14d113e6c82fe3cc801f1764c555f26f76`. Desktop sync `000d38bd2db19052766ccf8062eea4a6fb93c7eb` mirrors the contract blob without adding a second handshake core. No executable validation was run. |
+| AC-1-AC-5 | passed | Constructor-first behavior, exact OK/FAIL payload handling, nonce binding, no-trailing behavior, unchanged owner boundary and authored desktop/canonical contract surfaces are present in source and remotely readable. |
+| AC-6 | passed / not-run | Desktop bookkeeping commit `bf44f47c1e78d3ec7d9431fe3f7a3ff01609f3cb` records `TDRP-R9-MTPROTO-SERVER-DH-PARAMS-WIRE-001` as `implemented / validation_status=not-run / accepted=false`; coverage is `responsibilities_total=87`, `unknown=16172`, `unread=16145`, `omitted=0`. |
+
+
+## 18. Round 46 Stage-A implementation evidence
+
+- spec-first commit: `9a6b687e043bae9f7f40e776ce1d5ec98220a168`
+- canonical implementation commit: `274bdb92bc7e4d5755bb87fd4996398ee6cf768b`
+- canonical handshake: `native/telegram-protocol/src/handshake.rs@ed9eda7732f4753b442de98ebf510b8a7558b823`
+- canonical authored contracts: `native/telegram-protocol/tests/protocol_contract.rs@a19c4a14d113e6c82fe3cc801f1764c555f26f76`
+- canonical public facade remains: `native/telegram-protocol/src/lib.rs@abab39e42f100972484191f0e52e9edd9b88c6cf`
+- desktop authored-contract sync: `bhrumom/fabushi-desktop@000d38bd2db19052766ccf8062eea4a6fb93c7eb`
+- desktop ledger/P0/source-closure evidence: `bhrumom/fabushi-desktop@bf44f47c1e78d3ec7d9431fe3f7a3ff01609f3cb`
+
+Executable build/test/validator/CI evidence is intentionally absent in Stage A. Auth-key destruction/binding/persistence/teardown, connection scheduling/racing/send lifecycle, arbitrary multi-request history, gzip, complete updates difference decoding/application, broader source/legal closure and independent release ACCEPT remain outside this responsibility and open/fail-closed.
