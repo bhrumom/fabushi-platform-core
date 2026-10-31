@@ -26,7 +26,6 @@ const PING_CONSTRUCTOR: u32 = 0x7abe_77ec;
 const PONG_CONSTRUCTOR: u32 = 0x3477_73c5;
 const MSGS_STATE_INFO_CONSTRUCTOR: u32 = 0x04de_b57d;
 const MSGS_ALL_INFO_CONSTRUCTOR: u32 = 0x8cc0_d131;
-const BAD_SERVER_SALT_CONSTRUCTOR: u32 = 0xedab_447b;
 const BAD_MSG_NOTIFICATION_CONSTRUCTOR: u32 = 0xa7ef_f811;
 const MSGS_ACK_CONSTRUCTOR: u32 = 0x62d6_b459;
 const RPC_RESULT_CONSTRUCTOR: u32 = 0xf35c_6d01;
@@ -446,16 +445,19 @@ impl EstablishedSession {
                 self.reconcile_detailed_answer(info.answer_message_id, acknowledgements)?;
                 Ok(RpcOutcome::Continue)
             }
-            BAD_SERVER_SALT_CONSTRUCTOR => {
-                let message_id = read_i64_at(body, 4)?;
-                let error_code = read_i32_at(body, 16)?;
-                if message_id != request_message_id {
+            fabushi_telegram_protocol::BAD_SERVER_SALT_CONSTRUCTOR => {
+                let notification = fabushi_telegram_protocol::parse_bad_server_salt(body)
+                    .map_err(|_| NetworkError::InvalidServiceMessage)?;
+                if !bad_server_salt_matches_request(
+                    notification.bad_message_id,
+                    request_message_id,
+                ) {
                     return Err(NetworkError::BadServerMessage {
-                        message_id,
-                        code: error_code,
+                        message_id: notification.bad_message_id,
+                        code: notification.error_code,
                     });
                 }
-                self.server_salt = read_i64_at(body, 20)?;
+                self.server_salt = notification.new_server_salt;
                 Ok(RpcOutcome::NewSalt)
             }
             BAD_MSG_NOTIFICATION_CONSTRUCTOR => {
@@ -657,16 +659,19 @@ impl EstablishedSession {
                 self.server_salt = new_session.server_salt;
                 Ok(ServiceOutcome::Continue)
             }
-            BAD_SERVER_SALT_CONSTRUCTOR => {
-                let message_id = read_i64_at(body, 4)?;
-                let error_code = read_i32_at(body, 16)?;
-                if message_id != request_message_id {
+            fabushi_telegram_protocol::BAD_SERVER_SALT_CONSTRUCTOR => {
+                let notification = fabushi_telegram_protocol::parse_bad_server_salt(body)
+                    .map_err(|_| NetworkError::InvalidServiceMessage)?;
+                if !bad_server_salt_matches_request(
+                    notification.bad_message_id,
+                    request_message_id,
+                ) {
                     return Err(NetworkError::BadServerMessage {
-                        message_id,
-                        code: error_code,
+                        message_id: notification.bad_message_id,
+                        code: notification.error_code,
                     });
                 }
-                self.server_salt = read_i64_at(body, 20)?;
+                self.server_salt = notification.new_server_salt;
                 Ok(ServiceOutcome::NewSalt)
             }
             BAD_MSG_NOTIFICATION_CONSTRUCTOR => {
@@ -776,6 +781,13 @@ fn rpc_result_matches_request(
 }
 
 fn future_salts_matches_request(
+    response_request_message_id: i64,
+    request_message_id: i64,
+) -> bool {
+    response_request_message_id == request_message_id
+}
+
+fn bad_server_salt_matches_request(
     response_request_message_id: i64,
     request_message_id: i64,
 ) -> bool {
@@ -1005,7 +1017,7 @@ fn read_i64_at(input: &[u8], offset: usize) -> Result<i64, NetworkError> {
 mod recovery_contract_tests {
     use super::{
         acknowledgement_mentions_request, bad_message_recovery_action,
-        contained_message_requires_ack,
+        bad_server_salt_matches_request, contained_message_requires_ack,
         direct_bad_message_time_recovery, detailed_info_matches_request,
         future_salts_matches_request, new_session_requires_replay, pong_matches_request,
         request_state_requires_resend, rpc_result_matches_request,
@@ -1096,6 +1108,13 @@ mod recovery_contract_tests {
         assert!(future_salts_matches_request(123, 123));
         assert!(!future_salts_matches_request(122, 123));
         assert!(!future_salts_matches_request(124, 123));
+    }
+
+    #[test]
+    fn bad_server_salt_mutates_only_the_current_outstanding_request() {
+        assert!(bad_server_salt_matches_request(123, 123));
+        assert!(!bad_server_salt_matches_request(122, 123));
+        assert!(!bad_server_salt_matches_request(124, 123));
     }
 
     #[test]

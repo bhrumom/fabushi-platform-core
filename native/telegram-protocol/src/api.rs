@@ -30,6 +30,7 @@ pub const MSGS_STATE_INFO_CONSTRUCTOR: u32 = 0x04de_b57d;
 pub const MSGS_ALL_INFO_CONSTRUCTOR: u32 = 0x8cc0_d131;
 pub const MSG_DETAILED_INFO_CONSTRUCTOR: u32 = 0x276d_3ec6;
 pub const MSG_NEW_DETAILED_INFO_CONSTRUCTOR: u32 = 0x809d_b6df;
+pub const BAD_SERVER_SALT_CONSTRUCTOR: u32 = 0xedab_447b;
 pub const FUTURE_SALT_CONSTRUCTOR: u32 = 0x0949_d9dc;
 pub const FUTURE_SALTS_CONSTRUCTOR: u32 = 0xae50_0895;
 pub const CONFIG_CONSTRUCTOR: u32 = 0xcc1a_241e;
@@ -200,6 +201,14 @@ pub struct MsgNewDetailedInfo {
     pub answer_message_id: i64,
     pub bytes: i32,
     pub status: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BadServerSalt {
+    pub bad_message_id: i64,
+    pub bad_message_sequence_number: i32,
+    pub error_code: i32,
+    pub new_server_salt: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -660,6 +669,27 @@ pub fn parse_msg_new_detailed_info(
         return Err(ApiRequestError::TrailingBytes(reader.remaining()));
     }
     Ok(info)
+}
+
+pub fn parse_bad_server_salt(input: &[u8]) -> Result<BadServerSalt, ApiRequestError> {
+    let mut reader = TlReader::new(input);
+    let constructor = reader.read_u32()?;
+    if constructor != BAD_SERVER_SALT_CONSTRUCTOR {
+        return Err(ApiRequestError::Tl(TlError::UnexpectedConstructor {
+            expected: BAD_SERVER_SALT_CONSTRUCTOR,
+            actual: constructor,
+        }));
+    }
+    let notification = BadServerSalt {
+        bad_message_id: reader.read_i64()?,
+        bad_message_sequence_number: reader.read_i32()?,
+        error_code: reader.read_i32()?,
+        new_server_salt: reader.read_i64()?,
+    };
+    if !reader.is_finished() {
+        return Err(ApiRequestError::TrailingBytes(reader.remaining()));
+    }
+    Ok(notification)
 }
 
 pub fn parse_future_salts(input: &[u8]) -> Result<FutureSalts, ApiRequestError> {
@@ -1241,11 +1271,11 @@ mod authorization_identity_contract_tests {
 #[cfg(test)]
 mod mtproto_service_builder_contract_tests {
     use super::{
-        build_msg_resend_req, build_msgs_ack, build_msgs_state_req, parse_future_salts,
-        parse_msg_detailed_info, parse_msg_new_detailed_info, parse_msgs_ack,
+        build_msg_resend_req, build_msgs_ack, build_msgs_state_req, parse_bad_server_salt,
+        parse_future_salts, parse_msg_detailed_info, parse_msg_new_detailed_info, parse_msgs_ack,
         parse_message_container, parse_msgs_all_info, parse_msgs_state_info, parse_pong,
-        parse_rpc_result, FUTURE_SALTS_CONSTRUCTOR, FUTURE_SALT_CONSTRUCTOR,
-        MESSAGE_CONTAINER_CONSTRUCTOR, MSG_DETAILED_INFO_CONSTRUCTOR,
+        parse_rpc_result, BAD_SERVER_SALT_CONSTRUCTOR, FUTURE_SALTS_CONSTRUCTOR,
+        FUTURE_SALT_CONSTRUCTOR, MESSAGE_CONTAINER_CONSTRUCTOR, MSG_DETAILED_INFO_CONSTRUCTOR,
         MSG_NEW_DETAILED_INFO_CONSTRUCTOR, MSGS_ACK_CONSTRUCTOR,
         MSGS_ALL_INFO_CONSTRUCTOR,
         MSGS_STATE_INFO_CONSTRUCTOR, MSGS_STATE_REQ_CONSTRUCTOR, MSG_RESEND_REQ_CONSTRUCTOR,
@@ -1494,6 +1524,43 @@ mod mtproto_service_builder_contract_tests {
         let mut trailing = exact;
         trailing.extend_from_slice(&0_u32.to_le_bytes());
         assert!(parse_msg_new_detailed_info(&trailing).is_err());
+    }
+
+    fn bad_server_salt_fixture() -> Vec<u8> {
+        let mut writer = TlWriter::new();
+        writer.write_u32(BAD_SERVER_SALT_CONSTRUCTOR);
+        writer.write_i64(0x1112_1314_1516_1718_i64);
+        writer.write_i32(7);
+        writer.write_i32(48);
+        writer.write_i64(0x2122_2324_2526_2728_i64);
+        writer.into_bytes()
+    }
+
+    #[test]
+    fn bad_server_salt_parses_all_fixed_u_fields() {
+        let parsed =
+            parse_bad_server_salt(&bad_server_salt_fixture()).expect("parse bad_server_salt");
+        assert_eq!(parsed.bad_message_id, 0x1112_1314_1516_1718_i64);
+        assert_eq!(parsed.bad_message_sequence_number, 7);
+        assert_eq!(parsed.error_code, 48);
+        assert_eq!(parsed.new_server_salt, 0x2122_2324_2526_2728_i64);
+    }
+
+    #[test]
+    fn bad_server_salt_rejects_wrong_constructor_truncation_and_trailing_bytes() {
+        let exact = bad_server_salt_fixture();
+
+        let mut wrong_constructor = exact.clone();
+        wrong_constructor[..4].copy_from_slice(&0_u32.to_le_bytes());
+        assert!(parse_bad_server_salt(&wrong_constructor).is_err());
+
+        for cut in [1_usize, 4, 8, 12, 16, 20, 24, exact.len() - 1] {
+            assert!(parse_bad_server_salt(&exact[..cut]).is_err());
+        }
+
+        let mut trailing = exact;
+        trailing.extend_from_slice(&0_u32.to_le_bytes());
+        assert!(parse_bad_server_salt(&trailing).is_err());
     }
 
     fn future_salts_fixture() -> Vec<u8> {
