@@ -3419,3 +3419,57 @@ fn pong_fails_closed_at_every_fixed_u_boundary_and_strict_eof() {
     trailing.push(0);
     assert!(fabushi_telegram_protocol::parse_pong(&trailing).is_err());
 }
+
+
+#[test]
+fn http_wait_preserves_exact_fixed_u_wire_boundaries_and_signed_fields() {
+    let constructor = fabushi_telegram_protocol::HTTP_WAIT_CONSTRUCTOR;
+    let max_delay = i32::MIN;
+    let wait_after = -1_i32;
+    let max_wait = i32::MAX;
+
+    let mut encoded = TlWriter::new();
+    encoded.write_u32(constructor);
+    encoded.write_i32(max_delay);
+    encoded.write_i32(wait_after);
+    encoded.write_i32(max_wait);
+    let bytes = encoded.into_bytes();
+
+    assert_eq!(bytes.len(), 16);
+    assert_eq!(&bytes[0..4], &constructor.to_le_bytes());
+    assert_eq!(&bytes[4..8], &max_delay.to_le_bytes());
+    assert_eq!(&bytes[8..12], &wait_after.to_le_bytes());
+    assert_eq!(&bytes[12..16], &max_wait.to_le_bytes());
+
+    assert_eq!(
+        fabushi_telegram_protocol::parse_http_wait(&bytes).unwrap(),
+        fabushi_telegram_protocol::HttpWait {
+            max_delay,
+            wait_after,
+            max_wait,
+        }
+    );
+}
+
+#[test]
+fn http_wait_fails_closed_at_every_fixed_u_boundary_and_strict_eof() {
+    let mut encoded = TlWriter::new();
+    encoded.write_u32(fabushi_telegram_protocol::HTTP_WAIT_CONSTRUCTOR);
+    encoded.write_i32(i32::MIN);
+    encoded.write_i32(-1);
+    encoded.write_i32(i32::MAX);
+    let exact = encoded.into_bytes();
+    assert_eq!(exact.len(), 16);
+
+    for cut in 0..exact.len() {
+        assert!(fabushi_telegram_protocol::parse_http_wait(&exact[..cut]).is_err());
+    }
+
+    let mut wrong_constructor = exact.clone();
+    wrong_constructor[0..4].copy_from_slice(&0_u32.to_le_bytes());
+    assert!(fabushi_telegram_protocol::parse_http_wait(&wrong_constructor).is_err());
+
+    let mut trailing = exact;
+    trailing.push(0);
+    assert!(fabushi_telegram_protocol::parse_http_wait(&trailing).is_err());
+}
