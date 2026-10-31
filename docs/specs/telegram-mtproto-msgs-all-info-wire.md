@@ -146,6 +146,18 @@ source-neutral Rust and does not copy Telegram Desktop C++ implementation text.
 
 ## 12. Stage-A compliance record
 
-Initial spec-first disposition: source review confirms no production delta is required.
-Authored contract commit/blob, desktop mirror commit/blob, ledger/evidence commit and final compliance readback
-will be recorded here after those writes are durably saved. Executable validation remains `not-run`.
+| Requirement / AC | Status | Evidence / reason |
+| --- | --- | --- |
+| R1-R8 | passed | Remote source readback confirms `api.rs@ebfb3670b5cd097b9ce288782c7954f5cfe9fc43` preserves constructor 0x8cc0d131, canonical bounded Vector<long>, signed i64 ids, binary TL info bytes, state/id cardinality and strict EOF; `tl.rs@89256ab35184b6dc06a095ab34abb9f44e95a264` preserves vector constructor/count validation, 1,000,000 element bound, TL bytes short/long framing, 64MiB byte limit, padding consumption and truncation; `lib.rs@abab39e42f100972484191f0e52e9edd9b88c6cf` exports the same parser/type/constructor. |
+| R9 | passed | Fixed-U `SessionPrivate::handle` performs `MTPMsgsAllInfo::read(from,end)` and `handleMsgsStates` checks state/id cardinality before any `haveSent/_resendingIds` history access; Fabushi parser remains side-effect free and does not own arbitrary request history/application. |
+| R10 | passed | Stage A performed source/blob readback and authored/saved code/docs only. No build, typecheck, lint, validator, generator, unit/contract/integration/E2E execution, Actions/status/check query, package, deploy, install or runtime acceptance was performed. |
+| AC-1 | passed | Production api/tl/lib blobs remain ebfb3670b5cd097b9ce288782c7954f5cfe9fc43 / 89256ab35184b6dc06a095ab34abb9f44e95a264 / abab39e42f100972484191f0e52e9edd9b88c6cf; no production behavior delta was made. |
+| AC-2 | passed | Canonical authored-only contract commit `5e961490ebad8971a44ba91253797408c959ca93` / blob `d1a86cb35d6e27ed94c911750190c627fc7764cf` covers signed ids, binary short-form state, empty and 254-byte long-form state, wrong top-level/vector constructors, negative/over-limit vector counts, truncation, missing padding, cardinality mismatch, trailing bytes and exact EOF. It was not executed. |
+| AC-3 | passed | Desktop mirror commit `822ed21752b28b435f55c2c711215fc01b15551c` has byte-identical contract blob `d1a86cb35d6e27ed94c911750190c627fc7764cf`; desktop production api/lib remain ebfb3670b5cd097b9ce288782c7954f5cfe9fc43 / abab39e42f100972484191f0e52e9edd9b88c6cf. |
+| AC-4 | passed | Desktop ledger/evidence/P0/source-closure commit `3c57a27bb51e22f9388d821c9aca8b18b8ee0dcc` records fixed-U identities, no-production-delta disposition, binary/vector/cardinality semantics and open broader lifecycle boundaries. |
+| AC-5 | passed | Existing parity ledger records `TDRP-R9-MTPROTO-MSGS-ALL-INFO-WIRE-001` as `implemented / validation_status=not-run / accepted=false`; coverage is responsibilities_total=95, unknown=16172, unread=16145, omitted=0. |
+| AC-6 | passed | Arbitrary `wasSent/haveSent/_resendingIds/toSend/_sentContainers` history, resend/ack application, connection scheduling/racing/send retry, auth-key binding/expiry/persistence/teardown, gzip and complete difference/differenceSlice decoding/application remain explicitly open/fail-closed. |
+
+Source-level compliance is complete for this isolated `msgs_all_info` wire/state-shape slice. This is not executable
+verification, candidate readiness, release acceptance, arbitrary request-history/application closure, broader source/legal
+closure, or independent release ACCEPT.
