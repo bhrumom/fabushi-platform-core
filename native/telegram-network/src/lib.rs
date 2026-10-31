@@ -120,6 +120,11 @@ pub enum NetworkError {
     PongTimeout,
     #[error("Telegram rejected encrypted message {message_id} with error code {code}")]
     BadServerMessage { message_id: i64, code: i32 },
+    #[error("Telegram requested replay of message {request_message_id} before new-session first message {first_message_id} more than once")]
+    NewSessionReplayLimit {
+        request_message_id: i64,
+        first_message_id: i64,
+    },
     #[error("Telegram did not return an RPC result before the message limit")]
     RpcTimeout,
 }
@@ -206,6 +211,7 @@ impl EstablishedSession {
             let request_message_id = self.send_encrypted_message(body, true)?;
             let mut retry_with_new_salt = false;
             let mut retry_bad_message: Option<(i64, i32)> = None;
+            let mut retry_new_session: Option<i64> = None;
             for _ in 0..DEFAULT_MAX_RPC_MESSAGES {
                 let payload = self.transport.receive_payload()?;
                 let envelope = EncryptedEnvelope::from_bytes(&payload)?;
@@ -239,8 +245,21 @@ impl EstablishedSession {
                         retry_bad_message = Some((message_id, code));
                         break;
                     }
+                    RpcOutcome::RetryNewSession { first_message_id } => {
+                        retry_new_session = Some(first_message_id);
+                        break;
+                    }
                     RpcOutcome::Continue => {}
                 }
+            }
+            if let Some(first_message_id) = retry_new_session {
+                if attempt == 0 {
+                    continue;
+                }
+                return Err(NetworkError::NewSessionReplayLimit {
+                    request_message_id,
+                    first_message_id,
+                });
             }
             if let Some((message_id, code)) = retry_bad_message {
                 if attempt == 0 {
@@ -318,8 +337,13 @@ impl EstablishedSession {
                 }))
             }
             NEW_SESSION_CREATED_CONSTRUCTOR => {
+                let first_message_id = read_i64_at(body, 4)?;
                 self.server_salt = read_i64_at(body, 20)?;
-                Ok(RpcOutcome::Continue)
+                if new_session_requires_replay(request_message_id, first_message_id) {
+                    Ok(RpcOutcome::RetryNewSession { first_message_id })
+                } else {
+                    Ok(RpcOutcome::Continue)
+                }
             }
             BAD_SERVER_SALT_CONSTRUCTOR => {
                 let message_id = read_i64_at(body, 4)?;
@@ -633,6 +657,7 @@ enum RpcOutcome {
     Result(RpcResult),
     NewSalt,
     RetryBadMessage { message_id: i64, code: i32 },
+    RetryNewSession { first_message_id: i64 },
     Continue,
 }
 
@@ -640,6 +665,10 @@ enum RpcOutcome {
 enum BadMessageRecoveryAction {
     CorrectTimeAndRetry,
     ResetSessionAndRetry,
+}
+
+fn new_session_requires_replay(request_message_id: i64, first_message_id: i64) -> bool {
+    request_message_id < first_message_id
 }
 
 fn bad_message_recovery_action(code: i32) -> Option<BadMessageRecoveryAction> {
@@ -850,7 +879,8 @@ fn read_i64_at(input: &[u8], offset: usize) -> Result<i64, NetworkError> {
 mod recovery_contract_tests {
     use super::{
         bad_message_recovery_action, direct_bad_message_time_recovery,
-        BadMessageRecoveryAction, BAD_MSG_NOTIFICATION_CONSTRUCTOR,
+        new_session_requires_replay, BadMessageRecoveryAction,
+        BAD_MSG_NOTIFICATION_CONSTRUCTOR,
     };
 
     fn bad_message(code: i32) -> Vec<u8> {
@@ -886,6 +916,13 @@ mod recovery_contract_tests {
         );
         assert_eq!(bad_message_recovery_action(48), None);
         assert_eq!(bad_message_recovery_action(99), None);
+    }
+
+    #[test]
+    fn new_session_replays_only_requests_older_than_first_message() {
+        assert!(new_session_requires_replay(100, 104));
+        assert!(!new_session_requires_replay(104, 104));
+        assert!(!new_session_requires_replay(108, 104));
     }
 
     #[test]
