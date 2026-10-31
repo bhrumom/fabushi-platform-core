@@ -66,3 +66,22 @@ Do not run build, typecheck, lint, schema validation, generators, unit/contract/
 - AC5: Desktop provider copies are byte-identical to canonical protocol/network sources.
 - AC6: No gzip/difference/multi-request history scope is claimed.
 - AC7: Authored tests remain not-run and acceptance remains false until Stage B executable evidence exists.
+
+
+## Stage-A spec compliance review — 2026-11-01
+
+Implementation commit: `4c5bea7b847a3e04ee3d0c9b05fab228101acb64`  
+Canonical blobs: protocol api `5da871fc557a49a7e57f1dd0677f307a5ed1bac8`, protocol lib `3f7c363f9fd2eb86e60c8294144d7f1dced9ccca`, network `2a50068d148b25e710961973315d78fc1b1ee5a8`.
+
+- R1: passed by source inspection — constructor, typed struct, parser, and public re-export are present in the canonical protocol owner.
+- R2: passed by source inspection — the parser consumes all four fixed-U fields and rejects wrong constructor, truncation through `TlReader`, and trailing bytes.
+- R3: passed by source inspection — the existing typed `build_msg_resend_req` remains the service primitive.
+- R4: passed by source inspection — `scan_rpc_body` invokes `parse_msg_detailed_info` before matching or reconciliation.
+- R5: passed by source inspection — the existing `detailed_info_matches_request` gates current-call effects to the single outstanding request id.
+- R6: passed by source inspection — matching messages reuse `reconcile_detailed_answer`; no new queue/state owner was added.
+- R7: passed by source inspection — unrelated valid messages return `Continue` without current-call mutation.
+- R8: passed by source inspection — changes stay within existing protocol/network owners and synchronized desktop provider copies.
+- R9: passed by scope inspection — no gzip, full difference decoder, or multi-request sent/resend history was introduced.
+- R10: passed as an authored-only Stage-A artifact — exact-field, wrong-constructor, truncation, and trailing-byte tests were added to source but not run.
+
+Acceptance criteria AC1–AC6 are satisfied at the source/implementation level. AC7 remains intentionally **blocked/not-run** until Stage B executable validation. No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried in this review.
