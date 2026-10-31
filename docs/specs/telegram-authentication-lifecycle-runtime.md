@@ -112,5 +112,22 @@ Repository commits and exact blob SHAs are the Stage A evidence. Runtime RPC err
 
 | Requirement / AC | Status | Evidence / reason |
 | --- | --- | --- |
-| R1-R10 | blocked | Implementation not yet committed when this Spec is established. |
-| AC-1-AC-6 | blocked | Stage A implementation/evidence follows this Spec. |
+| R1-R9 | implemented / not-run | Protocol commit 314e8804ddfc997acdde2c19bff831b5e26b1706, encrypted storage commit bcb8298a4622616f2f8a226899c0e3dc8aa3ba8f, and runtime commit ec854e93fb1523d95225203554600858798e4981 implement the specified owners. Executable validation was intentionally not run in Stage A. |
+| R10 | implemented | Contract tests are authored in protocol/storage/runtime test owners and remain unexecuted. |
+| AC-1-AC-3 | implemented / not-run | Runtime/protocol/storage source is committed on the isolated checkpoint; no executable verification is claimed. |
+| AC-4 | implemented / not-run | Desktop checkpoint 169d6cc7798507f0302d6c93fef7deef1a302d28 wires all seven commands through the existing TelegramClientLease and feature.auth chain. |
+| AC-5-AC-6 | implemented / not-run | Test execution evidence remains empty; migration ledger/evidence update is performed in the desktop checkpoint and acceptance remains false. |
+
+## 18. Stage-A implementation evidence
+
+Canonical platform-core checkpoint: `checkpoint/tdrp-telegram-auth-lifecycle-7457eb1c-r16`.
+
+- protocol source: `native/telegram-protocol/src/api.rs@f680705bd87a26e39e9fb0d9bd83337e338512f3`
+- protocol exports: `native/telegram-protocol/src/lib.rs@fd74519aefe597ff127fa9a2b8067eaa4d8cdb01`
+- protocol authored tests: `native/telegram-protocol/tests/protocol_contract.rs@4d6bec0d84016fc7651c69985ad19f005f22eaa1`
+- encrypted runtime-state storage: `native/telegram-storage/src/sqlite.rs@b07f8e95efba8a2f910f4d85345deb2619c23a84`
+- storage authored tests: `native/telegram-storage/tests/encrypted_store.rs@9103d6d7118f82c7252d27e771a9c352c6b4f548`
+- runtime commands/persistence: `native/telegram-runtime/src/runtime.rs@adb9d29f352cc8e8a62ecdb90e77d546d78b05b3`
+- runtime authored tests: `native/telegram-runtime/tests/runtime_ffi.rs@fcb63dc714a05337732e4318aaaa24f8f582ef3a`
+
+No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, packaging, deployment, installation, workflow/status query, or runtime acceptance was executed in Stage A.
