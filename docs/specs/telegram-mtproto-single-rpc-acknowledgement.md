@@ -95,9 +95,9 @@ Evidence is source identity, Git blob identity, authored contracts, canonical-to
 
 | Requirement / AC | Status | Evidence / reason |
 | --- | --- | --- |
-| R1-R9 | pending | Implementation follows this Spec. |
-| AC-1 | pending | Awaiting platform-core implementation. |
-| AC-2 | pending | Awaiting desktop synchronization. |
-| AC-3 | pending | Awaiting desktop ledger/P0/source-closure update. |
-| AC-4 | pending | Must remain explicitly open in ledger/evidence. |
-| AC-5 | pending | No executable validation is permitted in Stage A. |
+| R1-R9 | passed | Source review at platform-core implementation `3470cd572891222c8846a9e91f98ca621624ec64`: bounded `parse_msgs_ack`, explicit RPC/ping ACK dispatch, callback-RPC non-settlement, malformed-payload fail-closed behavior, no multi-request sent/resend owner, and contracts authored but not run. |
+| AC-1 | passed | Canonical blobs: protocol api `d38546a0f6954bb6a03aaec80968dbf195945edc`, protocol lib `da012dab3b1111f18c318cf0001f2f3d1f32bf6f`, network `70645dd06426374ae4e20bd9c9545388948f65bb`. |
+| AC-2 | passed | Desktop implementation `6804906c0646d75a16b150b4f745476f44e19953`; remote readback confirmed the same three blob identities on the existing provider path chain. |
+| AC-3 | passed | Desktop ledger/P0/source-closure/evidence commit `c875c906215ba70b5ab923b22276c5470214cdef`; row `TDRP-R9-MTPROTO-SINGLE-RPC-ACKNOWLEDGEMENT-001` is implemented with empty execution evidence, `validation_status=not-run`, and `accepted=false` recorded in notes/evidence. |
+| AC-4 | passed | Desktop ledger/evidence explicitly retain `haveSent/_resendingIds/toSend/_sentContainers` ACK bookkeeping, queued-resend cancellation, container fan-out, and fast-history clock correction as open/fail-closed. |
+| AC-5 | passed | Round 20 performed Git/ref/tree/blob/source reads and safe writes only; no Actions/status/check query or trigger and no build, lint, generator, test, package, deployment, installation, or runtime acceptance was performed. |
