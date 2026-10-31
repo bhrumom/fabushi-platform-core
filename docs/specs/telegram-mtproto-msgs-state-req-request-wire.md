@@ -179,11 +179,14 @@ produced in Stage A. No executable evidence is produced or claimed.
 
 | Requirement / AC | Status | Evidence / reason |
 | --- | --- | --- |
-| R1-R8 | pending | Final source-level readback is recorded after authored contracts/bookkeeping are saved. |
-| R9 | pending | Canonical and desktop mirrored contracts are authored after this spec commit and remain unrun. |
-| AC-1 | pending | Final source-level production blob readback required. |
-| AC-2 | pending | Authored contract boundary matrix not yet committed at spec creation time. |
-| AC-3 | pending | Desktop mirror not yet committed at spec creation time. |
-| AC-4 | pending | Ledger/P0/source-closure/evidence sync not yet committed at spec creation time. |
-| AC-5 | pending | Ledger row not yet committed at spec creation time. |
-| AC-6 | pending | Final source-level timing/scope review required. |
+| R1-R8 | passed | Remote source readback at platform checkpoint 97e04d8ee1556c28cd6227f809816f04bcf1f674: api.rs@ebfb3670b5cd097b9ce288782c7954f5cfe9fc43 preserves constructor 0xda69fb52 and exact constructor/Vector/count/i64 order; tl.rs@89256ab35184b6dc06a095ab34abb9f44e95a264 preserves canonical Vector framing plus usize-to-i32 overflow failure before header emission; lib.rs@abab39e42f100972484191f0e52e9edd9b88c6cf exports the same builder. Fixed-U shipping SessionPrivate::tryToSend remains the non-empty state-request caller and the existing Fabushi network lifecycle remains single-current-RPC only. |
+| R9 | passed | Canonical authored-only contract file is native/telegram-protocol/tests/protocol_contract.rs@60a1dfb3ea2051a498d6cfb9d401fe653fde7d75 from commit 97e04d8ee1556c28cd6227f809816f04bcf1f674; desktop mirror commit 23f023f57cc9c6bc50e519fe89f01cc78a3511d9 has the same blob. Cases cover zero, one, multiple signed longs, exact EOF and vector-count overflow/no-partial-header. They were not executed. |
+| AC-1 | passed | Production api/tl/lib blobs remain ebfb3670b5cd097b9ce288782c7954f5cfe9fc43 / 89256ab35184b6dc06a095ab34abb9f44e95a264 / abab39e42f100972484191f0e52e9edd9b88c6cf; no production behavior delta was made. |
+| AC-2 | passed | Authored contract commit 97e04d8ee1556c28cd6227f809816f04bcf1f674 and blob 60a1dfb3ea2051a498d6cfb9d401fe653fde7d75 lock the R1-R7 wire boundaries; executable validation is intentionally deferred. |
+| AC-3 | passed | Desktop production api remains ebfb3670b5cd097b9ce288782c7954f5cfe9fc43, desktop facade remains abab39e42f100972484191f0e52e9edd9b88c6cf, and desktop contract mirror is byte-identical at 60a1dfb3ea2051a498d6cfb9d401fe653fde7d75. |
+| AC-4 | passed | Desktop ledger/evidence commit 2b5267d726385e6bebbd9d68555f1ebe607b4a84 and P0/source-closure sync commit 69f122374a448732a0d611a8004f0152d490f3be record fixed-U identities, no-production-delta disposition and open broader lifecycle boundaries. |
+| AC-5 | passed | Existing parity ledger records TDRP-R9-MTPROTO-MSGS-STATE-REQ-REQUEST-WIRE-001 as implemented / validation_status=not-run / accepted=false with responsibilities_total=91, unknown=16172, unread=16145, omitted=0. |
+| AC-6 | passed | This Stage-A round performed source/blob readback and authored/saved code/docs only. No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E execution, GitHub Actions/status/check query, package, deploy, install or runtime acceptance was performed; arbitrary multi-request history remains open/fail-closed. |
+
+Source-level compliance is complete for this isolated request-wire slice. This does not constitute executable
+verification, candidate readiness, release acceptance, or closure of the broader migration.
