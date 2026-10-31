@@ -28,6 +28,10 @@ pub const RPC_ANSWER_DROPPED_CONSTRUCTOR: u32 = 0xa43a_d8b7;
 pub const DESTROY_SESSION_OK_CONSTRUCTOR: u32 = 0xe220_45fc;
 pub const DESTROY_SESSION_NONE_CONSTRUCTOR: u32 = 0x62d3_50c9;
 pub const HTTP_WAIT_CONSTRUCTOR: u32 = 0x9299_359f;
+pub const IP_PORT_CONSTRUCTOR: u32 = 0xd433_ad73;
+pub const IP_PORT_SECRET_CONSTRUCTOR: u32 = 0x3798_2646;
+pub const ACCESS_POINT_RULE_CONSTRUCTOR: u32 = 0x4679_b65f;
+pub const HELP_CONFIG_SIMPLE_CONSTRUCTOR: u32 = 0x5a59_2a6c;
 pub const MESSAGE_CONTAINER_CONSTRUCTOR: u32 = 0x73f1_f8dc;
 pub const MAX_MESSAGE_CONTAINER_ENTRIES: usize = 1024;
 pub const MSG_RESEND_REQ_CONSTRUCTOR: u32 = 0x7d86_1a08;
@@ -276,6 +280,33 @@ pub struct HttpWait {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IpPort {
+    Plain {
+        ipv4: i32,
+        port: i32,
+    },
+    Secret {
+        ipv4: i32,
+        port: i32,
+        secret: Vec<u8>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessPointRule {
+    pub phone_prefix_rules: String,
+    pub dc_id: i32,
+    pub ips: Vec<IpPort>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelpConfigSimple {
+    pub date: i32,
+    pub expires: i32,
+    pub rules: Vec<AccessPointRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageContainerEntry {
     pub message_id: i64,
     pub sequence_number: i32,
@@ -307,6 +338,8 @@ pub enum ApiRequestError {
     UnexpectedRpcDropAnswerConstructor(u32),
     #[error("Telegram MTProto DestroySessionRes has unexpected constructor {0:#010x}")]
     UnexpectedDestroySessionConstructor(u32),
+    #[error("Telegram MTProto IpPort has unexpected constructor {0:#010x}")]
+    UnexpectedIpPortConstructor(u32),
     #[error("Telegram MTProto message container is malformed")]
     InvalidMessageContainer,
     #[error("Telegram MTProto future-salts payload is malformed")]
@@ -613,6 +646,92 @@ pub fn parse_http_wait(input: &[u8]) -> Result<HttpWait, ApiRequestError> {
         return Err(ApiRequestError::TrailingBytes(reader.remaining()));
     }
     Ok(wait)
+}
+
+fn read_ip_port(reader: &mut TlReader<'_>) -> Result<IpPort, ApiRequestError> {
+    let constructor = reader.read_u32()?;
+    let ipv4 = reader.read_i32()?;
+    let port = reader.read_i32()?;
+    match constructor {
+        IP_PORT_CONSTRUCTOR => Ok(IpPort::Plain { ipv4, port }),
+        IP_PORT_SECRET_CONSTRUCTOR => Ok(IpPort::Secret {
+            ipv4,
+            port,
+            secret: reader.read_bytes()?.to_vec(),
+        }),
+        actual => Err(ApiRequestError::UnexpectedIpPortConstructor(actual)),
+    }
+}
+
+fn read_access_point_rule(reader: &mut TlReader<'_>) -> Result<AccessPointRule, ApiRequestError> {
+    let constructor = reader.read_u32()?;
+    if constructor != ACCESS_POINT_RULE_CONSTRUCTOR {
+        return Err(ApiRequestError::Tl(TlError::UnexpectedConstructor {
+            expected: ACCESS_POINT_RULE_CONSTRUCTOR,
+            actual: constructor,
+        }));
+    }
+    let phone_prefix_rules = reader.read_string()?.to_string();
+    let dc_id = reader.read_i32()?;
+    let count = reader.read_vector_length()?;
+    let mut ips = Vec::with_capacity(count);
+    for _ in 0..count {
+        ips.push(read_ip_port(reader)?);
+    }
+    Ok(AccessPointRule {
+        phone_prefix_rules,
+        dc_id,
+        ips,
+    })
+}
+
+fn read_help_config_simple(reader: &mut TlReader<'_>) -> Result<HelpConfigSimple, ApiRequestError> {
+    let constructor = reader.read_u32()?;
+    if constructor != HELP_CONFIG_SIMPLE_CONSTRUCTOR {
+        return Err(ApiRequestError::Tl(TlError::UnexpectedConstructor {
+            expected: HELP_CONFIG_SIMPLE_CONSTRUCTOR,
+            actual: constructor,
+        }));
+    }
+    let date = reader.read_i32()?;
+    let expires = reader.read_i32()?;
+    let count = reader.read_vector_length()?;
+    let mut rules = Vec::with_capacity(count);
+    for _ in 0..count {
+        rules.push(read_access_point_rule(reader)?);
+    }
+    Ok(HelpConfigSimple {
+        date,
+        expires,
+        rules,
+    })
+}
+
+pub fn parse_ip_port(input: &[u8]) -> Result<IpPort, ApiRequestError> {
+    let mut reader = TlReader::new(input);
+    let result = read_ip_port(&mut reader)?;
+    if !reader.is_finished() {
+        return Err(ApiRequestError::TrailingBytes(reader.remaining()));
+    }
+    Ok(result)
+}
+
+pub fn parse_access_point_rule(input: &[u8]) -> Result<AccessPointRule, ApiRequestError> {
+    let mut reader = TlReader::new(input);
+    let result = read_access_point_rule(&mut reader)?;
+    if !reader.is_finished() {
+        return Err(ApiRequestError::TrailingBytes(reader.remaining()));
+    }
+    Ok(result)
+}
+
+pub fn parse_help_config_simple(input: &[u8]) -> Result<HelpConfigSimple, ApiRequestError> {
+    let mut reader = TlReader::new(input);
+    let result = read_help_config_simple(&mut reader)?;
+    if !reader.is_finished() {
+        return Err(ApiRequestError::TrailingBytes(reader.remaining()));
+    }
+    Ok(result)
 }
 
 pub fn parse_message_container(input: &[u8]) -> Result<MessageContainer, ApiRequestError> {
@@ -1392,11 +1511,13 @@ mod mtproto_service_builder_contract_tests {
         build_msg_resend_req, build_msgs_ack, build_msgs_state_req, parse_bad_msg_notification,
         parse_bad_server_salt,
         parse_future_salts, parse_msg_detailed_info, parse_msg_new_detailed_info, parse_msgs_ack,
-        parse_destroy_session_result, parse_http_wait, parse_message_container, parse_msgs_all_info,
+        parse_access_point_rule, parse_destroy_session_result, parse_help_config_simple,
+        parse_http_wait, parse_ip_port, parse_message_container, parse_msgs_all_info,
         parse_msgs_state_info, parse_pong, parse_rpc_drop_answer, parse_rpc_result,
-        BAD_MSG_NOTIFICATION_CONSTRUCTOR, BAD_SERVER_SALT_CONSTRUCTOR,
+        AccessPointRule, IpPort, BAD_MSG_NOTIFICATION_CONSTRUCTOR, BAD_SERVER_SALT_CONSTRUCTOR,
         DESTROY_SESSION_NONE_CONSTRUCTOR, DESTROY_SESSION_OK_CONSTRUCTOR, DestroySessionResult,
-        FUTURE_SALTS_CONSTRUCTOR, HTTP_WAIT_CONSTRUCTOR, RpcDropAnswer,
+        ACCESS_POINT_RULE_CONSTRUCTOR, FUTURE_SALTS_CONSTRUCTOR, HELP_CONFIG_SIMPLE_CONSTRUCTOR,
+        HTTP_WAIT_CONSTRUCTOR, IP_PORT_CONSTRUCTOR, IP_PORT_SECRET_CONSTRUCTOR, RpcDropAnswer,
         RPC_ANSWER_DROPPED_CONSTRUCTOR,
         RPC_ANSWER_DROPPED_RUNNING_CONSTRUCTOR, RPC_ANSWER_UNKNOWN_CONSTRUCTOR,
         FUTURE_SALT_CONSTRUCTOR, MESSAGE_CONTAINER_CONSTRUCTOR, MSG_DETAILED_INFO_CONSTRUCTOR,
@@ -1632,6 +1753,190 @@ mod mtproto_service_builder_contract_tests {
         let mut trailing = exact;
         trailing.extend_from_slice(&0_u32.to_le_bytes());
         assert!(parse_http_wait(&trailing).is_err());
+    }
+
+    fn ip_port_plain_fixture() -> Vec<u8> {
+        let mut writer = TlWriter::new();
+        writer.write_u32(IP_PORT_CONSTRUCTOR);
+        writer.write_i32(i32::MIN);
+        writer.write_i32(-443);
+        writer.into_bytes()
+    }
+
+    fn ip_port_secret_fixture() -> Vec<u8> {
+        let mut writer = TlWriter::new();
+        writer.write_u32(IP_PORT_SECRET_CONSTRUCTOR);
+        writer.write_i32(i32::MAX);
+        writer.write_i32(0);
+        writer.write_bytes(&[0x01, 0x02, 0x03, 0xff]).expect("write secret");
+        writer.into_bytes()
+    }
+
+    fn access_point_rule_fixture() -> Vec<u8> {
+        let mut writer = TlWriter::new();
+        writer.write_u32(ACCESS_POINT_RULE_CONSTRUCTOR);
+        writer.write_string("+1,-1204").expect("write phone rules");
+        writer.write_i32(-2);
+        writer.write_vector_length(2).expect("write ips vector");
+        writer.write_u32(IP_PORT_CONSTRUCTOR);
+        writer.write_i32(0x0102_0304);
+        writer.write_i32(443);
+        writer.write_u32(IP_PORT_SECRET_CONSTRUCTOR);
+        writer.write_i32(-1);
+        writer.write_i32(80);
+        writer.write_bytes(&[0xaa, 0xbb, 0xcc]).expect("write secret");
+        writer.into_bytes()
+    }
+
+    fn help_config_simple_fixture() -> Vec<u8> {
+        let mut writer = TlWriter::new();
+        writer.write_u32(HELP_CONFIG_SIMPLE_CONSTRUCTOR);
+        writer.write_i32(-1);
+        writer.write_i32(i32::MAX);
+        writer.write_vector_length(1).expect("write rules vector");
+        writer.write_u32(ACCESS_POINT_RULE_CONSTRUCTOR);
+        writer.write_string("*").expect("write phone rules");
+        writer.write_i32(5);
+        writer.write_vector_length(2).expect("write ips vector");
+        writer.write_u32(IP_PORT_CONSTRUCTOR);
+        writer.write_i32(0x7f00_0001);
+        writer.write_i32(443);
+        writer.write_u32(IP_PORT_SECRET_CONSTRUCTOR);
+        writer.write_i32(0x0102_0304);
+        writer.write_i32(-1);
+        writer.write_bytes(&[]).expect("write empty secret");
+        writer.into_bytes()
+    }
+
+    #[test]
+    fn ip_port_parses_both_fixed_u_variants_exactly() {
+        assert_eq!(
+            parse_ip_port(&ip_port_plain_fixture()).expect("parse ipPort"),
+            IpPort::Plain {
+                ipv4: i32::MIN,
+                port: -443,
+            }
+        );
+        assert_eq!(
+            parse_ip_port(&ip_port_secret_fixture()).expect("parse ipPortSecret"),
+            IpPort::Secret {
+                ipv4: i32::MAX,
+                port: 0,
+                secret: vec![0x01, 0x02, 0x03, 0xff],
+            }
+        );
+    }
+
+    #[test]
+    fn ip_port_rejects_wrong_constructor_truncation_and_trailing_bytes() {
+        let exact = ip_port_secret_fixture();
+        let mut wrong = exact.clone();
+        wrong[..4].copy_from_slice(&0_u32.to_le_bytes());
+        assert!(parse_ip_port(&wrong).is_err());
+        for cut in 0..exact.len() {
+            assert!(parse_ip_port(&exact[..cut]).is_err());
+        }
+        let mut trailing = exact;
+        trailing.extend_from_slice(&0_u32.to_le_bytes());
+        assert!(parse_ip_port(&trailing).is_err());
+    }
+
+    #[test]
+    fn access_point_rule_parses_nested_ip_ports_exactly() {
+        let parsed = parse_access_point_rule(&access_point_rule_fixture()).expect("parse rule");
+        assert_eq!(
+            parsed,
+            AccessPointRule {
+                phone_prefix_rules: "+1,-1204".to_string(),
+                dc_id: -2,
+                ips: vec![
+                    IpPort::Plain {
+                        ipv4: 0x0102_0304,
+                        port: 443,
+                    },
+                    IpPort::Secret {
+                        ipv4: -1,
+                        port: 80,
+                        secret: vec![0xaa, 0xbb, 0xcc],
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn access_point_rule_rejects_malformed_nested_input_and_trailing_bytes() {
+        let exact = access_point_rule_fixture();
+        for cut in 0..exact.len() {
+            assert!(parse_access_point_rule(&exact[..cut]).is_err());
+        }
+
+        let mut wrong_rule = exact.clone();
+        wrong_rule[..4].copy_from_slice(&0_u32.to_le_bytes());
+        assert!(parse_access_point_rule(&wrong_rule).is_err());
+
+        let mut wrong_ip = exact.clone();
+        let first_ip_constructor = wrong_ip
+            .windows(4)
+            .position(|bytes| bytes == IP_PORT_CONSTRUCTOR.to_le_bytes())
+            .expect("first nested ip");
+        wrong_ip[first_ip_constructor..first_ip_constructor + 4]
+            .copy_from_slice(&0_u32.to_le_bytes());
+        assert!(parse_access_point_rule(&wrong_ip).is_err());
+
+        let mut trailing = exact;
+        trailing.extend_from_slice(&0_u32.to_le_bytes());
+        assert!(parse_access_point_rule(&trailing).is_err());
+    }
+
+    #[test]
+    fn help_config_simple_parses_fixed_u_nested_rules_exactly() {
+        let parsed =
+            parse_help_config_simple(&help_config_simple_fixture()).expect("parse configSimple");
+        assert_eq!(parsed.date, -1);
+        assert_eq!(parsed.expires, i32::MAX);
+        assert_eq!(parsed.rules.len(), 1);
+        assert_eq!(parsed.rules[0].phone_prefix_rules, "*");
+        assert_eq!(parsed.rules[0].dc_id, 5);
+        assert_eq!(
+            parsed.rules[0].ips,
+            vec![
+                IpPort::Plain {
+                    ipv4: 0x7f00_0001,
+                    port: 443,
+                },
+                IpPort::Secret {
+                    ipv4: 0x0102_0304,
+                    port: -1,
+                    secret: Vec::new(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn help_config_simple_rejects_wrong_nested_constructor_truncation_and_trailing_bytes() {
+        let exact = help_config_simple_fixture();
+        for cut in 0..exact.len() {
+            assert!(parse_help_config_simple(&exact[..cut]).is_err());
+        }
+
+        let mut wrong_config = exact.clone();
+        wrong_config[..4].copy_from_slice(&0_u32.to_le_bytes());
+        assert!(parse_help_config_simple(&wrong_config).is_err());
+
+        let mut wrong_rule = exact.clone();
+        let rule_constructor = wrong_rule
+            .windows(4)
+            .position(|bytes| bytes == ACCESS_POINT_RULE_CONSTRUCTOR.to_le_bytes())
+            .expect("nested rule");
+        wrong_rule[rule_constructor..rule_constructor + 4]
+            .copy_from_slice(&0_u32.to_le_bytes());
+        assert!(parse_help_config_simple(&wrong_rule).is_err());
+
+        let mut trailing = exact;
+        trailing.extend_from_slice(&0_u32.to_le_bytes());
+        assert!(parse_help_config_simple(&trailing).is_err());
     }
 
     #[test]
