@@ -93,9 +93,9 @@ Evidence is fixed-U source identity, Git blob identity, authored contracts, cano
 
 | Requirement / AC | Status | Evidence / reason |
 | --- | --- | --- |
-| R1-R8 | blocked | Pending implementation in this round. |
-| AC-1 | blocked | Pending canonical implementation. |
-| AC-2 | blocked | Pending desktop synchronization. |
-| AC-3 | blocked | Pending ledger/P0/source-closure update. |
-| AC-4 | blocked | Must remain explicitly fail-closed. |
-| AC-5 | blocked | Will be reviewed after Stage-A source writes; no executable verification is permitted. |
+| R1-R8 | passed | Source review at platform-core implementation `bf6f063b229be43597bddc4231baab24d06a09bd`: bounded `parse_pong`, strict trailing-byte rejection, exact current message-id + ping-id correlation, existing PingMismatch/InvalidServiceMessage fail-closed paths, no multi-request sent/ping owner, and contracts authored but not run. |
+| AC-1 | passed | Canonical blobs: protocol api `32a7610bfc74835734c1e5c4385e4eb4cb2ee1f3`, protocol lib `ffbabc8f66112c2321be75a34928b086d6adf57f`, network `e0bf1b5f286ad0f8bc45a36e86074e19b7dde560`. |
+| AC-2 | passed | Desktop implementation `3e363ccdaf287878f457797442aa97e8b597384b`; remote readback confirmed the same three blob identities on the existing provider path chain. |
+| AC-3 | passed | Desktop ledger/P0/source-closure/evidence commit `770510d554552d5d4aa2f2b69f3d62612e3e33ad`; row `TDRP-R9-MTPROTO-SINGLE-PING-PONG-001` is implemented with empty execution evidence and records `validation_status=not-run`, `accepted=false`. |
+| AC-4 | passed | Desktop ledger/evidence explicitly retain arbitrary `haveSent/_resendingIds/toSend/_sentContainers`, historical sent-message lookup and multi-ping history as open/fail-closed. |
+| AC-5 | passed | Round 21 performed Git/ref/tree/blob/source reads and safe writes only; no Actions/status/check query or trigger and no build, lint, generator, test, package, deployment, installation, or runtime acceptance was performed. |
