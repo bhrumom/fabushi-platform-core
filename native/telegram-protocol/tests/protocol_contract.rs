@@ -3249,3 +3249,64 @@ fn rpc_drop_answer_response_variants_fail_closed_on_constructor_field_and_eof_bo
     trailing.push(0);
     assert!(fabushi_telegram_protocol::parse_rpc_drop_answer(&trailing).is_err());
 }
+
+
+#[test]
+fn destroy_session_result_variants_preserve_exact_fixed_u_wire_boundaries() {
+    for (constructor, session_id, expected) in [
+        (
+            fabushi_telegram_protocol::DESTROY_SESSION_OK_CONSTRUCTOR,
+            i64::MIN,
+            fabushi_telegram_protocol::DestroySessionResult::Ok { session_id: i64::MIN },
+        ),
+        (
+            fabushi_telegram_protocol::DESTROY_SESSION_NONE_CONSTRUCTOR,
+            i64::MAX,
+            fabushi_telegram_protocol::DestroySessionResult::None { session_id: i64::MAX },
+        ),
+    ] {
+        let mut encoded = TlWriter::new();
+        encoded.write_u32(constructor);
+        encoded.write_i64(session_id);
+        let bytes = encoded.into_bytes();
+        assert_eq!(bytes.len(), 12);
+        assert_eq!(&bytes[0..4], &constructor.to_le_bytes());
+        assert_eq!(&bytes[4..12], &session_id.to_le_bytes());
+        assert_eq!(
+            fabushi_telegram_protocol::parse_destroy_session_result(&bytes).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn destroy_session_result_variants_fail_closed_at_constructor_session_id_and_eof_boundaries() {
+    for constructor in [
+        fabushi_telegram_protocol::DESTROY_SESSION_OK_CONSTRUCTOR,
+        fabushi_telegram_protocol::DESTROY_SESSION_NONE_CONSTRUCTOR,
+    ] {
+        let mut encoded = TlWriter::new();
+        encoded.write_u32(constructor);
+        encoded.write_i64(0x0102_0304_0506_0708_i64);
+        let exact = encoded.into_bytes();
+        assert_eq!(exact.len(), 12);
+
+        for cut in 0..exact.len() {
+            assert!(
+                fabushi_telegram_protocol::parse_destroy_session_result(&exact[..cut]).is_err()
+            );
+        }
+
+        let mut wrong_constructor = exact.clone();
+        wrong_constructor[0..4].copy_from_slice(&0_u32.to_le_bytes());
+        assert!(
+            fabushi_telegram_protocol::parse_destroy_session_result(&wrong_constructor).is_err()
+        );
+
+        let mut trailing = exact;
+        trailing.push(0);
+        assert!(
+            fabushi_telegram_protocol::parse_destroy_session_result(&trailing).is_err()
+        );
+    }
+}
