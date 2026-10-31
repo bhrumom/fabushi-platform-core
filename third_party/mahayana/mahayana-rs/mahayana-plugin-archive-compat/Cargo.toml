@@ -1,0 +1,11 @@
+[package]
+name = "mahayana-plugin-archive-compat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+flate2.workspace = true
+tar.workspace = true
+thiserror.workspace = true

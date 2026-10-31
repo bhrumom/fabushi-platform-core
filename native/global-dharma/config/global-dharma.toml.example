@@ -1,0 +1,10 @@
+[daemon]
+bind = "127.0.0.1:18888"
+max_content_bytes = 1048576
+max_requests_per_minute = 30
+
+[[nodes]]
+id = "example-authorized-node"
+endpoint = "https://node.example.org/global-dharma/deliver"
+public_key_sha256 = "REPLACE_WITH_64_HEX_SHA256_PUBLIC_NODE_IDENTITY"
+regions = ["global"]

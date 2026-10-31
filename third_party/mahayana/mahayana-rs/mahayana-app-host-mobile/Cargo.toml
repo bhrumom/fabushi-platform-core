@@ -1,0 +1,20 @@
+[package]
+name = "mahayana-app-host-mobile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[package.metadata.fabushi]
+ios-deployment-target = "17.0"
+
+[lib]
+name = "mahayana_app_host"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+mahayana-app-host.workspace = true
+mahayana-unified-app-host.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"

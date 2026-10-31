@@ -1,0 +1,19 @@
+[package]
+name = "mahayana-harness-advanced"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Advanced product semantics for the Rust-native Mahayana Harness."
+publish = false
+
+[lib]
+doctest = false
+
+[dependencies]
+mahayana-harness.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+mahayana-core.workspace = true

@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "features": [
+    {
+      "id": "auth.login",
+      "label": "账号登录",
+      "steps": [
+        {
+          "action": "oauthLogin",
+          "provider": "google"
+        }
+      ]
+    },
+    {
+      "id": "runtime.boot",
+      "label": "Runtime 启动",
+      "steps": [
+        { "action": "expectReady" }
+      ]
+    },
+    {
+      "id": "chat.send",
+      "label": "聊天发送与响应",
+      "steps": [
+        {
+          "action": "sendChat",
+          "text": "验证极速自动化测试",
+          "expectedReply": "收到：验证极速自动化测试"
+        }
+      ]
+    },
+    {
+      "id": "marketplace.install",
+      "label": "Marketplace 安装",
+      "steps": [
+        { "action": "installMiniApp", "miniAppId": "global-dharma" }
+      ]
+    },
+    {
+      "id": "miniapp.open",
+      "label": "MiniApp 打开",
+      "steps": [
+        { "action": "openMiniApp", "miniAppId": "global-dharma" }
+      ]
+    },
+    {
+      "id": "capability.approval",
+      "label": "敏感能力审批",
+      "steps": [
+        {
+          "action": "approveCapability",
+          "miniAppId": "global-dharma",
+          "capability": "microphone.request",
+          "decision": "allow-once"
+        }
+      ]
+    },
+    {
+      "id": "operation.interrupt",
+      "label": "长任务中断",
+      "steps": [
+        { "action": "interruptOperation", "label": "长任务测试" }
+      ]
+    },
+    {
+      "id": "session.clear",
+      "label": "安全会话清除",
+      "steps": [
+        { "action": "clearSession" }
+      ]
+    }
+  ]
+}

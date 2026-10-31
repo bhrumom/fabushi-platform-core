@@ -1,0 +1,5150 @@
+use super::*;
+
+const REMOTE_PAIRING_SECONDS: i64 = 10 * 60;
+const REMOTE_CONTROL_SESSION_SECONDS: i64 = 2 * 60 * 60;
+const REMOTE_SIGNAL_SECONDS: i64 = 5 * 60;
+const REMOTE_SIGNAL_MAX_BYTES: usize = 256 * 1024;
+const REMOTE_SIGNAL_MAX_ROWS_PER_SESSION: i64 = 512;
+const REMOTE_SESSION_MAX_PER_CLIENT: i64 = 4;
+const REMOTE_SESSION_MAX_PER_DEVICE: i64 = 32;
+const REMOTE_CLIENT_MAX_PER_DEVICE: i64 = 64;
+const REMOTE_COMPUTER_MAX_PER_ACCOUNT: i64 = 64;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerRegisterRequest {
+    device_id: String,
+    label: String,
+    device_secret: String,
+    #[serde(default = "default_remote_provider")]
+    provider: String,
+    #[serde(default = "default_remote_platform")]
+    platform: String,
+    #[serde(default = "default_remote_app_version")]
+    app_version: String,
+    #[serde(default)]
+    capabilities: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerHeartbeatRequest {
+    device_id: String,
+    device_secret: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerNetworkBindingRequest {
+    device_id: String,
+    device_secret: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerNetworkBindingBindRequest {
+    user_id: String,
+    device_id: String,
+    cell_id: String,
+    node_id: String,
+    proof_sha256: String,
+    generation: i64,
+    expires_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerNetworkBindingRevokeRequest {
+    user_id: String,
+    device_id: String,
+    generation: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerNetworkIngressRequest {
+    device_id: String,
+    device_secret: String,
+    service_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerNetworkIngressBindRequest {
+    user_id: String,
+    cell_id: String,
+    service_id: String,
+    node_id: String,
+    generation: i64,
+    expires_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerNetworkIngressRevokeRequest {
+    user_id: String,
+    cell_id: String,
+    service_id: String,
+    generation: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerNetworkCellSnapshotRequest {
+    cell_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerNetworkEnrollmentIssueRequest {
+    device_secret: String,
+    request_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerNetworkEnrollmentRevokeRequest {
+    device_secret: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerNetworkEnrollmentRedeemRequest {
+    grant_id: String,
+    grant_secret: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerPairRequest {
+    pairing_code: String,
+    label: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerSessionGrantRequest {
+    device_secret: String,
+    connection_id: String,
+    delegation_id: String,
+    request_id: String,
+    label: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerSessionCreateRequest {
+    client_id: String,
+    client_token: String,
+    request_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerDesktopAuthRequest {
+    device_secret: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerSignalRequest {
+    session_id: String,
+    sender_role: String,
+    #[serde(default)]
+    device_secret: Option<String>,
+    #[serde(default)]
+    client_id: Option<String>,
+    #[serde(default)]
+    mobile_token: Option<String>,
+    kind: String,
+    payload: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerSignalDrainRequest {
+    session_id: String,
+    receiver_role: String,
+    #[serde(default)]
+    device_secret: Option<String>,
+    #[serde(default)]
+    client_id: Option<String>,
+    #[serde(default)]
+    mobile_token: Option<String>,
+    #[serde(default)]
+    after_signal_id: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerSessionCloseRequest {
+    role: String,
+    #[serde(default)]
+    device_secret: Option<String>,
+    #[serde(default)]
+    client_id: Option<String>,
+    #[serde(default)]
+    mobile_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerTransportRequest {
+    role: String,
+    #[serde(default)]
+    device_secret: Option<String>,
+    #[serde(default)]
+    client_id: Option<String>,
+    #[serde(default)]
+    mobile_token: Option<String>,
+    #[serde(default)]
+    direct_available: bool,
+    #[serde(default)]
+    relay_region: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerOperationCreateRequest {
+    client_id: String,
+    mobile_token: String,
+    request_id: String,
+    tool_name: String,
+    request_sha256: String,
+    #[serde(default)]
+    sensitive_result: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerOperationControllerRequest {
+    client_id: String,
+    mobile_token: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerOperationTargetRequest {
+    device_secret: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerOperationResultRequest {
+    device_secret: String,
+    status: String,
+    result_sha256: String,
+    #[serde(default)]
+    result: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerToolGrantRequest {
+    device_secret: String,
+    client_id: String,
+    tool_name: String,
+    expires_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteComputerToolRevokeRequest {
+    device_secret: String,
+    client_id: String,
+    tool_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerRow {
+    device_id: String,
+    label: String,
+    provider: String,
+    platform: String,
+    app_version: String,
+    capabilities_json: String,
+    active_session_count: i64,
+    network_generation: Option<i64>,
+    network_expires_at: Option<i64>,
+    last_seen_at: i64,
+    created_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerNetworkBindingRow {
+    cell_id: String,
+    node_id: String,
+    proof_sha256: String,
+    generation: i64,
+    bound_at: i64,
+    expires_at: i64,
+    revoked_at: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerControllerNetworkRouteRow {
+    cell_id: String,
+    node_id: String,
+    generation: i64,
+    expires_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerNetworkIngressRow {
+    cell_id: String,
+    target_generation: i64,
+    node_id: String,
+    ingress_generation: i64,
+    expires_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerNetworkIngressBindingRow {
+    node_id: String,
+    generation: i64,
+    expires_at: i64,
+    revoked_at: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteComputerNetworkCellSnapshotRow {
+    user_id: String,
+    device_id: String,
+    cell_id: String,
+    node_id: String,
+    generation: i64,
+    expires_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerNetworkEnrollmentGrantRow {
+    grant_id: String,
+    request_id: String,
+    cell_id: String,
+    generation: i64,
+    secret_hash: String,
+    expires_at: i64,
+    redeemed_at: Option<i64>,
+    revoked_at: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerNetworkEnrollmentRedeemRow {
+    user_id: String,
+    device_id: String,
+    cell_id: String,
+    generation: i64,
+    secret_hash: String,
+    expires_at: i64,
+    redeemed_at: Option<i64>,
+    revoked_at: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerPairRow {
+    device_id: String,
+    label: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerExistsRow {
+    ok: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerGenerationRow {
+    generation: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerSecretRow {
+    device_secret_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerClientRow {
+    client_id: String,
+    label: String,
+    paired_at: i64,
+    last_seen_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerClientAuthRow {
+    client_token_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerTargetGrantClientRow {
+    client_id: String,
+    client_token_hash: String,
+    service_delegation_id: Option<String>,
+    target_grant_request_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerSessionRow {
+    client_id: String,
+    mobile_token_hash: String,
+    state: String,
+    expires_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerTransportRow {
+    client_id: String,
+    mobile_token_hash: String,
+    state: String,
+    expires_at: i64,
+    provider: String,
+    route_policy: String,
+    selected_route: Option<String>,
+    relay_region: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerSessionListRow {
+    session_id: String,
+    client_id: String,
+    client_label: String,
+    state: String,
+    created_at: i64,
+    expires_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerRecoverableSessionRow {
+    session_id: String,
+    device_id: String,
+    client_id: String,
+    mobile_token_hash: String,
+    state: String,
+    created_at: i64,
+    expires_at: i64,
+    mobile_request_id: Option<String>,
+    mobile_request_hash: Option<String>,
+    client_token_hash_at_create: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerSignalRow {
+    signal_id: i64,
+    sender_role: String,
+    kind: String,
+    payload_json: String,
+    created_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerOperationRow {
+    operation_id: String,
+    request_id: String,
+    session_id: String,
+    client_id: String,
+    tool_name: String,
+    request_sha256: String,
+    grant_generation: Option<i64>,
+    sensitive_result: i64,
+    state: String,
+    result_sha256: Option<String>,
+    result_json: Option<String>,
+    created_at: i64,
+    updated_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerToolGrantRow {
+    tool_name: String,
+    generation: i64,
+    expires_at: i64,
+    revoked_at: Option<i64>,
+}
+
+const REMOTE_NETWORK_BINDING_MAX_SECONDS: i64 = 24 * 60 * 60;
+const REMOTE_NETWORK_CELL_SNAPSHOT_MAX_BINDINGS: usize = 256;
+const REMOTE_NETWORK_ENROLLMENT_SECONDS: i64 = 5 * 60;
+
+fn remote_network_service_id(value: &str) -> Option<String> {
+    let value = value.trim();
+    (value == "official-device-mcp").then(|| value.to_string())
+}
+
+fn remote_network_identifier(value: &str, min: usize, max: usize) -> Option<String> {
+    let value = value.trim();
+    (value.len() >= min
+        && value.len() <= max
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.')))
+    .then(|| value.to_string())
+}
+
+fn remote_network_sha256(value: &str) -> Option<String> {
+    let value = value.trim();
+    (value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')))
+    .then(|| value.to_string())
+}
+
+fn remote_network_authority_allowed(request: &Request, env: &Env) -> bool {
+    let supplied = request
+        .headers()
+        .get("X-Fabushi-Network-Authority")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let expected = env
+        .secret("FDN_NETWORK_AUTHORITY_TOKEN")
+        .ok()
+        .map(|secret| secret.to_string())
+        .unwrap_or_default();
+    supplied.len() >= 48
+        && expected.len() >= 48
+        && constant_time_eq(supplied.as_bytes(), expected.as_bytes())
+}
+
+fn remote_network_cell_for_account(user_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"fabushi-fdn-cell-v1\0");
+    hasher.update(user_id.as_bytes());
+    let digest = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
+    format!("cell-{}", &digest[..32])
+}
+
+fn remote_network_enrollment_secret_hash(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"fabushi-fdn-enrollment-secret-hash-v1\0");
+    hasher.update(value.as_bytes());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
+}
+
+fn recoverable_remote_network_enrollment_secret(
+    device_secret: &str,
+    request_id: &str,
+    grant_id: &str,
+) -> String {
+    fn digest(domain: &[u8], device_secret: &str, request_id: &str, grant_id: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(domain);
+        for value in [device_secret, request_id, grant_id] {
+            hasher.update(value.as_bytes());
+            hasher.update([0]);
+        }
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
+    }
+    format!(
+        "fne_{}{}",
+        digest(
+            b"fabushi-fdn-enrollment-secret-v1:a\0",
+            device_secret,
+            request_id,
+            grant_id,
+        ),
+        digest(
+            b"fabushi-fdn-enrollment-secret-v1:b\0",
+            device_secret,
+            request_id,
+            grant_id,
+        ),
+    )
+}
+
+fn remote_secret_hash(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"fabushi-remote-computer-v1\0");
+    hasher.update(value.as_bytes());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
+}
+
+async fn remote_desktop_secret_matches(
+    database: &worker::D1Database,
+    user_id: &str,
+    device_id: &str,
+    device_secret: &str,
+) -> Result<bool> {
+    if device_secret.len() < 48 || device_secret.len() > 256 {
+        return Ok(false);
+    }
+    let row = worker::query!(
+        database,
+        "SELECT device_secret_hash FROM remote_computers
+         WHERE device_id = ?1 AND user_id = ?2 AND revoked_at IS NULL LIMIT 1",
+        device_id,
+        user_id
+    )?
+    .first::<RemoteComputerSecretRow>(None)
+    .await?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    let candidate = remote_secret_hash(device_secret);
+    Ok(constant_time_eq(
+        candidate.as_bytes(),
+        row.device_secret_hash.as_bytes(),
+    ))
+}
+
+fn new_remote_pairing_code() -> String {
+    let raw = Uuid::new_v4().simple().to_string();
+    raw[..12].to_ascii_uppercase()
+}
+
+fn remote_mobile_request_id(value: &str) -> Option<String> {
+    let value = value.trim();
+    (value.len() >= 16
+        && value.len() <= 160
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.')))
+    .then(|| value.to_string())
+}
+
+const REMOTE_OPERATION_MAX_RESULT_BYTES: usize = 256 * 1024;
+
+fn remote_operation_sha256(value: &str) -> Option<String> {
+    let value = value.trim();
+    (value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')))
+    .then(|| value.to_string())
+}
+
+fn remote_operation_tool_name(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.')
+        }))
+    .then(|| value.to_string())
+}
+
+fn remote_operation_result_status(value: &str) -> Option<String> {
+    matches!(value, "completed" | "failed").then(|| value.to_string())
+}
+
+fn remote_mobile_request_hash(
+    user_id: &str,
+    device_id: &str,
+    client_id: &str,
+    request_id: &str,
+    client_token_hash: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"fabushi-remote-mobile-create-v1\0");
+    for value in [user_id, device_id, client_id, request_id, client_token_hash] {
+        hasher.update(value.as_bytes());
+        hasher.update([0]);
+    }
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
+}
+
+fn recoverable_remote_mobile_token(
+    client_token: &str,
+    request_id: &str,
+    session_id: &str,
+) -> String {
+    fn digest(domain: &[u8], client_token: &str, request_id: &str, session_id: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(domain);
+        for value in [client_token, request_id, session_id] {
+            hasher.update(value.as_bytes());
+            hasher.update([0]);
+        }
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
+    }
+    format!(
+        "rmt_{}{}",
+        digest(
+            b"fabushi-remote-mobile-token-v1:a\0",
+            client_token,
+            request_id,
+            session_id,
+        ),
+        digest(
+            b"fabushi-remote-mobile-token-v1:b\0",
+            client_token,
+            request_id,
+            session_id,
+        )
+    )
+}
+
+fn new_remote_client_token() -> String {
+    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+fn recoverable_target_service_client_token(
+    device_secret: &str,
+    connection_id: &str,
+    delegation_id: &str,
+    request_id: &str,
+    client_id: &str,
+) -> String {
+    fn digest(
+        domain: &[u8],
+        device_secret: &str,
+        connection_id: &str,
+        delegation_id: &str,
+        request_id: &str,
+        client_id: &str,
+    ) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(domain);
+        for value in [device_secret, connection_id, delegation_id, request_id, client_id] {
+            hasher.update(value.as_bytes());
+            hasher.update([0]);
+        }
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize())
+    }
+    format!(
+        "rct_{}{}",
+        digest(
+            b"fabushi-remote-service-client-v1:a\0",
+            device_secret,
+            connection_id,
+            delegation_id,
+            request_id,
+            client_id,
+        ),
+        digest(
+            b"fabushi-remote-service-client-v1:b\0",
+            device_secret,
+            connection_id,
+            delegation_id,
+            request_id,
+            client_id,
+        ),
+    )
+}
+
+fn remote_label(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty() && value.chars().count() <= 80).then(|| value.to_string())
+}
+
+fn default_remote_provider() -> String {
+    "fabushi-webrtc".to_string()
+}
+
+fn default_remote_platform() -> String {
+    "unknown".to_string()
+}
+
+fn default_remote_app_version() -> String {
+    "unknown".to_string()
+}
+
+fn remote_provider(value: &str) -> Option<String> {
+    let value = value.trim();
+    matches!(value, "fabushi-webrtc" | "rustdesk-sidecar").then(|| value.to_string())
+}
+
+fn remote_platform(value: &str) -> Option<String> {
+    let value = value.trim();
+    matches!(
+        value,
+        "windows" | "macos" | "linux" | "android" | "ios" | "web" | "unknown"
+    )
+    .then(|| value.to_string())
+}
+
+fn remote_app_version(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()
+        && value.len() <= 64
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || ".+_-".contains(character)))
+    .then(|| value.to_string())
+}
+
+fn remote_capabilities(values: &[String]) -> Option<Vec<String>> {
+    if values.len() > 32 {
+        return None;
+    }
+    let mut normalized = Vec::with_capacity(values.len());
+    for value in values {
+        let value = value.trim();
+        if !matches!(
+            value,
+            "remote-desktop"
+                | "input"
+                | "clipboard"
+                | "file-transfer"
+                | "display"
+                | "audio"
+                | "session-management"
+        ) {
+            return None;
+        }
+        if !normalized.iter().any(|existing| existing == value) {
+            normalized.push(value.to_string());
+        }
+    }
+    normalized.sort();
+    Some(normalized)
+}
+
+fn remote_role(value: &str) -> bool {
+    matches!(value, "desktop" | "mobile")
+}
+
+fn remote_signal_kind(value: &str) -> bool {
+    matches!(value, "offer" | "answer" | "ice" | "ready" | "close")
+}
+
+fn remote_signal_kind_allowed(role: &str, kind: &str) -> bool {
+    match role {
+        "mobile" => matches!(kind, "offer" | "ice" | "ready" | "close"),
+        "desktop" => matches!(kind, "answer" | "ice" | "ready" | "close"),
+        _ => false,
+    }
+}
+
+fn remote_ice_servers(env: &Env) -> Vec<Value> {
+    let mut servers =
+        vec![json!({"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]})];
+    if let Ok(turn_url) = env.var("REMOTE_TURN_URL") {
+        let urls = turn_url
+            .to_string()
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if !urls.is_empty() {
+            let username = env
+                .secret("REMOTE_TURN_USERNAME")
+                .ok()
+                .map(|value| value.to_string())
+                .unwrap_or_default();
+            let credential = env
+                .secret("REMOTE_TURN_CREDENTIAL")
+                .ok()
+                .map(|value| value.to_string())
+                .unwrap_or_default();
+            if username.is_empty() || credential.is_empty() {
+                servers.push(json!({"urls": urls}));
+            } else {
+                servers.push(json!({
+                    "urls": urls,
+                    "username": username,
+                    "credential": credential,
+                }));
+            }
+        }
+    }
+    servers
+}
+
+pub(super) async fn remote_computer_list(
+    request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_live_account(&request, &context.env).await {
+        Ok(account) => account,
+        Err(_) => match authenticated_official_mcp_service(
+            &request,
+            &context.env,
+            "devices.read",
+        )
+        .await
+        {
+            Ok(account) => account,
+            Err(_) => {
+                return error_response(
+                    401,
+                    "unauthorized",
+                    "A valid Fabushi account or official MCP service credential is required to list computers.",
+                );
+            }
+        },
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let rows = worker::query!(
+        &database,
+        "SELECT computer.device_id, computer.label, computer.provider,
+                computer.platform, computer.app_version, computer.capabilities_json,
+                (SELECT COUNT(*) FROM remote_computer_sessions session
+                 WHERE session.user_id = computer.user_id
+                   AND session.device_id = computer.device_id
+                   AND session.state = 'active'
+                   AND session.expires_at > ?2) AS active_session_count,
+                (SELECT binding.generation FROM remote_computer_network_bindings binding
+                 WHERE binding.user_id = computer.user_id
+                   AND binding.device_id = computer.device_id
+                   AND binding.revoked_at IS NULL
+                   AND binding.expires_at > ?2) AS network_generation,
+                (SELECT binding.expires_at FROM remote_computer_network_bindings binding
+                 WHERE binding.user_id = computer.user_id
+                   AND binding.device_id = computer.device_id
+                   AND binding.revoked_at IS NULL
+                   AND binding.expires_at > ?2) AS network_expires_at,
+                computer.last_seen_at, computer.created_at
+         FROM remote_computers computer
+         WHERE computer.user_id = ?1 AND computer.revoked_at IS NULL
+         ORDER BY computer.last_seen_at DESC LIMIT 64",
+        &account.user_id,
+        now_seconds()
+    )?
+    .all()
+    .await?
+    .results::<RemoteComputerRow>()?;
+    let now = now_seconds();
+    let computers = rows
+        .into_iter()
+        .map(|row| {
+            let capabilities = serde_json::from_str::<Vec<String>>(&row.capabilities_json)
+                .ok()
+                .and_then(|values| remote_capabilities(&values))
+                .unwrap_or_default();
+            json!({
+                "deviceId": row.device_id,
+                "label": row.label,
+                "provider": row.provider,
+                "platform": row.platform,
+                "appVersion": row.app_version,
+                "capabilities": capabilities,
+                "activeSessionCount": row.active_session_count,
+                "networkBound": row.network_generation.is_some(),
+                "networkGeneration": row.network_generation,
+                "networkExpiresAt": row.network_expires_at,
+                "lastSeenAt": row.last_seen_at,
+                "createdAt": row.created_at,
+                "online": now.saturating_sub(row.last_seen_at) <= 45,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(Response::from_json(&json!({"computers": computers}))?.with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_register(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_live_account(&request, &context.env).await {
+        Ok(account) => account,
+        Err(_) => {
+            return error_response(
+                401,
+                "unauthorized",
+                "A valid Mahayana account token is required to register a computer.",
+            );
+        }
+    };
+    let input: RemoteComputerRegisterRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_remote_computer",
+                "Computer registration must be valid JSON.",
+            );
+        }
+    };
+    if !valid_relay_identifier(&input.device_id, 128) {
+        return error_response(400, "invalid_device_id", "deviceId is invalid.");
+    }
+    let Some(label) = remote_label(&input.label) else {
+        return error_response(400, "invalid_device_label", "Computer label is invalid.");
+    };
+    if input.device_secret.len() < 48 || input.device_secret.len() > 256 {
+        return error_response(
+            400,
+            "invalid_device_secret",
+            "Computer device secret is invalid.",
+        );
+    }
+    let Some(provider) = remote_provider(&input.provider) else {
+        return error_response(400, "invalid_provider", "Computer provider is invalid.");
+    };
+    let Some(platform) = remote_platform(&input.platform) else {
+        return error_response(400, "invalid_platform", "Computer platform is invalid.");
+    };
+    let Some(app_version) = remote_app_version(&input.app_version) else {
+        return error_response(
+            400,
+            "invalid_app_version",
+            "Computer appVersion is invalid.",
+        );
+    };
+    let Some(capabilities) = remote_capabilities(&input.capabilities) else {
+        return error_response(
+            400,
+            "invalid_capabilities",
+            "Computer capabilities are invalid.",
+        );
+    };
+    let capabilities_json = serde_json::to_string(&capabilities)
+        .map_err(|error| worker::Error::RustError(error.to_string()))?;
+    let device_secret_hash = remote_secret_hash(&input.device_secret);
+    let code = new_remote_pairing_code();
+    let code_hash = remote_secret_hash(&code);
+    let now = now_seconds();
+    let expires_at = now + REMOTE_PAIRING_SECONDS;
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let result = worker::query!(
+        &database,
+        "INSERT INTO remote_computers
+         (device_id, user_id, label, device_secret_hash, pairing_code_hash, pairing_expires_at,
+          created_at, last_seen_at, revoked_at, provider, platform, app_version, capabilities_json)
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, NULL, ?8, ?9, ?10, ?11
+         WHERE (SELECT COUNT(*) FROM remote_computers existing
+                WHERE existing.user_id = ?2 AND existing.revoked_at IS NULL
+                  AND existing.device_id <> ?1) < ?12
+         ON CONFLICT(device_id) DO UPDATE SET
+           label = excluded.label,
+           pairing_code_hash = excluded.pairing_code_hash,
+           pairing_expires_at = excluded.pairing_expires_at,
+           last_seen_at = excluded.last_seen_at,
+           provider = excluded.provider,
+           platform = excluded.platform,
+           app_version = excluded.app_version,
+           capabilities_json = excluded.capabilities_json,
+           revoked_at = NULL
+         WHERE remote_computers.user_id = excluded.user_id
+           AND remote_computers.device_secret_hash = excluded.device_secret_hash",
+        &input.device_id,
+        &account.user_id,
+        &label,
+        &device_secret_hash,
+        &code_hash,
+        expires_at,
+        now,
+        &provider,
+        &platform,
+        &app_version,
+        &capabilities_json,
+        REMOTE_COMPUTER_MAX_PER_ACCOUNT
+    )?
+    .run()
+    .await?;
+    if result.meta()?.and_then(|meta| meta.changes).unwrap_or(0) == 0 {
+        let owned = worker::query!(
+            &database,
+            "SELECT 1 AS ok FROM remote_computers
+             WHERE device_id = ?1 AND user_id = ?2 AND device_secret_hash = ?3 LIMIT 1",
+            &input.device_id,
+            &account.user_id,
+            &device_secret_hash
+        )?
+        .first::<RemoteComputerExistsRow>(None)
+        .await?
+        .is_some();
+        if owned {
+            return error_response(
+                429,
+                "computer_limit",
+                "This account has too many registered computers; remove one before reactivating this device.",
+            );
+        }
+        return error_response(
+            403,
+            "device_secret_mismatch",
+            "This computer registration is owned by another device secret.",
+        );
+    }
+    Ok(Response::from_json(&json!({
+        "deviceId": input.device_id,
+        "label": label,
+        "provider": provider,
+        "platform": platform,
+        "appVersion": app_version,
+        "capabilities": capabilities,
+        "pairingCode": code,
+        "pairingExpiresAt": expires_at,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_heartbeat(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_live_account(&request, &context.env).await {
+        Ok(account) => account,
+        Err(_) => {
+            return error_response(401, "unauthorized", "A valid account token is required.");
+        }
+    };
+    let input: RemoteComputerHeartbeatRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => return error_response(400, "invalid_heartbeat", "Heartbeat must be valid JSON."),
+    };
+    if !valid_relay_identifier(&input.device_id, 128) {
+        return error_response(400, "invalid_device_id", "deviceId is invalid.");
+    }
+    if input.device_secret.len() < 48 || input.device_secret.len() > 256 {
+        return error_response(
+            400,
+            "invalid_device_secret",
+            "Computer device secret is invalid.",
+        );
+    }
+    let device_secret_hash = remote_secret_hash(&input.device_secret);
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    let result = worker::query!(
+        &database,
+        "UPDATE remote_computers SET last_seen_at = ?1
+         WHERE device_id = ?2 AND user_id = ?3 AND device_secret_hash = ?4 AND revoked_at IS NULL",
+        now,
+        &input.device_id,
+        &account.user_id,
+        &device_secret_hash
+    )?
+    .run()
+    .await?;
+    if result.meta()?.and_then(|meta| meta.changes).unwrap_or(0) == 0 {
+        return error_response(404, "computer_not_found", "Computer is not registered.");
+    }
+    Ok(Response::from_json(&json!({"ok": true, "lastSeenAt": now}))?.with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_controller_network_route(
+    request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_official_mcp_service(
+        &request,
+        &context.env,
+        "devices.control",
+    )
+    .await
+    {
+        Ok(account) => account,
+        Err(_) => {
+            return error_response(
+                401,
+                "unauthorized",
+                "An official MCP devices.control service credential is required.",
+            );
+        }
+    };
+    let claims = match official_mcp_service_claims(&request, &context.env) {
+        Ok(claims) => claims,
+        Err(_) => {
+            return error_response(
+                401,
+                "unauthorized",
+                "Official MCP service binding claims are required.",
+            );
+        }
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    let row = worker::query!(
+        &database,
+        "SELECT binding.cell_id, binding.node_id, binding.generation, binding.expires_at
+         FROM remote_computer_network_bindings binding
+         JOIN remote_computers computer
+           ON computer.user_id = binding.user_id
+          AND computer.device_id = binding.device_id
+         WHERE binding.user_id = ?1
+           AND binding.device_id = ?2
+           AND binding.revoked_at IS NULL
+           AND binding.expires_at > ?3
+           AND computer.revoked_at IS NULL
+         LIMIT 1",
+        &account.user_id,
+        &device_id,
+        now
+    )?
+    .first::<RemoteComputerControllerNetworkRouteRow>(None)
+    .await?;
+    let Some(row) = row else {
+        return error_response(
+            404,
+            "network_route_not_found",
+            "No live private network route is available for this computer.",
+        );
+    };
+    Ok(Response::from_json(&json!({
+        "deviceId": device_id,
+        "cellId": row.cell_id,
+        "nodeId": row.node_id,
+        "generation": row.generation,
+        "expiresAt": row.expires_at,
+        "connectionId": claims.connection_id,
+        "delegationId": claims.delegation_id,
+        "active": true,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_network_binding(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_live_account(&request, &context.env).await {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let input: RemoteComputerNetworkBindingRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_network_binding_request",
+                "Network binding request must be valid JSON.",
+            );
+        }
+    };
+    if !valid_relay_identifier(&input.device_id, 128)
+        || input.device_secret.len() < 48
+        || input.device_secret.len() > 256
+    {
+        return error_response(
+            400,
+            "invalid_network_binding_request",
+            "Network binding device identity is invalid.",
+        );
+    }
+    let database = context.env.d1(DATABASE_BINDING)?;
+    if !remote_desktop_secret_matches(
+        &database,
+        &account.user_id,
+        &input.device_id,
+        &input.device_secret,
+    )
+    .await?
+    {
+        return error_response(
+            404,
+            "network_binding_not_found",
+            "No network binding is available for this computer.",
+        );
+    }
+    let row = worker::query!(
+        &database,
+        "SELECT cell_id, node_id, proof_sha256, generation, bound_at, expires_at, revoked_at
+         FROM remote_computer_network_bindings
+         WHERE user_id = ?1 AND device_id = ?2 LIMIT 1",
+        &account.user_id,
+        &input.device_id
+    )?
+    .first::<RemoteComputerNetworkBindingRow>(None)
+    .await?;
+    let Some(row) = row else {
+        return error_response(
+            404,
+            "network_binding_not_found",
+            "No network binding is available for this computer.",
+        );
+    };
+    let now = now_seconds();
+    let active = row.revoked_at.is_none() && row.expires_at > now;
+    Ok(Response::from_json(&json!({
+        "deviceId": input.device_id,
+        "cellId": row.cell_id,
+        "nodeId": row.node_id,
+        "proofSha256": row.proof_sha256,
+        "generation": row.generation,
+        "boundAt": row.bound_at,
+        "expiresAt": row.expires_at,
+        "revokedAt": row.revoked_at,
+        "active": active,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_network_ingress(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_live_account(&request, &context.env).await {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let input: RemoteComputerNetworkIngressRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_network_ingress_request",
+                "Network ingress request must be valid JSON.",
+            );
+        }
+    };
+    let Some(service_id) = remote_network_service_id(&input.service_id) else {
+        return error_response(
+            400,
+            "invalid_network_ingress_service",
+            "Network ingress serviceId is invalid.",
+        );
+    };
+    if !valid_relay_identifier(&input.device_id, 128)
+        || input.device_secret.len() < 48
+        || input.device_secret.len() > 256
+    {
+        return error_response(
+            400,
+            "invalid_network_ingress_request",
+            "Network ingress device identity is invalid.",
+        );
+    }
+    let database = context.env.d1(DATABASE_BINDING)?;
+    if !remote_desktop_secret_matches(
+        &database,
+        &account.user_id,
+        &input.device_id,
+        &input.device_secret,
+    )
+    .await?
+    {
+        return error_response(
+            404,
+            "network_ingress_not_found",
+            "No network ingress peer is available for this computer.",
+        );
+    }
+    let now = now_seconds();
+    let row = worker::query!(
+        &database,
+        "SELECT target.cell_id AS cell_id,
+                target.generation AS target_generation,
+                ingress.node_id AS node_id,
+                ingress.generation AS ingress_generation,
+                CASE WHEN target.expires_at < ingress.expires_at
+                     THEN target.expires_at ELSE ingress.expires_at END AS expires_at
+         FROM remote_computer_network_bindings target
+         JOIN remote_computer_network_ingress_bindings ingress
+           ON ingress.user_id = target.user_id
+          AND ingress.cell_id = target.cell_id
+          AND ingress.service_id = ?4
+         JOIN remote_computers computer
+           ON computer.user_id = target.user_id
+          AND computer.device_id = target.device_id
+         WHERE target.user_id = ?1
+           AND target.device_id = ?2
+           AND target.revoked_at IS NULL
+           AND target.expires_at > ?3
+           AND ingress.revoked_at IS NULL
+           AND ingress.expires_at > ?3
+           AND computer.revoked_at IS NULL
+         LIMIT 1",
+        &account.user_id,
+        &input.device_id,
+        now,
+        &service_id
+    )?
+    .first::<RemoteComputerNetworkIngressRow>(None)
+    .await?;
+    let Some(row) = row else {
+        return error_response(
+            404,
+            "network_ingress_not_found",
+            "No live account/cell ingress peer is available for this computer.",
+        );
+    };
+    Ok(Response::from_json(&json!({
+        "deviceId": input.device_id,
+        "cellId": row.cell_id,
+        "targetGeneration": row.target_generation,
+        "serviceId": service_id,
+        "nodeId": row.node_id,
+        "ingressGeneration": row.ingress_generation,
+        "expiresAt": row.expires_at,
+        "active": true,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_network_ingress_bind(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    if !remote_network_authority_allowed(&request, &context.env) {
+        return error_response(
+            401,
+            "network_authority_unauthorized",
+            "A valid network enrollment authority credential is required.",
+        );
+    }
+    let input: RemoteComputerNetworkIngressBindRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_network_ingress",
+                "Network ingress binding must be valid JSON.",
+            );
+        }
+    };
+    let Some(cell_id) = remote_network_identifier(&input.cell_id, 8, 128) else {
+        return error_response(400, "invalid_network_cell", "Network cellId is invalid.");
+    };
+    let Some(node_id) = remote_network_identifier(&input.node_id, 8, 160) else {
+        return error_response(400, "invalid_network_node", "Network ingress nodeId is invalid.");
+    };
+    let Some(service_id) = remote_network_service_id(&input.service_id) else {
+        return error_response(
+            400,
+            "invalid_network_ingress_service",
+            "Network ingress serviceId is invalid.",
+        );
+    };
+    if input.user_id.trim().is_empty()
+        || input.user_id.len() > 160
+        || input.generation < 1
+    {
+        return error_response(
+            400,
+            "invalid_network_ingress",
+            "Network ingress identity or generation is invalid.",
+        );
+    }
+    let now = now_seconds();
+    if input.expires_at <= now
+        || input.expires_at.saturating_sub(now) > REMOTE_NETWORK_BINDING_MAX_SECONDS
+    {
+        return error_response(
+            400,
+            "invalid_network_ingress_expiry",
+            "Network ingress expiry is outside the allowed window.",
+        );
+    }
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let result = worker::query!(
+        &database,
+        "INSERT INTO remote_computer_network_ingress_bindings
+         (user_id, cell_id, service_id, node_id, generation, bound_at, expires_at, revoked_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)
+         ON CONFLICT(user_id, cell_id, service_id) DO UPDATE SET
+           node_id = excluded.node_id,
+           generation = excluded.generation,
+           bound_at = excluded.bound_at,
+           expires_at = excluded.expires_at,
+           revoked_at = NULL
+         WHERE excluded.generation > remote_computer_network_ingress_bindings.generation",
+        &input.user_id,
+        &cell_id,
+        &service_id,
+        &node_id,
+        input.generation,
+        now,
+        input.expires_at
+    )?
+    .run()
+    .await?;
+    let reconciled = if result.meta()?.and_then(|meta| meta.changes).unwrap_or(0) == 0 {
+        let row = worker::query!(
+            &database,
+            "SELECT node_id, generation, expires_at, revoked_at
+             FROM remote_computer_network_ingress_bindings
+             WHERE user_id = ?1 AND cell_id = ?2 AND service_id = ?3 LIMIT 1",
+            &input.user_id,
+            &cell_id,
+            &service_id
+        )?
+        .first::<RemoteComputerNetworkIngressBindingRow>(None)
+        .await?;
+        let Some(row) = row else {
+            return error_response(
+                409,
+                "network_ingress_generation_conflict",
+                "Network ingress generation must advance monotonically.",
+            );
+        };
+        if row.node_id != node_id
+            || row.generation != input.generation
+            || row.expires_at != input.expires_at
+            || row.revoked_at.is_some()
+        {
+            return error_response(
+                409,
+                "network_ingress_generation_conflict",
+                "Network ingress generation must advance monotonically.",
+            );
+        }
+        true
+    } else {
+        false
+    };
+    Ok(Response::from_json(&json!({
+        "ok": true,
+        "userId": input.user_id,
+        "cellId": cell_id,
+        "serviceId": service_id,
+        "nodeId": node_id,
+        "generation": input.generation,
+        "expiresAt": input.expires_at,
+        "reconciled": reconciled,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_network_ingress_revoke(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    if !remote_network_authority_allowed(&request, &context.env) {
+        return error_response(
+            401,
+            "network_authority_unauthorized",
+            "A valid network enrollment authority credential is required.",
+        );
+    }
+    let input: RemoteComputerNetworkIngressRevokeRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_network_ingress_revoke",
+                "Network ingress revoke request must be valid JSON.",
+            );
+        }
+    };
+    let Some(cell_id) = remote_network_identifier(&input.cell_id, 8, 128) else {
+        return error_response(400, "invalid_network_cell", "Network cellId is invalid.");
+    };
+    let Some(service_id) = remote_network_service_id(&input.service_id) else {
+        return error_response(
+            400,
+            "invalid_network_ingress_service",
+            "Network ingress serviceId is invalid.",
+        );
+    };
+    if input.user_id.trim().is_empty()
+        || input.user_id.len() > 160
+        || input.generation < 1
+    {
+        return error_response(
+            400,
+            "invalid_network_ingress_revoke",
+            "Network ingress revoke identity is invalid.",
+        );
+    }
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    let result = worker::query!(
+        &database,
+        "UPDATE remote_computer_network_ingress_bindings SET revoked_at = ?1
+         WHERE user_id = ?2 AND cell_id = ?3 AND service_id = ?4
+           AND generation = ?5 AND revoked_at IS NULL",
+        now,
+        &input.user_id,
+        &cell_id,
+        &service_id,
+        input.generation
+    )?
+    .run()
+    .await?;
+    if result.meta()?.and_then(|meta| meta.changes).unwrap_or(0) == 0 {
+        let already_revoked = worker::query!(
+            &database,
+            "SELECT 1 AS ok FROM remote_computer_network_ingress_bindings
+             WHERE user_id = ?1 AND cell_id = ?2 AND service_id = ?3
+               AND generation = ?4 AND revoked_at IS NOT NULL LIMIT 1",
+            &input.user_id,
+            &cell_id,
+            &service_id,
+            input.generation
+        )?
+        .first::<RemoteComputerExistsRow>(None)
+        .await?
+        .is_some();
+        if !already_revoked {
+            return error_response(
+                404,
+                "network_ingress_not_found",
+                "No live network ingress binding matches this account, cell, service, and generation.",
+            );
+        }
+    }
+    Ok(Response::from_json(&json!({
+        "ok": true,
+        "userId": input.user_id,
+        "cellId": cell_id,
+        "serviceId": service_id,
+        "generation": input.generation,
+        "revokedAt": now,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_network_enrollment_issue(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_live_account(&request, &context.env).await {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let input: RemoteComputerNetworkEnrollmentIssueRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_network_enrollment_request",
+                "Network enrollment grant request must be valid JSON.",
+            );
+        }
+    };
+    let Some(request_id) = remote_mobile_request_id(&input.request_id) else {
+        return error_response(
+            400,
+            "invalid_request_id",
+            "requestId must be a stable bounded enrollment identity.",
+        );
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    if !remote_desktop_secret_matches(
+        &database,
+        &account.user_id,
+        &device_id,
+        &input.device_secret,
+    )
+    .await?
+    {
+        return error_response(
+            403,
+            "target_device_forbidden",
+            "Target device authentication failed.",
+        );
+    }
+    let now = now_seconds();
+
+    if let Some(row) = worker::query!(
+        &database,
+        "SELECT grant_id, request_id, cell_id, generation, secret_hash, expires_at,
+                redeemed_at, revoked_at
+         FROM remote_computer_network_enrollment_grants
+         WHERE user_id = ?1 AND device_id = ?2 AND request_id = ?3 LIMIT 1",
+        &account.user_id,
+        &device_id,
+        &request_id
+    )?
+    .first::<RemoteComputerNetworkEnrollmentGrantRow>(None)
+    .await?
+    {
+        if row.redeemed_at.is_some() || row.revoked_at.is_some() || row.expires_at <= now {
+            return error_response(
+                409,
+                "network_enrollment_request_conflict",
+                "This network enrollment request identity is no longer reusable.",
+            );
+        }
+        let current_generation = worker::query!(
+            &database,
+            "SELECT generation FROM remote_computer_network_bindings
+             WHERE user_id = ?1 AND device_id = ?2 LIMIT 1",
+            &account.user_id,
+            &device_id
+        )?
+        .first::<RemoteComputerGenerationRow>(None)
+        .await?
+        .map(|value| value.generation)
+        .unwrap_or(0);
+        if current_generation >= row.generation {
+            return error_response(
+                409,
+                "network_enrollment_generation_stale",
+                "The network enrollment generation has already been reached.",
+            );
+        }
+        let grant_secret = recoverable_remote_network_enrollment_secret(
+            &input.device_secret,
+            &row.request_id,
+            &row.grant_id,
+        );
+        let secret_hash = remote_network_enrollment_secret_hash(&grant_secret);
+        if !constant_time_eq(secret_hash.as_bytes(), row.secret_hash.as_bytes()) {
+            return error_response(
+                409,
+                "network_enrollment_recovery_conflict",
+                "The existing network enrollment grant cannot be recovered.",
+            );
+        }
+        return Ok(Response::from_json(&json!({
+            "grantId": row.grant_id,
+            "grantSecret": grant_secret,
+            "cellId": row.cell_id,
+            "generation": row.generation,
+            "expiresAt": row.expires_at,
+            "requestId": row.request_id,
+            "reconciled": true,
+        }))?
+        .with_headers(auth_headers()));
+    }
+
+    let generation = worker::query!(
+        &database,
+        "SELECT generation FROM remote_computer_network_bindings
+         WHERE user_id = ?1 AND device_id = ?2 LIMIT 1",
+        &account.user_id,
+        &device_id
+    )?
+    .first::<RemoteComputerGenerationRow>(None)
+    .await?
+    .map(|value| value.generation.saturating_add(1))
+    .unwrap_or(1);
+    let cell_id = remote_network_cell_for_account(&account.user_id);
+    let grant_id = format!("network-enroll-{}", Uuid::new_v4().simple());
+    let grant_secret = recoverable_remote_network_enrollment_secret(
+        &input.device_secret,
+        &request_id,
+        &grant_id,
+    );
+    let secret_hash = remote_network_enrollment_secret_hash(&grant_secret);
+    let expires_at = now.saturating_add(REMOTE_NETWORK_ENROLLMENT_SECONDS);
+    let results = database
+        .batch(vec![
+            worker::query!(
+                &database,
+                "UPDATE remote_computer_network_enrollment_grants
+                 SET revoked_at = ?1
+                 WHERE user_id = ?2 AND device_id = ?3
+                   AND redeemed_at IS NULL AND revoked_at IS NULL",
+                now,
+                &account.user_id,
+                &device_id
+            )?,
+            worker::query!(
+                &database,
+                "INSERT INTO remote_computer_network_enrollment_grants
+                 (grant_id, user_id, device_id, request_id, cell_id, generation,
+                  secret_hash, created_at, expires_at, redeemed_at, revoked_at)
+                 SELECT ?1, d.user_id, d.device_id, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL
+                 FROM remote_computers d
+                 WHERE d.user_id = ?8 AND d.device_id = ?9 AND d.revoked_at IS NULL",
+                &grant_id,
+                &request_id,
+                &cell_id,
+                generation,
+                &secret_hash,
+                now,
+                expires_at,
+                &account.user_id,
+                &device_id
+            )?,
+        ])
+        .await?;
+    if d1_changes(results.get(1)) == 0 {
+        return error_response(
+            404,
+            "network_enrollment_device_not_found",
+            "The target Remote Computer is not active for this account.",
+        );
+    }
+    Ok(Response::from_json(&json!({
+        "grantId": grant_id,
+        "grantSecret": grant_secret,
+        "cellId": cell_id,
+        "generation": generation,
+        "expiresAt": expires_at,
+        "requestId": request_id,
+        "reconciled": false,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_network_enrollment_revoke(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_live_account(&request, &context.env).await {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let grant_id = route_identifier(&context, "grant_id")?.to_string();
+    let input: RemoteComputerNetworkEnrollmentRevokeRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_network_enrollment_revoke",
+                "Network enrollment revoke request must be valid JSON.",
+            );
+        }
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    if !remote_desktop_secret_matches(
+        &database,
+        &account.user_id,
+        &device_id,
+        &input.device_secret,
+    )
+    .await?
+    {
+        return error_response(
+            403,
+            "target_device_forbidden",
+            "Target device authentication failed.",
+        );
+    }
+    let exists = worker::query!(
+        &database,
+        "SELECT 1 AS ok FROM remote_computer_network_enrollment_grants
+         WHERE grant_id = ?1 AND user_id = ?2 AND device_id = ?3 LIMIT 1",
+        &grant_id,
+        &account.user_id,
+        &device_id
+    )?
+    .first::<RemoteComputerExistsRow>(None)
+    .await?
+    .is_some();
+    if !exists {
+        return error_response(
+            404,
+            "network_enrollment_grant_not_found",
+            "Network enrollment grant was not found.",
+        );
+    }
+    let now = now_seconds();
+    worker::query!(
+        &database,
+        "UPDATE remote_computer_network_enrollment_grants
+         SET revoked_at = ?1
+         WHERE grant_id = ?2 AND user_id = ?3 AND device_id = ?4
+           AND redeemed_at IS NULL AND revoked_at IS NULL",
+        now,
+        &grant_id,
+        &account.user_id,
+        &device_id
+    )?
+    .run()
+    .await?;
+    Ok(Response::from_json(&json!({
+        "grantId": grant_id,
+        "revoked": true,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_network_enrollment_redeem(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    if !remote_network_authority_allowed(&request, &context.env) {
+        return error_response(
+            401,
+            "network_authority_unauthorized",
+            "A valid network enrollment authority credential is required.",
+        );
+    }
+    let input: RemoteComputerNetworkEnrollmentRedeemRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_network_enrollment_redeem",
+                "Network enrollment redemption request must be valid JSON.",
+            );
+        }
+    };
+    if !valid_relay_identifier(&input.grant_id, 96)
+        || input.grant_secret.len() < 80
+        || input.grant_secret.len() > 192
+    {
+        return error_response(
+            400,
+            "invalid_network_enrollment_redeem",
+            "Network enrollment grant identity is invalid.",
+        );
+    }
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let row = worker::query!(
+        &database,
+        "SELECT user_id, device_id, cell_id, generation, secret_hash, expires_at,
+                redeemed_at, revoked_at
+         FROM remote_computer_network_enrollment_grants
+         WHERE grant_id = ?1 LIMIT 1",
+        &input.grant_id
+    )?
+    .first::<RemoteComputerNetworkEnrollmentRedeemRow>(None)
+    .await?;
+    let Some(row) = row else {
+        return error_response(
+            404,
+            "network_enrollment_grant_not_found",
+            "Network enrollment grant was not found.",
+        );
+    };
+    let candidate_hash = remote_network_enrollment_secret_hash(&input.grant_secret);
+    if !constant_time_eq(candidate_hash.as_bytes(), row.secret_hash.as_bytes()) {
+        return error_response(
+            404,
+            "network_enrollment_grant_not_found",
+            "Network enrollment grant was not found.",
+        );
+    }
+    let now = now_seconds();
+    if row.redeemed_at.is_some() || row.revoked_at.is_some() || row.expires_at <= now {
+        return error_response(
+            409,
+            "network_enrollment_grant_inactive",
+            "Network enrollment grant is already consumed, revoked, or expired.",
+        );
+    }
+    let claimed = worker::query!(
+        &database,
+        "UPDATE remote_computer_network_enrollment_grants
+         SET redeemed_at = ?1
+         WHERE grant_id = ?2
+           AND redeemed_at IS NULL AND revoked_at IS NULL AND expires_at > ?1
+           AND NOT EXISTS (
+             SELECT 1 FROM remote_computer_network_bindings binding
+             WHERE binding.user_id = remote_computer_network_enrollment_grants.user_id
+               AND binding.device_id = remote_computer_network_enrollment_grants.device_id
+               AND binding.generation >= remote_computer_network_enrollment_grants.generation
+           )",
+        now,
+        &input.grant_id
+    )?
+    .run()
+    .await?;
+    if claimed.meta()?.and_then(|meta| meta.changes).unwrap_or(0) == 0 {
+        return error_response(
+            409,
+            "network_enrollment_grant_conflict",
+            "Network enrollment grant cannot be consumed at its current generation.",
+        );
+    }
+    Ok(Response::from_json(&json!({
+        "userId": row.user_id,
+        "deviceId": row.device_id,
+        "cellId": row.cell_id,
+        "generation": row.generation,
+        "expiresAt": row.expires_at,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_network_cell_snapshot(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    if !remote_network_authority_allowed(&request, &context.env) {
+        return error_response(
+            401,
+            "network_authority_unauthorized",
+            "A valid network enrollment authority credential is required.",
+        );
+    }
+    let input: RemoteComputerNetworkCellSnapshotRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_network_cell_snapshot",
+                "Network cell snapshot request must be valid JSON.",
+            );
+        }
+    };
+    let Some(cell_id) = remote_network_identifier(&input.cell_id, 8, 128) else {
+        return error_response(
+            400,
+            "invalid_network_cell_snapshot",
+            "Network cellId is invalid.",
+        );
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    let rows = worker::query!(
+        &database,
+        "SELECT binding.user_id, binding.device_id, binding.cell_id, binding.node_id,
+                binding.generation, binding.expires_at
+         FROM remote_computer_network_bindings binding
+         JOIN remote_computers computer
+           ON computer.user_id = binding.user_id
+          AND computer.device_id = binding.device_id
+         WHERE binding.cell_id = ?1
+           AND binding.revoked_at IS NULL
+           AND binding.expires_at > ?2
+           AND computer.revoked_at IS NULL
+         ORDER BY binding.device_id ASC
+         LIMIT 257",
+        &cell_id,
+        now
+    )?
+    .all()
+    .await?
+    .results::<RemoteComputerNetworkCellSnapshotRow>()?;
+    if rows.len() > REMOTE_NETWORK_CELL_SNAPSHOT_MAX_BINDINGS {
+        return error_response(
+            409,
+            "network_cell_snapshot_overflow",
+            "Network cell has more live bindings than can be projected safely.",
+        );
+    }
+    Ok(Response::from_json(&json!({
+        "cellId": cell_id,
+        "generatedAt": now,
+        "bindings": rows,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_network_binding_bind(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    if !remote_network_authority_allowed(&request, &context.env) {
+        return error_response(
+            401,
+            "network_authority_unauthorized",
+            "A valid network enrollment authority credential is required.",
+        );
+    }
+    let input: RemoteComputerNetworkBindingBindRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_network_binding",
+                "Network binding must be valid JSON.",
+            );
+        }
+    };
+    let Some(cell_id) = remote_network_identifier(&input.cell_id, 8, 128) else {
+        return error_response(400, "invalid_network_cell", "Network cellId is invalid.");
+    };
+    let Some(node_id) = remote_network_identifier(&input.node_id, 8, 160) else {
+        return error_response(400, "invalid_network_node", "Network nodeId is invalid.");
+    };
+    let Some(proof_sha256) = remote_network_sha256(&input.proof_sha256) else {
+        return error_response(400, "invalid_network_proof", "Network proof digest is invalid.");
+    };
+    if !valid_relay_identifier(&input.device_id, 128)
+        || input.user_id.trim().is_empty()
+        || input.user_id.len() > 160
+        || input.generation < 1
+    {
+        return error_response(
+            400,
+            "invalid_network_binding",
+            "Network binding identity or generation is invalid.",
+        );
+    }
+    let now = now_seconds();
+    if input.expires_at <= now
+        || input.expires_at.saturating_sub(now) > REMOTE_NETWORK_BINDING_MAX_SECONDS
+    {
+        return error_response(
+            400,
+            "invalid_network_binding_expiry",
+            "Network binding expiry is outside the allowed window.",
+        );
+    }
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let result = worker::query!(
+        &database,
+        "INSERT INTO remote_computer_network_bindings
+         (user_id, device_id, cell_id, node_id, proof_sha256, generation, bound_at, expires_at, revoked_at)
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL
+         FROM remote_computers computer
+         WHERE computer.user_id = ?1 AND computer.device_id = ?2 AND computer.revoked_at IS NULL
+         ON CONFLICT(user_id, device_id) DO UPDATE SET
+           cell_id = excluded.cell_id,
+           node_id = excluded.node_id,
+           proof_sha256 = excluded.proof_sha256,
+           generation = excluded.generation,
+           bound_at = excluded.bound_at,
+           expires_at = excluded.expires_at,
+           revoked_at = NULL
+         WHERE excluded.generation > remote_computer_network_bindings.generation",
+        &input.user_id,
+        &input.device_id,
+        &cell_id,
+        &node_id,
+        &proof_sha256,
+        input.generation,
+        now,
+        input.expires_at
+    )?
+    .run()
+    .await?;
+    if result.meta()?.and_then(|meta| meta.changes).unwrap_or(0) == 0 {
+        let device_exists = worker::query!(
+            &database,
+            "SELECT 1 AS ok FROM remote_computers
+             WHERE user_id = ?1 AND device_id = ?2 AND revoked_at IS NULL LIMIT 1",
+            &input.user_id,
+            &input.device_id
+        )?
+        .first::<RemoteComputerExistsRow>(None)
+        .await?
+        .is_some();
+        if !device_exists {
+            return error_response(
+                404,
+                "network_binding_device_not_found",
+                "The target Remote Computer is not registered for this account.",
+            );
+        }
+        return error_response(
+            409,
+            "network_binding_generation_conflict",
+            "Network binding generation must advance monotonically.",
+        );
+    }
+    Ok(Response::from_json(&json!({
+        "ok": true,
+        "userId": input.user_id,
+        "deviceId": input.device_id,
+        "generation": input.generation,
+        "expiresAt": input.expires_at,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_network_binding_revoke(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    if !remote_network_authority_allowed(&request, &context.env) {
+        return error_response(
+            401,
+            "network_authority_unauthorized",
+            "A valid network enrollment authority credential is required.",
+        );
+    }
+    let input: RemoteComputerNetworkBindingRevokeRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_network_binding_revoke",
+                "Network binding revoke request must be valid JSON.",
+            );
+        }
+    };
+    if !valid_relay_identifier(&input.device_id, 128)
+        || input.user_id.trim().is_empty()
+        || input.user_id.len() > 160
+        || input.generation < 1
+    {
+        return error_response(
+            400,
+            "invalid_network_binding_revoke",
+            "Network binding revoke identity is invalid.",
+        );
+    }
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    let result = worker::query!(
+        &database,
+        "UPDATE remote_computer_network_bindings SET revoked_at = ?1
+         WHERE user_id = ?2 AND device_id = ?3 AND generation = ?4 AND revoked_at IS NULL",
+        now,
+        &input.user_id,
+        &input.device_id,
+        input.generation
+    )?
+    .run()
+    .await?;
+    if result.meta()?.and_then(|meta| meta.changes).unwrap_or(0) == 0 {
+        return error_response(
+            404,
+            "network_binding_not_found",
+            "No live network binding matches this account, device, and generation.",
+        );
+    }
+    Ok(Response::from_json(&json!({
+        "ok": true,
+        "userId": input.user_id,
+        "deviceId": input.device_id,
+        "generation": input.generation,
+        "revokedAt": now,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_pair(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let (account, service_binding) =
+        match remote_controller_account(&request, &context.env).await {
+            Ok(actor) => actor,
+            Err(_) => {
+                return error_response(
+                    401,
+                    "unauthorized",
+                    "A Fabushi account or official MCP devices.control credential is required before pairing.",
+                );
+            }
+        };
+    let input: RemoteComputerPairRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_pairing",
+                "Pairing request must be valid JSON.",
+            );
+        }
+    };
+    let code = input.pairing_code.trim().to_ascii_uppercase();
+    if code.len() != 12 || !code.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return error_response(400, "invalid_pairing_code", "Pairing code is invalid.");
+    }
+    let Some(label) = remote_label(&input.label) else {
+        return error_response(400, "invalid_client_label", "Client label is invalid.");
+    };
+    let code_hash = remote_secret_hash(&code);
+    let now = now_seconds();
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let Some(computer) = worker::query!(
+        &database,
+        "SELECT device_id, label FROM remote_computers
+         WHERE user_id = ?1 AND pairing_code_hash = ?2
+           AND pairing_expires_at > ?3 AND revoked_at IS NULL
+         LIMIT 1",
+        &account.user_id,
+        &code_hash,
+        now
+    )?
+    .first::<RemoteComputerPairRow>(None)
+    .await?
+    else {
+        return error_response(
+            404,
+            "pairing_code_not_found",
+            "Pairing code is expired or does not belong to this account.",
+        );
+    };
+    let client_id = format!("remote-client-{}", Uuid::new_v4());
+    let client_token = new_remote_client_token();
+    let client_token_hash = remote_secret_hash(&client_token);
+    let pairing_claim_hash = remote_secret_hash(&format!("pair-claim:{client_id}:{client_token}"));
+    if let Some((connection_id, _)) = service_binding.as_ref() {
+        let already_bound = worker::query!(
+            &database,
+            "SELECT 1 AS ok FROM remote_computer_clients
+             WHERE user_id = ?1 AND device_id = ?2 AND service_connection_id = ?3
+               AND revoked_at IS NULL LIMIT 1",
+            &account.user_id,
+            &computer.device_id,
+            connection_id
+        )?
+        .first::<RemoteComputerExistsRow>(None)
+        .await?
+        .is_some();
+        if already_bound {
+            return error_response(
+                409,
+                "service_client_already_paired",
+                "This official MCP connection already has a paired client for the computer.",
+            );
+        }
+    }
+    let service_connection_id = service_binding.as_ref().map(|binding| binding.0.as_str());
+    let service_delegation_id = service_binding.as_ref().map(|binding| binding.1.as_str());
+    let results = database
+        .batch(vec![
+            worker::query!(
+                &database,
+                "UPDATE remote_computers SET pairing_code_hash = ?1
+                 WHERE device_id = ?2 AND user_id = ?3 AND pairing_code_hash = ?4
+                   AND pairing_expires_at > ?5 AND revoked_at IS NULL
+                   AND (SELECT COUNT(*) FROM remote_computer_clients c
+                        WHERE c.device_id = remote_computers.device_id
+                          AND c.user_id = remote_computers.user_id
+                          AND c.revoked_at IS NULL AND c.client_token_hash IS NOT NULL) < ?6",
+                &pairing_claim_hash,
+                &computer.device_id,
+                &account.user_id,
+                &code_hash,
+                now,
+                REMOTE_CLIENT_MAX_PER_DEVICE
+            )?,
+            worker::query!(
+                &database,
+                "INSERT INTO remote_computer_clients
+                 (client_id, device_id, user_id, label, paired_at, last_seen_at, revoked_at, client_token_hash,
+                  service_connection_id, service_delegation_id)
+                 SELECT ?1, d.device_id, d.user_id, ?2, ?3, ?3, NULL, ?4, ?5, ?6
+                 FROM remote_computers d
+                 WHERE d.device_id = ?7 AND d.user_id = ?8 AND d.pairing_code_hash = ?9
+                   AND d.revoked_at IS NULL
+                   AND (SELECT COUNT(*) FROM remote_computer_clients c
+                        WHERE c.device_id = d.device_id AND c.user_id = d.user_id
+                          AND c.revoked_at IS NULL AND c.client_token_hash IS NOT NULL) < ?10",
+                &client_id,
+                &label,
+                now,
+                &client_token_hash,
+                service_connection_id,
+                service_delegation_id,
+                &computer.device_id,
+                &account.user_id,
+                &pairing_claim_hash,
+                REMOTE_CLIENT_MAX_PER_DEVICE
+            )?,
+            worker::query!(
+                &database,
+                "UPDATE remote_computers
+                 SET pairing_code_hash = CASE
+                       WHEN EXISTS (SELECT 1 FROM remote_computer_clients c
+                                    WHERE c.client_id = ?4 AND c.device_id = ?1
+                                      AND c.user_id = ?2 AND c.revoked_at IS NULL
+                                      AND c.client_token_hash IS NOT NULL)
+                       THEN NULL ELSE ?5 END,
+                     pairing_expires_at = CASE
+                       WHEN EXISTS (SELECT 1 FROM remote_computer_clients c
+                                    WHERE c.client_id = ?4 AND c.device_id = ?1
+                                      AND c.user_id = ?2 AND c.revoked_at IS NULL
+                                      AND c.client_token_hash IS NOT NULL)
+                       THEN NULL ELSE pairing_expires_at END
+                 WHERE device_id = ?1 AND user_id = ?2 AND pairing_code_hash = ?3",
+                &computer.device_id,
+                &account.user_id,
+                &pairing_claim_hash,
+                &client_id,
+                &code_hash
+            )?,
+        ])
+        .await?;
+    let claim_changes = d1_changes(results.first());
+    let insert_changes = d1_changes(results.get(1));
+    if claim_changes == 0 {
+        let limit_reached = worker::query!(
+            &database,
+            "SELECT 1 AS ok FROM remote_computers d
+             WHERE d.device_id = ?1 AND d.user_id = ?2 AND d.pairing_code_hash = ?3
+               AND d.pairing_expires_at > ?4 AND d.revoked_at IS NULL
+               AND (SELECT COUNT(*) FROM remote_computer_clients c
+                    WHERE c.device_id = d.device_id AND c.user_id = d.user_id
+                      AND c.revoked_at IS NULL AND c.client_token_hash IS NOT NULL) >= ?5
+             LIMIT 1",
+            &computer.device_id,
+            &account.user_id,
+            &code_hash,
+            now,
+            REMOTE_CLIENT_MAX_PER_DEVICE
+        )?
+        .first::<RemoteComputerExistsRow>(None)
+        .await?
+        .is_some();
+        if limit_reached {
+            return error_response(
+                429,
+                "paired_client_limit",
+                "This computer has too many paired clients; revoke one before pairing again.",
+            );
+        }
+        return error_response(
+            404,
+            "pairing_code_not_found",
+            "Pairing code was already consumed or expired.",
+        );
+    }
+    if insert_changes == 0 {
+        return error_response(
+            429,
+            "paired_client_limit",
+            "This computer has too many paired clients; revoke one before pairing again.",
+        );
+    }
+    Ok(Response::from_json(&json!({
+        "deviceId": computer.device_id,
+        "computerLabel": computer.label,
+        "clientId": client_id,
+        "clientToken": client_token,
+        "clientLabel": label,
+        "pairedAt": now,
+        "serviceBound": service_binding.is_some(),
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_session_grant(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_live_account(&request, &context.env).await {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let input: RemoteComputerSessionGrantRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_session_grant",
+                "Target session grant request must be valid JSON.",
+            );
+        }
+    };
+    if !valid_relay_identifier(&input.connection_id, 200)
+        || !valid_relay_identifier(&input.delegation_id, 200)
+    {
+        return error_response(
+            400,
+            "invalid_service_binding",
+            "Official MCP connection or delegation id is invalid.",
+        );
+    }
+    let Some(request_id) = remote_mobile_request_id(&input.request_id) else {
+        return error_response(
+            400,
+            "invalid_request_id",
+            "requestId must be a stable bounded target grant identity.",
+        );
+    };
+    let Some(label) = remote_label(&input.label) else {
+        return error_response(400, "invalid_client_label", "Client label is invalid.");
+    };
+
+    let database = context.env.d1(DATABASE_BINDING)?;
+    if !remote_desktop_secret_matches(
+        &database,
+        &account.user_id,
+        &device_id,
+        &input.device_secret,
+    )
+    .await?
+    {
+        return error_response(
+            403,
+            "target_device_forbidden",
+            "Target device authentication failed.",
+        );
+    }
+    if !active_official_mcp_service_binding(
+        &context.env,
+        &account.user_id,
+        &input.connection_id,
+        &input.delegation_id,
+        "devices.control",
+    )
+    .await?
+    {
+        return error_response(
+            403,
+            "service_binding_forbidden",
+            "Official MCP service binding is not active for this account.",
+        );
+    }
+
+    let recover_existing = |row: RemoteComputerTargetGrantClientRow| {
+        let token = recoverable_target_service_client_token(
+            &input.device_secret,
+            &input.connection_id,
+            &input.delegation_id,
+            &request_id,
+            &row.client_id,
+        );
+        let token_hash = remote_secret_hash(&token);
+        (row, token, token_hash)
+    };
+
+    if let Some(row) = worker::query!(
+        &database,
+        "SELECT client_id, client_token_hash, service_delegation_id, target_grant_request_id
+         FROM remote_computer_clients
+         WHERE user_id = ?1 AND device_id = ?2 AND service_connection_id = ?3
+           AND revoked_at IS NULL AND client_token_hash IS NOT NULL
+         LIMIT 1",
+        &account.user_id,
+        &device_id,
+        &input.connection_id
+    )?
+    .first::<RemoteComputerTargetGrantClientRow>(None)
+    .await?
+    {
+        if row.service_delegation_id.as_deref() != Some(input.delegation_id.as_str())
+            || row.target_grant_request_id.as_deref() != Some(request_id.as_str())
+        {
+            return error_response(
+                409,
+                "service_client_binding_conflict",
+                "This service connection is already bound by a different target grant.",
+            );
+        }
+        let (row, client_token, token_hash) = recover_existing(row);
+        if !constant_time_eq(token_hash.as_bytes(), row.client_token_hash.as_bytes()) {
+            return error_response(
+                409,
+                "service_client_recovery_conflict",
+                "The existing service-bound client credential cannot be recovered by this target grant.",
+            );
+        }
+        return Ok(Response::from_json(&json!({
+            "deviceId": device_id,
+            "clientId": row.client_id,
+            "clientToken": client_token,
+            "clientLabel": label,
+            "connectionId": input.connection_id,
+            "delegationId": input.delegation_id,
+            "requestId": request_id,
+            "serviceBound": true,
+            "targetGranted": true,
+            "reconciled": true,
+        }))?
+        .with_headers(auth_headers()));
+    }
+
+    let client_id = format!("remote-client-{}", Uuid::new_v4());
+    let client_token = recoverable_target_service_client_token(
+        &input.device_secret,
+        &input.connection_id,
+        &input.delegation_id,
+        &request_id,
+        &client_id,
+    );
+    let client_token_hash = remote_secret_hash(&client_token);
+    let now = now_seconds();
+    let inserted = worker::query!(
+        &database,
+        "INSERT OR IGNORE INTO remote_computer_clients
+         (client_id, device_id, user_id, label, paired_at, last_seen_at, revoked_at,
+          client_token_hash, service_connection_id, service_delegation_id, target_grant_request_id)
+         SELECT ?1, d.device_id, d.user_id, ?2, ?3, ?3, NULL, ?4, ?5, ?6, ?7
+         FROM remote_computers d
+         WHERE d.device_id = ?8 AND d.user_id = ?9 AND d.revoked_at IS NULL
+           AND (SELECT COUNT(*) FROM remote_computer_clients c
+                WHERE c.device_id = d.device_id AND c.user_id = d.user_id
+                  AND c.revoked_at IS NULL AND c.client_token_hash IS NOT NULL) < ?10",
+        &client_id,
+        &label,
+        now,
+        &client_token_hash,
+        &input.connection_id,
+        &input.delegation_id,
+        &request_id,
+        &device_id,
+        &account.user_id,
+        REMOTE_CLIENT_MAX_PER_DEVICE
+    )?
+    .run()
+    .await?;
+
+    if inserted.meta()?.and_then(|meta| meta.changes).unwrap_or(0) == 0 {
+        if let Some(row) = worker::query!(
+            &database,
+            "SELECT client_id, client_token_hash, service_delegation_id, target_grant_request_id
+             FROM remote_computer_clients
+             WHERE user_id = ?1 AND device_id = ?2 AND service_connection_id = ?3
+               AND revoked_at IS NULL AND client_token_hash IS NOT NULL
+             LIMIT 1",
+            &account.user_id,
+            &device_id,
+            &input.connection_id
+        )?
+        .first::<RemoteComputerTargetGrantClientRow>(None)
+        .await?
+        {
+            if row.service_delegation_id.as_deref() == Some(input.delegation_id.as_str())
+                && row.target_grant_request_id.as_deref() == Some(request_id.as_str())
+            {
+                let (row, recovered_token, recovered_hash) = recover_existing(row);
+                if constant_time_eq(recovered_hash.as_bytes(), row.client_token_hash.as_bytes()) {
+                    return Ok(Response::from_json(&json!({
+                        "deviceId": device_id,
+                        "clientId": row.client_id,
+                        "clientToken": recovered_token,
+                        "clientLabel": label,
+                        "connectionId": input.connection_id,
+                        "delegationId": input.delegation_id,
+                        "requestId": request_id,
+                        "serviceBound": true,
+                        "targetGranted": true,
+                        "reconciled": true,
+                    }))?
+                    .with_headers(auth_headers()));
+                }
+            }
+            return error_response(
+                409,
+                "service_client_binding_conflict",
+                "A concurrent or different target grant already owns this service connection.",
+            );
+        }
+        return error_response(
+            429,
+            "paired_client_limit",
+            "This computer has too many paired clients; revoke one before granting another controller.",
+        );
+    }
+
+    Ok(Response::from_json(&json!({
+        "deviceId": device_id,
+        "clientId": client_id,
+        "clientToken": client_token,
+        "clientLabel": label,
+        "connectionId": input.connection_id,
+        "delegationId": input.delegation_id,
+        "requestId": request_id,
+        "serviceBound": true,
+        "targetGranted": true,
+        "reconciled": false,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_clients(
+    request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_live_account(&request, &context.env).await {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?;
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let rows = worker::query!(
+        &database,
+        "SELECT c.client_id, c.label, c.paired_at, c.last_seen_at
+         FROM remote_computer_clients c
+         JOIN remote_computers d ON d.device_id = c.device_id
+         WHERE c.user_id = ?1 AND c.device_id = ?2 AND c.revoked_at IS NULL
+           AND c.client_token_hash IS NOT NULL
+           AND d.user_id = ?1 AND d.revoked_at IS NULL
+         ORDER BY c.paired_at DESC LIMIT 64",
+        &account.user_id,
+        device_id
+    )?
+    .all()
+    .await?
+    .results::<RemoteComputerClientRow>()?;
+    let clients = rows
+        .into_iter()
+        .map(|row| {
+            json!({
+                "clientId": row.client_id,
+                "label": row.label,
+                "pairedAt": row.paired_at,
+                "lastSeenAt": row.last_seen_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(
+        Response::from_json(&json!({"deviceId": device_id, "clients": clients}))?
+            .with_headers(auth_headers()),
+    )
+}
+
+pub(super) async fn remote_computer_client_revoke(
+    request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_live_account(&request, &context.env).await {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?;
+    let client_id = route_identifier(&context, "client_id")?;
+    let now = now_seconds();
+    let database = context.env.d1(DATABASE_BINDING)?;
+    database
+        .batch(vec![
+            worker::query!(
+                &database,
+                "UPDATE remote_computer_clients SET revoked_at = ?1
+                 WHERE client_id = ?2 AND device_id = ?3 AND user_id = ?4 AND revoked_at IS NULL",
+                now,
+                client_id,
+                device_id,
+                &account.user_id
+            )?,
+            worker::query!(
+                &database,
+                "UPDATE remote_computer_sessions SET state = 'closed', closed_at = ?1
+                 WHERE client_id = ?2 AND device_id = ?3 AND user_id = ?4 AND state <> 'closed'",
+                now,
+                client_id,
+                device_id,
+                &account.user_id
+            )?,
+        ])
+        .await?;
+    Ok(
+        Response::from_json(&json!({"revoked": true, "clientId": client_id}))?
+            .with_headers(auth_headers()),
+    )
+}
+
+pub(super) async fn remote_computer_sessions(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_live_account(&request, &context.env).await {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?;
+    let input: RemoteComputerDesktopAuthRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_device_auth",
+                "Desktop session list requires a device secret.",
+            );
+        }
+    };
+    let now = now_seconds();
+    let database = context.env.d1(DATABASE_BINDING)?;
+    if !remote_desktop_secret_matches(&database, &account.user_id, device_id, &input.device_secret)
+        .await?
+    {
+        return error_response(
+            403,
+            "device_secret_mismatch",
+            "Desktop device authentication failed.",
+        );
+    };
+    worker::query!(
+        &database,
+        "UPDATE remote_computer_sessions SET state = 'closed', closed_at = ?1
+         WHERE user_id = ?2 AND device_id = ?3 AND state <> 'closed' AND expires_at <= ?1",
+        now,
+        &account.user_id,
+        device_id
+    )?
+    .run()
+    .await?;
+    let rows = worker::query!(
+        &database,
+        "SELECT s.session_id, s.client_id, c.label AS client_label,
+                s.state, s.created_at, s.expires_at
+         FROM remote_computer_sessions s
+         JOIN remote_computer_clients c
+           ON c.client_id = s.client_id AND c.device_id = s.device_id AND c.user_id = s.user_id
+         JOIN remote_computers d ON d.device_id = s.device_id AND d.user_id = s.user_id
+         WHERE s.user_id = ?1 AND s.device_id = ?2 AND s.state <> 'closed'
+           AND s.expires_at > ?3 AND c.revoked_at IS NULL
+           AND c.client_token_hash IS NOT NULL AND d.revoked_at IS NULL
+         ORDER BY s.created_at DESC LIMIT 32",
+        &account.user_id,
+        device_id,
+        now
+    )?
+    .all()
+    .await?
+    .results::<RemoteComputerSessionListRow>()?;
+    let sessions = rows
+        .into_iter()
+        .map(|row| {
+            json!({
+                "sessionId": row.session_id,
+                "clientId": row.client_id,
+                "clientLabel": row.client_label,
+                "state": row.state,
+                "createdAt": row.created_at,
+                "expiresAt": row.expires_at,
+                "permissions": {"display": true, "input": true, "clipboard": false, "fileTransfer": false, "audio": false},
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(Response::from_json(&json!({
+        "deviceId": device_id,
+        "sessions": sessions,
+        "iceServers": remote_ice_servers(&context.env),
+    }))?
+    .with_headers(auth_headers()))
+}
+
+async fn load_remote_mobile_request_session(
+    database: &worker::D1Database,
+    user_id: &str,
+    device_id: &str,
+    client_id: &str,
+    request_id: &str,
+) -> Result<Option<RemoteComputerRecoverableSessionRow>> {
+    worker::query!(
+        database,
+        "SELECT session_id, device_id, client_id, mobile_token_hash, state, created_at, expires_at,
+                mobile_request_id, mobile_request_hash, client_token_hash_at_create
+         FROM remote_computer_sessions
+         WHERE user_id = ?1 AND device_id = ?2 AND client_id = ?3 AND mobile_request_id = ?4
+         LIMIT 1",
+        user_id,
+        device_id,
+        client_id,
+        request_id
+    )?
+    .first::<RemoteComputerRecoverableSessionRow>(None)
+    .await
+}
+
+fn validate_remote_mobile_recovery(
+    row: &RemoteComputerRecoverableSessionRow,
+    user_id: &str,
+    client_token: &str,
+    client_token_hash: &str,
+    request_id: &str,
+    now: i64,
+) -> std::result::Result<String, (&'static str, &'static str)> {
+    if row.mobile_request_id.as_deref() != Some(request_id) {
+        return Err(("control_session_request_conflict", "Control session request identity does not match."));
+    }
+    let expected_request_hash = remote_mobile_request_hash(
+        user_id,
+        &row.device_id,
+        &row.client_id,
+        request_id,
+        client_token_hash,
+    );
+    if row.mobile_request_hash.as_deref() != Some(expected_request_hash.as_str()) {
+        return Err(("control_session_request_conflict", "Control session request identity is bound to different credentials."));
+    }
+    if row.client_token_hash_at_create.as_deref() != Some(client_token_hash) {
+        return Err(("control_session_client_rotated", "The paired client credential changed after this session was created."));
+    }
+    if row.state == "closed" {
+        return Err(("control_session_closed", "The control session is already closed."));
+    }
+    if row.expires_at <= now {
+        return Err(("control_session_expired", "The control session has expired."));
+    }
+    let token = recoverable_remote_mobile_token(client_token, request_id, &row.session_id);
+    let token_hash = remote_secret_hash(&token);
+    if !constant_time_eq(token_hash.as_bytes(), row.mobile_token_hash.as_bytes()) {
+        return Err(("control_session_recovery_mismatch", "The control session credential cannot be recovered safely."));
+    }
+    Ok(token)
+}
+
+fn remote_mobile_session_response(
+    row: &RemoteComputerRecoverableSessionRow,
+    mobile_token: &str,
+    env: &Env,
+) -> Result<Response> {
+    Ok(Response::from_json(&json!({
+        "sessionId": row.session_id,
+        "deviceId": row.device_id,
+        "clientId": row.client_id,
+        "mobileToken": mobile_token,
+        "createdAt": row.created_at,
+        "expiresAt": row.expires_at,
+        "state": row.state,
+        "permissions": {"display": true, "input": true, "clipboard": false, "fileTransfer": false, "audio": false},
+        "iceServers": remote_ice_servers(env),
+    }))?
+    .with_headers(auth_headers()))
+}
+
+async fn remote_controller_account(
+    request: &Request,
+    env: &Env,
+) -> Result<(AuthenticatedAccount, Option<(String, String)>)> {
+    if let Ok(account) = authenticated_live_account(request, env).await {
+        return Ok((account, None));
+    }
+    let account = authenticated_official_mcp_service(request, env, "devices.control").await?;
+    let claims = official_mcp_service_claims(request, env)?;
+    Ok((account, Some((claims.connection_id, claims.delegation_id))))
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteComputerClientServiceBindingRow {
+    service_connection_id: Option<String>,
+    service_delegation_id: Option<String>,
+}
+
+async fn remote_controller_client_binding_matches(
+    database: &worker::D1Database,
+    user_id: &str,
+    device_id: &str,
+    client_id: &str,
+    service_binding: Option<&(String, String)>,
+) -> Result<bool> {
+    let row = worker::query!(
+        database,
+        "SELECT service_connection_id, service_delegation_id
+         FROM remote_computer_clients
+         WHERE client_id = ?1 AND device_id = ?2 AND user_id = ?3
+           AND revoked_at IS NULL AND client_token_hash IS NOT NULL
+         LIMIT 1",
+        client_id,
+        device_id,
+        user_id
+    )?
+    .first::<RemoteComputerClientServiceBindingRow>(None)
+    .await?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    Ok(match service_binding {
+        None => row.service_connection_id.is_none() && row.service_delegation_id.is_none(),
+        Some((connection_id, delegation_id)) => {
+            row.service_connection_id.as_deref() == Some(connection_id.as_str())
+                && row.service_delegation_id.as_deref() == Some(delegation_id.as_str())
+        }
+    })
+}
+
+async fn authenticate_remote_mobile_client(
+    database: &worker::D1Database,
+    user_id: &str,
+    device_id: &str,
+    client_id: &str,
+    client_token: &str,
+) -> Result<Option<String>> {
+    if !valid_relay_identifier(client_id, 160) || client_token.len() < 48 || client_token.len() > 256 {
+        return Ok(None);
+    }
+    let client = worker::query!(
+        database,
+        "SELECT client_token_hash
+         FROM remote_computer_clients
+         WHERE client_id = ?1 AND device_id = ?2 AND user_id = ?3
+           AND revoked_at IS NULL AND client_token_hash IS NOT NULL
+           AND EXISTS (SELECT 1 FROM remote_computers d
+                       WHERE d.device_id = ?2 AND d.user_id = ?3 AND d.revoked_at IS NULL)
+         LIMIT 1",
+        client_id,
+        device_id,
+        user_id
+    )?
+    .first::<RemoteComputerClientAuthRow>(None)
+    .await?;
+    let candidate_hash = remote_secret_hash(client_token);
+    Ok(client
+        .filter(|client| {
+            constant_time_eq(
+                candidate_hash.as_bytes(),
+                client.client_token_hash.as_bytes(),
+            )
+        })
+        .map(|_| candidate_hash))
+}
+
+pub(super) async fn remote_computer_session_create(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let (account, service_binding) =
+        match remote_controller_account(&request, &context.env).await {
+            Ok(actor) => actor,
+            Err(_) => {
+                return error_response(
+                    401,
+                    "unauthorized",
+                    "A valid Fabushi account or official MCP devices.control credential is required.",
+                );
+            }
+        };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let input: RemoteComputerSessionCreateRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_control_session",
+                "Session request must be valid JSON.",
+            );
+        }
+    };
+    if !valid_relay_identifier(&input.client_id, 160) {
+        return error_response(400, "invalid_client_id", "clientId is invalid.");
+    }
+    let Some(request_id) = remote_mobile_request_id(&input.request_id) else {
+        return error_response(400, "invalid_request_id", "requestId must be a stable bounded mobile request identity.");
+    };
+    if input.client_token.len() < 48 || input.client_token.len() > 256 {
+        return error_response(
+            400,
+            "invalid_client_token",
+            "Paired client credential is invalid.",
+        );
+    }
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let Some(candidate_hash) = authenticate_remote_mobile_client(
+        &database,
+        &account.user_id,
+        &device_id,
+        &input.client_id,
+        &input.client_token,
+    )
+    .await?
+    else {
+        return error_response(
+            403,
+            "client_not_paired",
+            "This controller is not paired with the computer.",
+        );
+    };
+    if !remote_controller_client_binding_matches(
+        &database,
+        &account.user_id,
+        &device_id,
+        &input.client_id,
+        service_binding.as_ref(),
+    )
+    .await?
+    {
+        return error_response(
+            403,
+            "client_service_binding_mismatch",
+            "The paired client belongs to another controller identity.",
+        );
+    }
+
+    let now = now_seconds();
+    worker::query!(
+        &database,
+        "UPDATE remote_computer_sessions SET state = 'closed', closed_at = ?1
+         WHERE user_id = ?2 AND device_id = ?3 AND state <> 'closed' AND expires_at <= ?1",
+        now,
+        &account.user_id,
+        &device_id
+    )?
+    .run()
+    .await?;
+
+    if let Some(existing) = load_remote_mobile_request_session(
+        &database,
+        &account.user_id,
+        &device_id,
+        &input.client_id,
+        &request_id,
+    )
+    .await?
+    {
+        let token = match validate_remote_mobile_recovery(
+            &existing,
+            &account.user_id,
+            &input.client_token,
+            &candidate_hash,
+            &request_id,
+            now,
+        ) {
+            Ok(token) => token,
+            Err(("control_session_expired", message)) => {
+                return error_response(410, "control_session_expired", message);
+            }
+            Err((code, message)) => return error_response(409, code, message),
+        };
+        return remote_mobile_session_response(&existing, &token, &context.env);
+    }
+
+    let session_id = format!("remote-session-{}", Uuid::new_v4());
+    let mobile_token = recoverable_remote_mobile_token(
+        &input.client_token,
+        &request_id,
+        &session_id,
+    );
+    let mobile_token_hash = remote_secret_hash(&mobile_token);
+    let request_hash = remote_mobile_request_hash(
+        &account.user_id,
+        &device_id,
+        &input.client_id,
+        &request_id,
+        &candidate_hash,
+    );
+    let expires_at = now + REMOTE_CONTROL_SESSION_SECONDS;
+    let inserted = worker::query!(
+        &database,
+        "INSERT OR IGNORE INTO remote_computer_sessions
+         (session_id, device_id, client_id, user_id, mobile_token_hash, state, created_at, expires_at, closed_at,
+          mobile_request_id, mobile_request_hash, client_token_hash_at_create)
+         SELECT ?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7, NULL, ?8, ?9, ?10
+         WHERE EXISTS (
+                 SELECT 1 FROM remote_computer_clients c
+                 JOIN remote_computers d
+                   ON d.device_id = c.device_id AND d.user_id = c.user_id
+                 WHERE c.client_id = ?3 AND c.device_id = ?2 AND c.user_id = ?4
+                   AND c.client_token_hash = ?10 AND c.revoked_at IS NULL
+                   AND d.revoked_at IS NULL
+                   AND ((?11 IS NULL AND ?12 IS NULL
+                         AND c.service_connection_id IS NULL AND c.service_delegation_id IS NULL)
+                        OR (c.service_connection_id = ?11 AND c.service_delegation_id = ?12))
+               )
+           AND (SELECT COUNT(*) FROM remote_computer_sessions
+                WHERE user_id = ?4 AND device_id = ?2 AND client_id = ?3
+                  AND state <> 'closed' AND expires_at > ?6) < ?13
+           AND (SELECT COUNT(*) FROM remote_computer_sessions
+                WHERE user_id = ?4 AND device_id = ?2
+                  AND state <> 'closed' AND expires_at > ?6) < ?14",
+        &session_id,
+        &device_id,
+        &input.client_id,
+        &account.user_id,
+        &mobile_token_hash,
+        now,
+        expires_at,
+        &request_id,
+        &request_hash,
+        &candidate_hash,
+        service_binding.as_ref().map(|binding| binding.0.as_str()),
+        service_binding.as_ref().map(|binding| binding.1.as_str()),
+        REMOTE_SESSION_MAX_PER_CLIENT,
+        REMOTE_SESSION_MAX_PER_DEVICE
+    )?
+    .run()
+    .await?;
+
+    if inserted.meta()?.and_then(|meta| meta.changes).unwrap_or(0) == 0 {
+        if let Some(existing) = load_remote_mobile_request_session(
+            &database,
+            &account.user_id,
+            &device_id,
+            &input.client_id,
+            &request_id,
+        )
+        .await?
+        {
+            let token = match validate_remote_mobile_recovery(
+                &existing,
+                &account.user_id,
+                &input.client_token,
+                &candidate_hash,
+                &request_id,
+                now,
+            ) {
+                Ok(token) => token,
+                Err(("control_session_expired", message)) => {
+                    return error_response(410, "control_session_expired", message);
+                }
+                Err((code, message)) => return error_response(409, code, message),
+            };
+            return remote_mobile_session_response(&existing, &token, &context.env);
+        }
+        let still_paired = authenticate_remote_mobile_client(
+            &database,
+            &account.user_id,
+            &device_id,
+            &input.client_id,
+            &input.client_token,
+        )
+        .await?
+        .is_some();
+        if !still_paired {
+            return error_response(
+                403,
+                "client_not_paired",
+                "This phone is no longer paired with the computer.",
+            );
+        }
+        return error_response(
+            429,
+            "control_session_limit",
+            "Too many pending control sessions exist for this paired client.",
+        );
+    }
+
+    let created = RemoteComputerRecoverableSessionRow {
+        session_id,
+        device_id,
+        client_id: input.client_id,
+        mobile_token_hash,
+        state: "pending".to_string(),
+        created_at: now,
+        expires_at,
+        mobile_request_id: Some(request_id),
+        mobile_request_hash: Some(request_hash),
+        client_token_hash_at_create: Some(candidate_hash),
+    };
+    remote_mobile_session_response(&created, &mobile_token, &context.env)
+}
+
+pub(super) async fn remote_computer_session_reconcile(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let (account, service_binding) =
+        match remote_controller_account(&request, &context.env).await {
+            Ok(actor) => actor,
+            Err(_) => {
+                return error_response(
+                    401,
+                    "unauthorized",
+                    "A valid Fabushi account or official MCP devices.control credential is required.",
+                );
+            }
+        };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let input: RemoteComputerSessionCreateRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_control_session_reconcile",
+                "Session reconcile request must be valid JSON.",
+            );
+        }
+    };
+    if !valid_relay_identifier(&input.client_id, 160) {
+        return error_response(400, "invalid_client_id", "clientId is invalid.");
+    }
+    let Some(request_id) = remote_mobile_request_id(&input.request_id) else {
+        return error_response(400, "invalid_request_id", "requestId must be a stable bounded mobile request identity.");
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let Some(candidate_hash) = authenticate_remote_mobile_client(
+        &database,
+        &account.user_id,
+        &device_id,
+        &input.client_id,
+        &input.client_token,
+    )
+    .await?
+    else {
+        return error_response(
+            403,
+            "client_not_paired",
+            "This controller is not paired with the computer.",
+        );
+    };
+    if !remote_controller_client_binding_matches(
+        &database,
+        &account.user_id,
+        &device_id,
+        &input.client_id,
+        service_binding.as_ref(),
+    )
+    .await?
+    {
+        return error_response(
+            403,
+            "client_service_binding_mismatch",
+            "The paired client belongs to another controller identity.",
+        );
+    }
+    let now = now_seconds();
+    worker::query!(
+        &database,
+        "UPDATE remote_computer_sessions SET state = 'closed', closed_at = ?1
+         WHERE user_id = ?2 AND device_id = ?3 AND state <> 'closed' AND expires_at <= ?1",
+        now,
+        &account.user_id,
+        &device_id
+    )?
+    .run()
+    .await?;
+    let Some(existing) = load_remote_mobile_request_session(
+        &database,
+        &account.user_id,
+        &device_id,
+        &input.client_id,
+        &request_id,
+    )
+    .await?
+    else {
+        return error_response(
+            404,
+            "control_session_request_not_found",
+            "No control session exists for this mobile request identity.",
+        );
+    };
+    let token = match validate_remote_mobile_recovery(
+        &existing,
+        &account.user_id,
+        &input.client_token,
+        &candidate_hash,
+        &request_id,
+        now,
+    ) {
+        Ok(token) => token,
+        Err(("control_session_expired", message)) => {
+            return error_response(410, "control_session_expired", message);
+        }
+        Err((code, message)) => return error_response(409, code, message),
+    };
+    remote_mobile_session_response(&existing, &token, &context.env)
+}
+
+
+async fn remote_operation_grant_active(
+    database: &worker::D1Database,
+    user_id: &str,
+    device_id: &str,
+    session_id: &str,
+    client_id: &str,
+    now: i64,
+) -> Result<bool> {
+    Ok(worker::query!(
+        database,
+        "SELECT 1 AS ok FROM remote_computer_session_grants
+         WHERE session_id = ?1 AND user_id = ?2 AND device_id = ?3 AND client_id = ?4
+           AND revoked_at IS NULL AND expires_at > ?5 LIMIT 1",
+        session_id,
+        user_id,
+        device_id,
+        client_id,
+        now
+    )?
+    .first::<RemoteComputerExistsRow>(None)
+    .await?
+    .is_some())
+}
+
+async fn remote_operation_tool_grant_generation(
+    database: &worker::D1Database,
+    user_id: &str,
+    device_id: &str,
+    session_id: &str,
+    client_id: &str,
+    tool_name: &str,
+    now: i64,
+) -> Result<Option<i64>> {
+    Ok(worker::query!(
+        database,
+        "SELECT generation FROM remote_computer_session_tool_grants
+         WHERE session_id = ?1 AND user_id = ?2 AND device_id = ?3 AND client_id = ?4
+           AND tool_name = ?5 AND revoked_at IS NULL AND expires_at > ?6
+         LIMIT 1",
+        session_id,
+        user_id,
+        device_id,
+        client_id,
+        tool_name,
+        now
+    )?
+    .first::<RemoteComputerGenerationRow>(None)
+    .await?
+    .map(|row| row.generation))
+}
+
+async fn remote_operation_controller_authorized(
+    database: &worker::D1Database,
+    user_id: &str,
+    device_id: &str,
+    session_id: &str,
+    client_id: &str,
+    mobile_token: &str,
+    service_binding: Option<&(String, String)>,
+    now: i64,
+) -> Result<bool> {
+    let Some(session) =
+        load_remote_control_session(database, user_id, device_id, session_id).await?
+    else {
+        return Ok(false);
+    };
+    if !remote_session_actor_allowed(
+        &session,
+        "mobile",
+        Some(client_id),
+        Some(mobile_token),
+        false,
+        now,
+    ) {
+        return Ok(false);
+    }
+    if !remote_controller_client_binding_matches(
+        database,
+        user_id,
+        device_id,
+        client_id,
+        service_binding,
+    )
+    .await?
+    {
+        return Ok(false);
+    }
+    remote_operation_grant_active(
+        database,
+        user_id,
+        device_id,
+        session_id,
+        client_id,
+        now,
+    )
+    .await
+}
+
+async fn remote_operation_target_authorized(
+    database: &worker::D1Database,
+    user_id: &str,
+    device_id: &str,
+    session_id: &str,
+    device_secret: &str,
+    now: i64,
+) -> Result<Option<String>> {
+    let Some(session) =
+        load_remote_control_session(database, user_id, device_id, session_id).await?
+    else {
+        return Ok(None);
+    };
+    let desktop_authorized =
+        remote_desktop_secret_matches(database, user_id, device_id, device_secret).await?;
+    if !remote_session_actor_allowed(
+        &session,
+        "desktop",
+        None,
+        None,
+        desktop_authorized,
+        now,
+    ) {
+        return Ok(None);
+    }
+    if !remote_operation_grant_active(
+        database,
+        user_id,
+        device_id,
+        session_id,
+        &session.client_id,
+        now,
+    )
+    .await?
+    {
+        return Ok(None);
+    }
+    Ok(Some(session.client_id))
+}
+
+async fn load_remote_operation(
+    database: &worker::D1Database,
+    user_id: &str,
+    device_id: &str,
+    session_id: &str,
+    request_id: &str,
+) -> Result<Option<RemoteComputerOperationRow>> {
+    worker::query!(
+        database,
+        "SELECT operation_id, request_id, session_id, client_id, tool_name,
+                request_sha256, grant_generation, sensitive_result, state, result_sha256, result_json,
+                created_at, updated_at
+         FROM remote_computer_operations
+         WHERE user_id = ?1 AND device_id = ?2 AND session_id = ?3 AND request_id = ?4
+         LIMIT 1",
+        user_id,
+        device_id,
+        session_id,
+        request_id
+    )?
+    .first::<RemoteComputerOperationRow>(None)
+    .await
+}
+
+fn remote_operation_json(row: &RemoteComputerOperationRow) -> Value {
+    let result = row
+        .result_json
+        .as_ref()
+        .and_then(|value| serde_json::from_str::<Value>(value).ok());
+    json!({
+        "operationId": row.operation_id,
+        "requestId": row.request_id,
+        "sessionId": row.session_id,
+        "clientId": row.client_id,
+        "toolName": row.tool_name,
+        "requestSha256": row.request_sha256,
+        "grantGeneration": row.grant_generation,
+        "sensitiveResult": row.sensitive_result != 0,
+        "state": row.state,
+        "resultSha256": row.result_sha256,
+        "result": result,
+        "createdAt": row.created_at,
+        "updatedAt": row.updated_at,
+    })
+}
+
+pub(super) async fn remote_computer_tool_grant(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_live_account(&request, &context.env).await {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let session_id = route_identifier(&context, "session_id")?.to_string();
+    let input: RemoteComputerToolGrantRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => return error_response(400, "invalid_tool_grant", "Tool grant request must be valid JSON."),
+    };
+    if !valid_relay_identifier(&input.client_id, 160) {
+        return error_response(400, "invalid_client_id", "clientId is invalid.");
+    }
+    let Some(tool_name) = remote_operation_tool_name(&input.tool_name) else {
+        return error_response(400, "invalid_tool_name", "toolName is invalid.");
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    let Some(client_id) = remote_operation_target_authorized(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &input.device_secret,
+        now,
+    )
+    .await?
+    else {
+        return error_response(403, "control_session_forbidden", "This device cannot grant tools for the session.");
+    };
+    if client_id != input.client_id {
+        return error_response(403, "tool_grant_forbidden", "Tool grant belongs to another client.");
+    }
+    let Some(session) =
+        load_remote_control_session(&database, &account.user_id, &device_id, &session_id).await?
+    else {
+        return error_response(404, "control_session_not_found", "Control session was not found.");
+    };
+    if input.expires_at <= now || input.expires_at > session.expires_at {
+        return error_response(
+            400,
+            "invalid_tool_grant_expiry",
+            "Tool grant expiry must be in the future and may not outlive the session.",
+        );
+    }
+    worker::query!(
+        &database,
+        "INSERT INTO remote_computer_session_tool_grants
+           (session_id,user_id,device_id,client_id,tool_name,generation,granted_at,expires_at,revoked_at)
+         VALUES (?1,?2,?3,?4,?5,1,?6,?7,NULL)
+         ON CONFLICT(session_id,tool_name) DO UPDATE SET
+           generation = remote_computer_session_tool_grants.generation + 1,
+           granted_at = excluded.granted_at,
+           expires_at = excluded.expires_at,
+           revoked_at = NULL",
+        &session_id,
+        &account.user_id,
+        &device_id,
+        &client_id,
+        &tool_name,
+        now,
+        input.expires_at
+    )?
+    .run()
+    .await?;
+    let grant = worker::query!(
+        &database,
+        "SELECT tool_name,generation,expires_at,revoked_at
+         FROM remote_computer_session_tool_grants
+         WHERE session_id=?1 AND user_id=?2 AND device_id=?3 AND client_id=?4 AND tool_name=?5
+         LIMIT 1",
+        &session_id,
+        &account.user_id,
+        &device_id,
+        &client_id,
+        &tool_name
+    )?
+    .first::<RemoteComputerToolGrantRow>(None)
+    .await?;
+    let Some(grant) = grant else {
+        return error_response(500, "tool_grant_unavailable", "Tool grant was not persisted.");
+    };
+    Ok(Response::from_json(&json!({
+        "toolName": grant.tool_name,
+        "generation": grant.generation,
+        "expiresAt": grant.expires_at,
+        "revoked": grant.revoked_at.is_some(),
+    }))?.with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_tool_revoke(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_live_account(&request, &context.env).await {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let session_id = route_identifier(&context, "session_id")?.to_string();
+    let input: RemoteComputerToolRevokeRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => return error_response(400, "invalid_tool_revoke", "Tool revoke request must be valid JSON."),
+    };
+    if !valid_relay_identifier(&input.client_id, 160) {
+        return error_response(400, "invalid_client_id", "clientId is invalid.");
+    }
+    let Some(tool_name) = remote_operation_tool_name(&input.tool_name) else {
+        return error_response(400, "invalid_tool_name", "toolName is invalid.");
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    let Some(client_id) = remote_operation_target_authorized(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &input.device_secret,
+        now,
+    )
+    .await?
+    else {
+        return error_response(403, "control_session_forbidden", "This device cannot revoke tools for the session.");
+    };
+    if client_id != input.client_id {
+        return error_response(403, "tool_grant_forbidden", "Tool grant belongs to another client.");
+    }
+    worker::query!(
+        &database,
+        "UPDATE remote_computer_session_tool_grants
+         SET revoked_at=COALESCE(revoked_at,?1)
+         WHERE session_id=?2 AND user_id=?3 AND device_id=?4 AND client_id=?5 AND tool_name=?6",
+        now,
+        &session_id,
+        &account.user_id,
+        &device_id,
+        &client_id,
+        &tool_name
+    )?
+    .run()
+    .await?;
+    let grant = worker::query!(
+        &database,
+        "SELECT tool_name,generation,expires_at,revoked_at
+         FROM remote_computer_session_tool_grants
+         WHERE session_id=?1 AND user_id=?2 AND device_id=?3 AND client_id=?4 AND tool_name=?5
+         LIMIT 1",
+        &session_id,
+        &account.user_id,
+        &device_id,
+        &client_id,
+        &tool_name
+    )?
+    .first::<RemoteComputerToolGrantRow>(None)
+    .await?;
+    Ok(Response::from_json(&match grant {
+        Some(grant) => json!({
+            "revoked": true,
+            "toolName": grant.tool_name,
+            "generation": grant.generation,
+            "expiresAt": grant.expires_at,
+        }),
+        None => json!({
+            "revoked": false,
+            "toolName": tool_name,
+        }),
+    })?.with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_operation_create(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let (account, service_binding) =
+        match remote_controller_account(&request, &context.env).await {
+            Ok(actor) => actor,
+            Err(_) => {
+                return error_response(
+                    401,
+                    "unauthorized",
+                    "A valid Fabushi account or official MCP devices.control credential is required.",
+                );
+            }
+        };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let session_id = route_identifier(&context, "session_id")?.to_string();
+    let input: RemoteComputerOperationCreateRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_remote_operation",
+                "Operation request must be valid JSON.",
+            );
+        }
+    };
+    if !valid_relay_identifier(&input.client_id, 160) {
+        return error_response(400, "invalid_client_id", "clientId is invalid.");
+    }
+    let Some(request_id) = remote_mobile_request_id(&input.request_id) else {
+        return error_response(
+            400,
+            "invalid_request_id",
+            "requestId must be a stable bounded operation identity.",
+        );
+    };
+    let Some(tool_name) = remote_operation_tool_name(&input.tool_name) else {
+        return error_response(400, "invalid_tool_name", "toolName is invalid.");
+    };
+    let Some(request_sha256) = remote_operation_sha256(&input.request_sha256) else {
+        return error_response(
+            400,
+            "invalid_request_digest",
+            "requestSha256 must be 64 lowercase hexadecimal characters.",
+        );
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    if !remote_operation_controller_authorized(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &input.client_id,
+        &input.mobile_token,
+        service_binding.as_ref(),
+        now,
+    )
+    .await?
+    {
+        return error_response(
+            403,
+            "control_session_forbidden",
+            "This controller cannot create operations for the control session.",
+        );
+    }
+    let Some(grant_generation) = remote_operation_tool_grant_generation(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &input.client_id,
+        &tool_name,
+        now,
+    )
+    .await?
+    else {
+        return error_response(
+            403,
+            "tool_grant_forbidden",
+            "The exact tool is not granted for this control session.",
+        );
+    };
+
+    let operation_id = format!("remote-operation-{}", Uuid::new_v4());
+    worker::query!(
+        &database,
+        "INSERT OR IGNORE INTO remote_computer_operations
+         (operation_id, request_id, session_id, user_id, device_id, client_id, tool_name,
+          request_sha256, grant_generation, sensitive_result, state, result_sha256, result_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending', NULL, NULL, ?11, ?11)",
+        &operation_id,
+        &request_id,
+        &session_id,
+        &account.user_id,
+        &device_id,
+        &input.client_id,
+        &tool_name,
+        &request_sha256,
+        grant_generation,
+        if input.sensitive_result { 1 } else { 0 },
+        now
+    )?
+    .run()
+    .await?;
+
+    let Some(existing) = load_remote_operation(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+    )
+    .await?
+    else {
+        return error_response(
+            500,
+            "operation_journal_unavailable",
+            "Operation journal did not retain the request identity.",
+        );
+    };
+    if existing.client_id != input.client_id
+        || existing.tool_name != tool_name
+        || existing.request_sha256 != request_sha256
+        || (existing.sensitive_result != 0) != input.sensitive_result
+    {
+        return error_response(
+            409,
+            "operation_request_conflict",
+            "requestId is already bound to a different remote operation.",
+        );
+    }
+    Ok(Response::from_json(&remote_operation_json(&existing))?.with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_operation_query(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let (account, service_binding) =
+        match remote_controller_account(&request, &context.env).await {
+            Ok(actor) => actor,
+            Err(_) => {
+                return error_response(
+                    401,
+                    "unauthorized",
+                    "A valid Fabushi account or official MCP devices.control credential is required.",
+                );
+            }
+        };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let session_id = route_identifier(&context, "session_id")?.to_string();
+    let request_id = route_identifier(&context, "request_id")?.to_string();
+    let input: RemoteComputerOperationControllerRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => return error_response(400, "invalid_operation_query", "Operation query must be valid JSON."),
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    if !remote_operation_controller_authorized(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &input.client_id,
+        &input.mobile_token,
+        service_binding.as_ref(),
+        now,
+    )
+    .await?
+    {
+        return error_response(
+            403,
+            "control_session_forbidden",
+            "This controller cannot query operations for the control session.",
+        );
+    }
+    let Some(operation) = load_remote_operation(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+    )
+    .await?
+    else {
+        return error_response(404, "operation_not_found", "Remote operation was not found.");
+    };
+    if operation.client_id != input.client_id {
+        return error_response(403, "operation_forbidden", "Remote operation belongs to another client.");
+    }
+    Ok(Response::from_json(&remote_operation_json(&operation))?.with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_operation_outcome_unknown(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let (account, service_binding) =
+        match remote_controller_account(&request, &context.env).await {
+            Ok(actor) => actor,
+            Err(_) => {
+                return error_response(
+                    401,
+                    "unauthorized",
+                    "A valid Fabushi account or official MCP devices.control credential is required.",
+                );
+            }
+        };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let session_id = route_identifier(&context, "session_id")?.to_string();
+    let request_id = route_identifier(&context, "request_id")?.to_string();
+    let input: RemoteComputerOperationControllerRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => return error_response(400, "invalid_operation_update", "Operation update must be valid JSON."),
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    if !remote_operation_controller_authorized(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &input.client_id,
+        &input.mobile_token,
+        service_binding.as_ref(),
+        now,
+    )
+    .await?
+    {
+        return error_response(403, "control_session_forbidden", "This controller cannot update the operation.");
+    }
+    worker::query!(
+        &database,
+        "UPDATE remote_computer_operations
+         SET state = 'outcome_unknown', updated_at = ?1
+         WHERE user_id = ?2 AND device_id = ?3 AND session_id = ?4 AND request_id = ?5
+           AND client_id = ?6 AND state IN ('pending','running')",
+        now,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+        &input.client_id
+    )?
+    .run()
+    .await?;
+    let Some(operation) = load_remote_operation(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+    )
+    .await?
+    else {
+        return error_response(404, "operation_not_found", "Remote operation was not found.");
+    };
+    if operation.client_id != input.client_id {
+        return error_response(403, "operation_forbidden", "Remote operation belongs to another client.");
+    }
+    if operation.state != "outcome_unknown" {
+        return error_response(
+            409,
+            "operation_state_conflict",
+            "Only pending or running operations can become outcome_unknown.",
+        );
+    }
+    Ok(Response::from_json(&remote_operation_json(&operation))?.with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_operation_cancel(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let (account, service_binding) =
+        match remote_controller_account(&request, &context.env).await {
+            Ok(actor) => actor,
+            Err(_) => {
+                return error_response(
+                    401,
+                    "unauthorized",
+                    "A valid Fabushi account or official MCP devices.control credential is required.",
+                );
+            }
+        };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let session_id = route_identifier(&context, "session_id")?.to_string();
+    let request_id = route_identifier(&context, "request_id")?.to_string();
+    let input: RemoteComputerOperationControllerRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => return error_response(400, "invalid_operation_cancel", "Operation cancellation must be valid JSON."),
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    if !remote_operation_controller_authorized(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &input.client_id,
+        &input.mobile_token,
+        service_binding.as_ref(),
+        now,
+    )
+    .await?
+    {
+        return error_response(403, "control_session_forbidden", "This controller cannot cancel the operation.");
+    }
+    worker::query!(
+        &database,
+        "UPDATE remote_computer_operations
+         SET state = 'cancelled', updated_at = ?1
+         WHERE user_id = ?2 AND device_id = ?3 AND session_id = ?4 AND request_id = ?5
+           AND client_id = ?6 AND state = 'pending'",
+        now,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+        &input.client_id
+    )?
+    .run()
+    .await?;
+    let Some(operation) = load_remote_operation(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+    )
+    .await?
+    else {
+        return error_response(404, "operation_not_found", "Remote operation was not found.");
+    };
+    if operation.client_id != input.client_id {
+        return error_response(403, "operation_forbidden", "Remote operation belongs to another client.");
+    }
+    if operation.state != "cancelled" {
+        return error_response(
+            409,
+            "operation_state_conflict",
+            "Only pending operations can be cancelled.",
+        );
+    }
+    Ok(Response::from_json(&remote_operation_json(&operation))?.with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_operation_claim(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_live_account(&request, &context.env).await {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let session_id = route_identifier(&context, "session_id")?.to_string();
+    let request_id = route_identifier(&context, "request_id")?.to_string();
+    let input: RemoteComputerOperationTargetRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => return error_response(400, "invalid_operation_claim", "Operation claim must be valid JSON."),
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    let Some(client_id) = remote_operation_target_authorized(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &input.device_secret,
+        now,
+    )
+    .await?
+    else {
+        return error_response(403, "control_session_forbidden", "This device cannot claim the operation.");
+    };
+    let Some(pending_operation) = load_remote_operation(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+    )
+    .await?
+    else {
+        return error_response(404, "operation_not_found", "Remote operation was not found.");
+    };
+    if pending_operation.client_id != client_id {
+        return error_response(403, "operation_forbidden", "Remote operation belongs to another client.");
+    }
+    let Some(grant_generation) = pending_operation.grant_generation else {
+        return error_response(403, "tool_grant_forbidden", "Operation has no exact tool grant generation.");
+    };
+    if remote_operation_tool_grant_generation(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &client_id,
+        &pending_operation.tool_name,
+        now,
+    )
+    .await?
+        != Some(grant_generation)
+    {
+        return error_response(403, "tool_grant_stale", "Exact tool grant was revoked, expired, or replaced.");
+    }
+    worker::query!(
+        &database,
+        "UPDATE remote_computer_operations
+         SET state = 'running', updated_at = ?1
+         WHERE user_id = ?2 AND device_id = ?3 AND session_id = ?4 AND request_id = ?5
+           AND client_id = ?6 AND state = 'pending' AND grant_generation = ?7
+           AND EXISTS (
+             SELECT 1 FROM remote_computer_session_tool_grants g
+             WHERE g.session_id = remote_computer_operations.session_id
+               AND g.user_id = remote_computer_operations.user_id
+               AND g.device_id = remote_computer_operations.device_id
+               AND g.client_id = remote_computer_operations.client_id
+               AND g.tool_name = remote_computer_operations.tool_name
+               AND g.generation = remote_computer_operations.grant_generation
+               AND g.revoked_at IS NULL AND g.expires_at > ?1
+           )",
+        now,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+        &client_id,
+        grant_generation
+    )?
+    .run()
+    .await?;
+    let Some(operation) = load_remote_operation(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+    )
+    .await?
+    else {
+        return error_response(404, "operation_not_found", "Remote operation was not found.");
+    };
+    if operation.client_id != client_id {
+        return error_response(403, "operation_forbidden", "Remote operation belongs to another client.");
+    }
+    if operation.state != "running" {
+        return error_response(
+            409,
+            "operation_state_conflict",
+            "Only pending operations can be claimed for execution.",
+        );
+    }
+    Ok(Response::from_json(&remote_operation_json(&operation))?.with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_operation_access(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_live_account(&request, &context.env).await {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let session_id = route_identifier(&context, "session_id")?.to_string();
+    let request_id = route_identifier(&context, "request_id")?.to_string();
+    let input: RemoteComputerOperationTargetRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_operation_access",
+                "Operation access validation must be valid JSON.",
+            );
+        }
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    let Some(client_id) = remote_operation_target_authorized(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &input.device_secret,
+        now,
+    )
+    .await?
+    else {
+        return error_response(
+            403,
+            "control_session_forbidden",
+            "This device cannot validate operation access.",
+        );
+    };
+    let Some(operation) = load_remote_operation(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+    )
+    .await?
+    else {
+        return error_response(404, "operation_not_found", "Remote operation was not found.");
+    };
+    if operation.client_id != client_id {
+        return error_response(
+            403,
+            "operation_forbidden",
+            "Remote operation belongs to another client.",
+        );
+    }
+    if operation.sensitive_result == 0 {
+        return error_response(
+            409,
+            "operation_not_sensitive",
+            "Only sensitive operation results require target access validation.",
+        );
+    }
+    if operation.state != "completed" {
+        return error_response(
+            409,
+            "operation_state_conflict",
+            "Sensitive result access requires a completed operation.",
+        );
+    }
+    let Some(grant_generation) = operation.grant_generation else {
+        return error_response(
+            403,
+            "tool_grant_forbidden",
+            "Operation has no exact tool grant generation.",
+        );
+    };
+    if remote_operation_tool_grant_generation(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &client_id,
+        &operation.tool_name,
+        now,
+    )
+    .await?
+        != Some(grant_generation)
+    {
+        return error_response(
+            403,
+            "tool_grant_stale",
+            "Exact tool grant was revoked, expired, or replaced.",
+        );
+    }
+    let Some(result_sha256) = operation.result_sha256.as_deref() else {
+        return error_response(
+            409,
+            "operation_result_unavailable",
+            "Completed sensitive operation has no result digest.",
+        );
+    };
+    Ok(Response::from_json(&json!({
+        "allowed": true,
+        "deviceId": device_id,
+        "sessionId": session_id,
+        "clientId": client_id,
+        "requestId": operation.request_id,
+        "toolName": operation.tool_name,
+        "requestSha256": operation.request_sha256,
+        "grantGeneration": grant_generation,
+        "sensitiveResult": true,
+        "state": operation.state,
+        "resultSha256": result_sha256,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_operation_result(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_live_account(&request, &context.env).await {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let session_id = route_identifier(&context, "session_id")?.to_string();
+    let request_id = route_identifier(&context, "request_id")?.to_string();
+    let input: RemoteComputerOperationResultRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => return error_response(400, "invalid_operation_result", "Operation result must be valid JSON."),
+    };
+    let Some(status) = remote_operation_result_status(&input.status) else {
+        return error_response(400, "invalid_operation_status", "Result status must be completed or failed.");
+    };
+    let Some(result_sha256) = remote_operation_sha256(&input.result_sha256) else {
+        return error_response(400, "invalid_result_digest", "resultSha256 must be 64 lowercase hexadecimal characters.");
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    let Some(client_id) = remote_operation_target_authorized(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &input.device_secret,
+        now,
+    )
+    .await?
+    else {
+        return error_response(403, "control_session_forbidden", "This device cannot publish operation results.");
+    };
+    let Some(existing) = load_remote_operation(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+    )
+    .await?
+    else {
+        return error_response(404, "operation_not_found", "Remote operation was not found.");
+    };
+    if existing.client_id != client_id {
+        return error_response(403, "operation_forbidden", "Remote operation belongs to another client.");
+    }
+    if existing.sensitive_result != 0 && input.result.is_some() {
+        return error_response(
+            400,
+            "sensitive_result_plaintext_forbidden",
+            "Sensitive operation results may only persist status and digest.",
+        );
+    }
+    let result_json = if existing.sensitive_result != 0 {
+        None
+    } else {
+        match input.result.as_ref() {
+            Some(value) => {
+                let value = serde_json::to_string(value)
+                    .map_err(|error| worker::Error::RustError(error.to_string()))?;
+                if value.as_bytes().len() > REMOTE_OPERATION_MAX_RESULT_BYTES {
+                    return error_response(
+                        413,
+                        "operation_result_too_large",
+                        "Operation result exceeds the durable reconciliation limit.",
+                    );
+                }
+                Some(value)
+            }
+            None => None,
+        }
+    };
+
+    worker::query!(
+        &database,
+        "UPDATE remote_computer_operations
+         SET state = ?1, result_sha256 = ?2, result_json = ?3, updated_at = ?4
+         WHERE user_id = ?5 AND device_id = ?6 AND session_id = ?7 AND request_id = ?8
+           AND client_id = ?9 AND state IN ('running','outcome_unknown')",
+        &status,
+        &result_sha256,
+        result_json.as_deref(),
+        now,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+        &client_id
+    )?
+    .run()
+    .await?;
+
+    let Some(operation) = load_remote_operation(
+        &database,
+        &account.user_id,
+        &device_id,
+        &session_id,
+        &request_id,
+    )
+    .await?
+    else {
+        return error_response(404, "operation_not_found", "Remote operation was not found.");
+    };
+    if matches!(operation.state.as_str(), "completed" | "failed")
+        && operation.state == status
+        && operation.result_sha256.as_deref() == Some(result_sha256.as_str())
+    {
+        return Ok(Response::from_json(&remote_operation_json(&operation))?.with_headers(auth_headers()));
+    }
+    error_response(
+        409,
+        "operation_result_conflict",
+        "Operation is not executable or a different terminal result is already recorded.",
+    )
+}
+
+pub(super) async fn remote_computer_session_activate(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_live_account(&request, &context.env).await {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?;
+    let session_id = route_identifier(&context, "session_id")?;
+    let input: RemoteComputerDesktopAuthRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_device_auth",
+                "Desktop session activation requires a device secret.",
+            );
+        }
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    let device_secret_hash = remote_secret_hash(&input.device_secret);
+    let result = worker::query!(
+        &database,
+        "UPDATE remote_computer_sessions SET state = 'active'
+         WHERE session_id = ?1 AND device_id = ?2 AND user_id = ?3
+           AND state = 'pending' AND expires_at > ?4
+           AND EXISTS (SELECT 1 FROM remote_computers d
+                       WHERE d.device_id = ?2 AND d.user_id = ?3
+                         AND d.device_secret_hash = ?5 AND d.revoked_at IS NULL)
+           AND EXISTS (SELECT 1 FROM remote_computer_clients c
+                       WHERE c.client_id = remote_computer_sessions.client_id
+                         AND c.device_id = ?2 AND c.user_id = ?3
+                         AND c.revoked_at IS NULL AND c.client_token_hash IS NOT NULL)
+           AND NOT EXISTS (
+               SELECT 1 FROM remote_computer_sessions active
+               WHERE active.device_id = ?2 AND active.user_id = ?3
+                 AND active.session_id <> ?1 AND active.state = 'active'
+                 AND active.expires_at > ?4
+                 AND EXISTS (SELECT 1 FROM remote_computer_clients active_client
+                             WHERE active_client.client_id = active.client_id
+                               AND active_client.device_id = active.device_id
+                               AND active_client.user_id = active.user_id
+                               AND active_client.revoked_at IS NULL
+                               AND active_client.client_token_hash IS NOT NULL)
+           )",
+        session_id,
+        device_id,
+        &account.user_id,
+        now,
+        &device_secret_hash
+    )?
+    .run()
+    .await?;
+    if result.meta()?.and_then(|meta| meta.changes).unwrap_or(0) == 0 {
+        return error_response(
+            404,
+            "control_session_not_found",
+            "Pending control session was not found.",
+        );
+    }
+    let Some(session) =
+        load_remote_control_session(&database, &account.user_id, device_id, session_id).await?
+    else {
+        return error_response(
+            404,
+            "control_session_not_found",
+            "Control session disappeared after activation.",
+        );
+    };
+    Ok(Response::from_json(&json!({
+        "sessionId": session_id,
+        "clientId": session.client_id,
+        "expiresAt": session.expires_at,
+        "state": "active",
+        "iceServers": remote_ice_servers(&context.env),
+    }))?
+    .with_headers(auth_headers()))
+}
+
+async fn load_remote_control_session(
+    database: &worker::D1Database,
+    user_id: &str,
+    device_id: &str,
+    session_id: &str,
+) -> Result<Option<RemoteComputerSessionRow>> {
+    worker::query!(
+        database,
+        "SELECT s.client_id, s.mobile_token_hash, s.state, s.expires_at
+         FROM remote_computer_sessions s
+         JOIN remote_computer_clients c
+           ON c.client_id = s.client_id AND c.device_id = s.device_id AND c.user_id = s.user_id
+         JOIN remote_computers d ON d.device_id = s.device_id AND d.user_id = s.user_id
+         WHERE s.session_id = ?1 AND s.device_id = ?2 AND s.user_id = ?3
+           AND c.revoked_at IS NULL AND c.client_token_hash IS NOT NULL
+           AND d.revoked_at IS NULL LIMIT 1",
+        session_id,
+        device_id,
+        user_id
+    )?
+    .first::<RemoteComputerSessionRow>(None)
+    .await
+}
+
+fn remote_session_actor_allowed(
+    session: &RemoteComputerSessionRow,
+    role: &str,
+    client_id: Option<&str>,
+    mobile_token: Option<&str>,
+    desktop_authorized: bool,
+    now: i64,
+) -> bool {
+    // Pending sessions are only consent requests. Neither controller nor target may
+    // negotiate transport or exchange signaling until the target device explicitly
+    // activates the session with its device secret.
+    if session.state != "active" || session.expires_at <= now {
+        return false;
+    }
+    match role {
+        "desktop" => desktop_authorized,
+        "mobile" => {
+            client_id == Some(session.client_id.as_str())
+                && mobile_token.map(remote_secret_hash).is_some_and(|hash| {
+                    constant_time_eq(hash.as_bytes(), session.mobile_token_hash.as_bytes())
+                })
+        }
+        _ => false,
+    }
+}
+
+fn remote_relay_available(env: &Env, provider: &str) -> bool {
+    match provider {
+        "fabushi-webrtc" => env
+            .var("REMOTE_TURN_URL")
+            .ok()
+            .is_some_and(|value| !value.to_string().trim().is_empty()),
+        "rustdesk-sidecar" => env
+            .var("RUSTDESK_RELAY_URL")
+            .ok()
+            .is_some_and(|value| !value.to_string().trim().is_empty()),
+        _ => false,
+    }
+}
+
+fn remote_relay_region(value: Option<&str>) -> Option<Option<String>> {
+    let Some(value) = value else {
+        return Some(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Some(None);
+    }
+    (value.len() <= 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+    .then(|| Some(value.to_ascii_lowercase()))
+}
+
+pub(super) async fn remote_computer_session_transport(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_live_account(&request, &context.env).await {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let session_id = route_identifier(&context, "session_id")?.to_string();
+    let input: RemoteComputerTransportRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_transport_request",
+                "Transport negotiation request must be valid JSON.",
+            );
+        }
+    };
+    if !remote_role(&input.role) {
+        return error_response(
+            400,
+            "invalid_control_role",
+            "Control role must be desktop or mobile.",
+        );
+    }
+    let Some(relay_region) = remote_relay_region(input.relay_region.as_deref()) else {
+        return error_response(400, "invalid_relay_region", "relayRegion is invalid.");
+    };
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let Some(session) = worker::query!(
+        &database,
+        "SELECT s.client_id, s.mobile_token_hash, s.state, s.expires_at,
+                s.provider, s.route_policy, s.selected_route, s.relay_region
+         FROM remote_computer_sessions s
+         JOIN remote_computer_clients c
+           ON c.client_id = s.client_id AND c.device_id = s.device_id AND c.user_id = s.user_id
+         JOIN remote_computers d ON d.device_id = s.device_id AND d.user_id = s.user_id
+         WHERE s.session_id = ?1 AND s.device_id = ?2 AND s.user_id = ?3
+           AND c.revoked_at IS NULL AND c.client_token_hash IS NOT NULL
+           AND d.revoked_at IS NULL LIMIT 1",
+        &session_id,
+        &device_id,
+        &account.user_id
+    )?
+    .first::<RemoteComputerTransportRow>(None)
+    .await?
+    else {
+        return error_response(
+            404,
+            "control_session_not_found",
+            "Control session was not found.",
+        );
+    };
+    let now = now_seconds();
+    let desktop_authorized = if input.role == "desktop" {
+        match input.device_secret.as_deref() {
+            Some(secret) => {
+                remote_desktop_secret_matches(&database, &account.user_id, &device_id, secret)
+                    .await?
+            }
+            None => false,
+        }
+    } else {
+        false
+    };
+    let actor_allowed = remote_session_actor_allowed(
+        &RemoteComputerSessionRow {
+            client_id: session.client_id.clone(),
+            mobile_token_hash: session.mobile_token_hash.clone(),
+            state: session.state.clone(),
+            expires_at: session.expires_at,
+        },
+        &input.role,
+        input.client_id.as_deref(),
+        input.mobile_token.as_deref(),
+        desktop_authorized,
+        now,
+    );
+    if !actor_allowed {
+        return error_response(
+            403,
+            "control_session_forbidden",
+            "This actor cannot negotiate transport for the control session.",
+        );
+    }
+
+    let relay_available = remote_relay_available(&context.env, &session.provider);
+    let selected_route = if session.route_policy == "relay-only" {
+        if !relay_available {
+            return error_response(
+                503,
+                "relay_unavailable",
+                "The session requires relay transport, but no authenticated relay is configured.",
+            );
+        }
+        "relay"
+    } else if input.direct_available {
+        "direct"
+    } else if relay_available {
+        "relay"
+    } else {
+        return error_response(
+            503,
+            "transport_unavailable",
+            "Direct transport is unavailable and no authenticated relay is configured.",
+        );
+    };
+    if session.selected_route.as_deref() == Some("relay") && selected_route == "direct" {
+        return error_response(
+            409,
+            "transport_route_locked",
+            "A session that fell back to relay cannot be upgraded back to direct transport.",
+        );
+    }
+    let stored_region = if selected_route == "relay" {
+        relay_region.or(session.relay_region)
+    } else {
+        None
+    };
+    let updated = worker::query!(
+        &database,
+        "UPDATE remote_computer_sessions
+         SET selected_route = ?1, relay_region = ?2, transport_updated_at = ?3
+         WHERE session_id = ?4 AND device_id = ?5 AND user_id = ?6
+           AND state <> 'closed' AND expires_at > ?3
+           AND (selected_route IS NULL OR selected_route = ?1
+                OR (selected_route = 'direct' AND ?1 = 'relay'))",
+        selected_route,
+        stored_region.as_deref(),
+        now,
+        &session_id,
+        &device_id,
+        &account.user_id
+    )?
+    .run()
+    .await?;
+    if updated.meta()?.and_then(|meta| meta.changes).unwrap_or(0) == 0 {
+        return error_response(
+            409,
+            "transport_route_conflict",
+            "Transport route changed concurrently; refresh the session before retrying.",
+        );
+    }
+    Ok(Response::from_json(&json!({
+        "sessionId": session_id,
+        "provider": session.provider,
+        "routePolicy": session.route_policy,
+        "selectedRoute": selected_route,
+        "relayRegion": stored_region,
+        "transportUpdatedAt": now,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+pub(super) async fn remote_computer_session_close(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_live_account(&request, &context.env).await {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let session_id = route_identifier(&context, "session_id")?.to_string();
+    let input: RemoteComputerSessionCloseRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_control_session",
+                "Close request must be valid JSON.",
+            );
+        }
+    };
+    if !remote_role(&input.role) {
+        return error_response(
+            400,
+            "invalid_control_role",
+            "Control role must be desktop or mobile.",
+        );
+    }
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    let Some(session) =
+        load_remote_control_session(&database, &account.user_id, &device_id, &session_id).await?
+    else {
+        return error_response(
+            404,
+            "control_session_not_found",
+            "Control session was not found.",
+        );
+    };
+    let desktop_authorized = if input.role == "desktop" {
+        match input.device_secret.as_deref() {
+            Some(secret) => {
+                remote_desktop_secret_matches(&database, &account.user_id, &device_id, secret)
+                    .await?
+            }
+            None => false,
+        }
+    } else {
+        false
+    };
+    if !remote_session_actor_allowed(
+        &session,
+        &input.role,
+        input.client_id.as_deref(),
+        input.mobile_token.as_deref(),
+        desktop_authorized,
+        now,
+    ) {
+        return error_response(
+            403,
+            "control_session_forbidden",
+            "This client cannot close the control session.",
+        );
+    }
+    worker::query!(
+        &database,
+        "UPDATE remote_computer_sessions SET state = 'closed', closed_at = ?1
+         WHERE session_id = ?2 AND user_id = ?3 AND device_id = ?4",
+        now,
+        &session_id,
+        &account.user_id,
+        &device_id
+    )?
+    .run()
+    .await?;
+    Ok(
+        Response::from_json(&json!({"sessionId": session_id, "state": "closed"}))?
+            .with_headers(auth_headers()),
+    )
+}
+
+pub(super) async fn remote_computer_signal(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_live_account(&request, &context.env).await {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let input: RemoteComputerSignalRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(400, "invalid_signal", "Signal request must be valid JSON.");
+        }
+    };
+    if !valid_relay_identifier(&input.session_id, 160)
+        || !remote_role(&input.sender_role)
+        || !remote_signal_kind(&input.kind)
+        || !remote_signal_kind_allowed(&input.sender_role, &input.kind)
+    {
+        return error_response(400, "invalid_signal", "Signal identifiers are invalid.");
+    }
+    let payload_json = serde_json::to_string(&input.payload)
+        .map_err(|error| worker::Error::RustError(error.to_string()))?;
+    if payload_json.len() > REMOTE_SIGNAL_MAX_BYTES {
+        return error_response(
+            413,
+            "signal_too_large",
+            "WebRTC signal payload exceeds 256 KiB.",
+        );
+    }
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    let Some(session) =
+        load_remote_control_session(&database, &account.user_id, &device_id, &input.session_id)
+            .await?
+    else {
+        return error_response(
+            404,
+            "control_session_not_found",
+            "Control session was not found.",
+        );
+    };
+    let desktop_authorized = if input.sender_role == "desktop" {
+        match input.device_secret.as_deref() {
+            Some(secret) => {
+                remote_desktop_secret_matches(&database, &account.user_id, &device_id, secret)
+                    .await?
+            }
+            None => false,
+        }
+    } else {
+        false
+    };
+    if !remote_session_actor_allowed(
+        &session,
+        &input.sender_role,
+        input.client_id.as_deref(),
+        input.mobile_token.as_deref(),
+        desktop_authorized,
+        now,
+    ) {
+        return error_response(
+            403,
+            "control_session_forbidden",
+            "This client cannot signal for the control session.",
+        );
+    }
+    let expires_at = now + REMOTE_SIGNAL_SECONDS;
+    worker::query!(
+        &database,
+        "DELETE FROM remote_computer_signals WHERE expires_at <= ?1",
+        now
+    )?
+    .run()
+    .await?;
+    let inserted = worker::query!(
+        &database,
+        "INSERT INTO remote_computer_signals
+         (session_id, user_id, sender_role, kind, payload_json, created_at, expires_at)
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7
+         WHERE EXISTS (
+                 SELECT 1 FROM remote_computer_sessions s
+                 JOIN remote_computer_clients c
+                   ON c.client_id = s.client_id AND c.device_id = s.device_id
+                  AND c.user_id = s.user_id
+                 JOIN remote_computers d
+                   ON d.device_id = s.device_id AND d.user_id = s.user_id
+                 WHERE s.session_id = ?1 AND s.user_id = ?2 AND s.device_id = ?9
+                   AND s.state <> 'closed' AND s.expires_at > ?6
+                   AND c.revoked_at IS NULL AND c.client_token_hash IS NOT NULL
+                   AND d.revoked_at IS NULL
+               )
+           AND (SELECT COUNT(*) FROM remote_computer_signals
+                WHERE session_id = ?1 AND user_id = ?2 AND expires_at > ?6) < ?8",
+        &input.session_id,
+        &account.user_id,
+        &input.sender_role,
+        &input.kind,
+        &payload_json,
+        now,
+        expires_at,
+        REMOTE_SIGNAL_MAX_ROWS_PER_SESSION,
+        &device_id
+    )?
+    .run()
+    .await?;
+    if inserted.meta()?.and_then(|meta| meta.changes).unwrap_or(0) == 0 {
+        let current_session =
+            load_remote_control_session(&database, &account.user_id, &device_id, &input.session_id)
+                .await?;
+        if !current_session.as_ref().is_some_and(|current| {
+            remote_session_actor_allowed(
+                current,
+                &input.sender_role,
+                input.client_id.as_deref(),
+                input.mobile_token.as_deref(),
+                desktop_authorized,
+                now,
+            )
+        }) {
+            return error_response(
+                409,
+                "control_session_unavailable",
+                "The control session was closed, expired, or revoked.",
+            );
+        }
+        return error_response(
+            429,
+            "signal_queue_full",
+            "The remote-control signaling queue is full; reconnect before retrying.",
+        );
+    }
+    if input.sender_role == "mobile" {
+        worker::query!(
+            &database,
+            "UPDATE remote_computer_clients SET last_seen_at = ?1
+             WHERE client_id = ?2 AND user_id = ?3 AND device_id = ?4
+               AND revoked_at IS NULL",
+            now,
+            &session.client_id,
+            &account.user_id,
+            &device_id
+        )?
+        .run()
+        .await?;
+    }
+    Ok(
+        Response::from_json(&json!({"accepted": true, "expiresAt": expires_at}))?
+            .with_headers(auth_headers()),
+    )
+}
+
+pub(super) async fn remote_computer_signal_drain(
+    mut request: Request,
+    context: RouteContext<()>,
+) -> Result<Response> {
+    let account = match authenticated_live_account(&request, &context.env).await {
+        Ok(account) => account,
+        Err(_) => return error_response(401, "unauthorized", "A valid account token is required."),
+    };
+    let device_id = route_identifier(&context, "device_id")?.to_string();
+    let input: RemoteComputerSignalDrainRequest = match request.json().await {
+        Ok(input) => input,
+        Err(_) => {
+            return error_response(
+                400,
+                "invalid_signal_drain",
+                "Signal drain must be valid JSON.",
+            );
+        }
+    };
+    if !valid_relay_identifier(&input.session_id, 160) || !remote_role(&input.receiver_role) {
+        return error_response(
+            400,
+            "invalid_signal_drain",
+            "Signal drain identifiers are invalid.",
+        );
+    }
+    let database = context.env.d1(DATABASE_BINDING)?;
+    let now = now_seconds();
+    let Some(session) =
+        load_remote_control_session(&database, &account.user_id, &device_id, &input.session_id)
+            .await?
+    else {
+        return error_response(
+            404,
+            "control_session_not_found",
+            "Control session was not found.",
+        );
+    };
+    let desktop_authorized = if input.receiver_role == "desktop" {
+        match input.device_secret.as_deref() {
+            Some(secret) => {
+                remote_desktop_secret_matches(&database, &account.user_id, &device_id, secret)
+                    .await?
+            }
+            None => false,
+        }
+    } else {
+        false
+    };
+    if !remote_session_actor_allowed(
+        &session,
+        &input.receiver_role,
+        input.client_id.as_deref(),
+        input.mobile_token.as_deref(),
+        desktop_authorized,
+        now,
+    ) {
+        return error_response(
+            403,
+            "control_session_forbidden",
+            "This client cannot read control signals.",
+        );
+    }
+    let after = input.after_signal_id.unwrap_or(0).max(0);
+    let rows = worker::query!(
+        &database,
+        "SELECT signal_id, sender_role, kind, payload_json, created_at
+         FROM remote_computer_signals signal
+         WHERE signal.user_id = ?1 AND signal.session_id = ?2 AND signal.sender_role <> ?3
+           AND signal.signal_id > ?4 AND signal.expires_at > ?5
+           AND EXISTS (
+               SELECT 1 FROM remote_computer_sessions s
+               JOIN remote_computer_clients c
+                 ON c.client_id = s.client_id AND c.device_id = s.device_id
+                AND c.user_id = s.user_id
+               JOIN remote_computers d
+                 ON d.device_id = s.device_id AND d.user_id = s.user_id
+               WHERE s.session_id = signal.session_id AND s.user_id = signal.user_id
+                 AND s.device_id = ?6 AND s.state <> 'closed' AND s.expires_at > ?5
+                 AND c.revoked_at IS NULL AND c.client_token_hash IS NOT NULL
+                 AND d.revoked_at IS NULL
+           )
+         ORDER BY signal.signal_id ASC LIMIT 128",
+        &account.user_id,
+        &input.session_id,
+        &input.receiver_role,
+        after,
+        now,
+        &device_id
+    )?
+    .all()
+    .await?
+    .results::<RemoteComputerSignalRow>()?;
+    let mut last_signal_id = after;
+    let signals = rows
+        .into_iter()
+        .map(|row| {
+            last_signal_id = last_signal_id.max(row.signal_id);
+            json!({
+                "signalId": row.signal_id,
+                "senderRole": row.sender_role,
+                "kind": row.kind,
+                "payload": serde_json::from_str::<Value>(&row.payload_json).unwrap_or(Value::Null),
+                "createdAt": row.created_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    if input.receiver_role == "mobile" {
+        worker::query!(
+            &database,
+            "UPDATE remote_computer_clients SET last_seen_at = ?1
+             WHERE client_id = ?2 AND user_id = ?3 AND device_id = ?4
+               AND revoked_at IS NULL",
+            now,
+            &session.client_id,
+            &account.user_id,
+            &device_id
+        )?
+        .run()
+        .await?;
+    }
+    Ok(Response::from_json(&json!({
+        "sessionId": input.session_id,
+        "signals": signals,
+        "lastSignalId": last_signal_id,
+    }))?
+    .with_headers(auth_headers()))
+}
+
+
+#[cfg(test)]
+mod remote_mobile_session_tests {
+    use super::*;
+
+    #[test]
+    fn request_identity_validation_is_bounded_and_opaque() {
+        assert_eq!(
+            remote_mobile_request_id("mobile-request-0123456789").as_deref(),
+            Some("mobile-request-0123456789")
+        );
+        assert!(remote_mobile_request_id("short").is_none());
+        assert!(remote_mobile_request_id("contains space 0123456789").is_none());
+        assert!(remote_mobile_request_id(&"x".repeat(161)).is_none());
+    }
+
+    #[test]
+    fn recoverable_token_is_stable_for_duplicate_and_lost_response() {
+        let token_a = recoverable_remote_mobile_token(
+            "client-token-secret-that-is-long-enough-for-production-0123456789",
+            "mobile-request-0123456789",
+            "remote-session-a",
+        );
+        let token_b = recoverable_remote_mobile_token(
+            "client-token-secret-that-is-long-enough-for-production-0123456789",
+            "mobile-request-0123456789",
+            "remote-session-a",
+        );
+        assert_eq!(token_a, token_b);
+        assert!(token_a.len() >= 48);
+        assert_ne!(
+            token_a,
+            recoverable_remote_mobile_token(
+                "rotated-client-token-secret-that-is-long-enough-9876543210",
+                "mobile-request-0123456789",
+                "remote-session-a",
+            )
+        );
+        assert_ne!(
+            token_a,
+            recoverable_remote_mobile_token(
+                "client-token-secret-that-is-long-enough-for-production-0123456789",
+                "mobile-request-different-9876543210",
+                "remote-session-a",
+            )
+        );
+    }
+
+    #[test]
+    fn request_hash_fences_account_device_client_and_token_generation() {
+        let base = remote_mobile_request_hash(
+            "account-a",
+            "device-a",
+            "client-a",
+            "mobile-request-0123456789",
+            "client-token-hash-a",
+        );
+        for changed in [
+            remote_mobile_request_hash("account-b", "device-a", "client-a", "mobile-request-0123456789", "client-token-hash-a"),
+            remote_mobile_request_hash("account-a", "device-b", "client-a", "mobile-request-0123456789", "client-token-hash-a"),
+            remote_mobile_request_hash("account-a", "device-a", "client-b", "mobile-request-0123456789", "client-token-hash-a"),
+            remote_mobile_request_hash("account-a", "device-a", "client-a", "mobile-request-different-9876543210", "client-token-hash-a"),
+            remote_mobile_request_hash("account-a", "device-a", "client-a", "mobile-request-0123456789", "client-token-hash-b"),
+        ] {
+            assert_ne!(base, changed);
+        }
+    }
+
+    #[test]
+    fn operation_identifiers_and_digests_are_bounded() {
+        assert_eq!(
+            remote_operation_tool_name("browser.click").as_deref(),
+            Some("browser.click")
+        );
+        assert!(remote_operation_tool_name("contains space").is_none());
+        assert!(remote_operation_tool_name(&"x".repeat(129)).is_none());
+        assert!(remote_operation_sha256(&"a".repeat(64)).is_some());
+        assert!(remote_operation_sha256(&"A".repeat(64)).is_none());
+        assert!(remote_operation_sha256("abc").is_none());
+        assert_eq!(
+            remote_operation_result_status("completed").as_deref(),
+            Some("completed")
+        );
+        assert_eq!(
+            remote_operation_result_status("failed").as_deref(),
+            Some("failed")
+        );
+        assert!(remote_operation_result_status("pending").is_none());
+    }
+
+    #[test]
+    fn recovery_rejects_rotation_expiry_close_and_hash_mismatch() {
+        let client_token = "client-token-secret-that-is-long-enough-for-production-0123456789";
+        let client_hash = remote_secret_hash(client_token);
+        let request_id = "mobile-request-0123456789";
+        let session_id = "remote-session-a";
+        let mobile_token = recoverable_remote_mobile_token(client_token, request_id, session_id);
+        let request_hash = remote_mobile_request_hash(
+            "account-a",
+            "device-a",
+            "client-a",
+            request_id,
+            &client_hash,
+        );
+        let mut row = RemoteComputerRecoverableSessionRow {
+            session_id: session_id.to_string(),
+            device_id: "device-a".to_string(),
+            client_id: "client-a".to_string(),
+            mobile_token_hash: remote_secret_hash(&mobile_token),
+            state: "pending".to_string(),
+            created_at: 100,
+            expires_at: 200,
+            mobile_request_id: Some(request_id.to_string()),
+            mobile_request_hash: Some(request_hash),
+            client_token_hash_at_create: Some(client_hash.clone()),
+        };
+        assert_eq!(
+            validate_remote_mobile_recovery(
+                &row,
+                "account-a",
+                client_token,
+                &client_hash,
+                request_id,
+                150,
+            )
+            .unwrap(),
+            mobile_token
+        );
+
+        assert_eq!(
+            validate_remote_mobile_recovery(
+                &row,
+                "account-a",
+                "rotated-client-token-secret-that-is-long-enough-9876543210",
+                "rotated-hash",
+                request_id,
+                150,
+            )
+            .unwrap_err()
+            .0,
+            "control_session_request_conflict"
+        );
+
+        row.state = "closed".to_string();
+        assert_eq!(
+            validate_remote_mobile_recovery(&row, "account-a", client_token, &client_hash, request_id, 150)
+                .unwrap_err()
+                .0,
+            "control_session_closed"
+        );
+        row.state = "active".to_string();
+        assert_eq!(
+            validate_remote_mobile_recovery(&row, "account-a", client_token, &client_hash, request_id, 201)
+                .unwrap_err()
+                .0,
+            "control_session_expired"
+        );
+        row.expires_at = 300;
+        row.mobile_token_hash = "tampered".to_string();
+        assert_eq!(
+            validate_remote_mobile_recovery(&row, "account-a", client_token, &client_hash, request_id, 150)
+                .unwrap_err()
+                .0,
+            "control_session_recovery_mismatch"
+        );
+    }
+}

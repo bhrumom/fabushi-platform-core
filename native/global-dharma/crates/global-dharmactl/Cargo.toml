@@ -1,0 +1,10 @@
+[package]
+name = "global-dharmactl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+global-dharma-core = { path = "../global-dharma-core" }
+serde_json.workspace = true
+ureq.workspace = true
