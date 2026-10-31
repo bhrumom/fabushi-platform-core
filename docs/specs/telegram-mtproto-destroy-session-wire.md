@@ -1,10 +1,10 @@
-# Telegram MTProto DestroySessionRes exact wire validation
+# Telegram MTProto destroy_session request and DestroySessionRes exact wire contracts
 
 Status: Stage A implementation contract; executable validation deferred.
 
 ## Scope
 
-This spec closes only the fixed-U typed wire-decoding responsibility for `destroy_session_ok` and `destroy_session_none` inside the existing canonical `telegram-protocol` owner. It does not add an outbound `destroy_session` production lifecycle, session teardown orchestration, historical request correlation, sent/resend/container bookkeeping, gzip handling, or updates difference decoding.
+This spec closes the fixed-U exact wire responsibilities for the `destroy_session#e7512126` request serializer and the already-implemented typed decoding of `destroy_session_ok` / `destroy_session_none` inside the existing canonical `telegram-protocol` owner. Request serialization and result parsing are deliberately separate contracts. This spec does not add an outbound live teardown production lifecycle, session teardown orchestration, historical request correlation, sent/resend/container bookkeeping, gzip handling, or updates difference decoding.
 
 ## Fixed-U provenance
 
@@ -28,6 +28,18 @@ At the live checkpoint before this spec, `native/telegram-protocol/src/api.rs` h
 - R5: This slice SHALL NOT mutate current session/auth/request state, synthesize teardown behavior, or introduce `wasSent/haveSent/_resendingIds/toSend/_sentContainers` history.
 - R6: The absence of a canonical outbound destroy-session + teardown lifecycle SHALL remain an explicit blocker for interpreting either result as a live session mutation; only exact wire decoding is implemented here.
 - R7: Desktop provider protocol sources SHALL be synchronized byte-for-byte only after the canonical implementation is durably committed.
+
+## Round 35 request-side gap and requirements
+
+At live HEAD `6cfc81d79901493c6b34ec4e174d4fbdae81800e`, the response-side constants, typed `DestroySessionResult`, and strict `parse_destroy_session_result` already exist, but the request-side constructor `destroy_session#e7512126` and exact serializer are still absent. The current repository still has no precise live teardown/outbound-session lifecycle owner. The latest user requirement therefore extends this durable spec only with the independently representable request bytes.
+
+- R8: The canonical protocol owner SHALL export `DESTROY_SESSION_CONSTRUCTOR = 0xe7512126`.
+- R9: The canonical protocol owner SHALL expose `build_destroy_session(session_id: i64) -> Vec<u8>`.
+- R10: The builder SHALL encode exactly request constructor then `session_id:long`, little-endian, for exactly 12 bytes.
+- R11: The builder SHALL preserve the complete signed `i64` domain without lifecycle/policy validation.
+- R12: The builder and its contracts SHALL remain structurally separate from `parse_destroy_session_result` and the result constructors.
+- R13: Authored-only request contracts SHALL cover exact layout, representative value, and `i64::MIN` / `i64::MAX`; they SHALL NOT be executed in Stage A.
+- R14: Exact request serialization SHALL have no socket/session/timer/history/persistence side effects. Live teardown/outbound-session lifecycle remains explicit fail-closed/open.
 
 ## Failure contract
 
@@ -56,6 +68,13 @@ Do not run build, typecheck, lint, schema validation, generators, unit/contract/
 - AC5: Desktop provider protocol sources are byte-identical to canonical protocol sources after synchronization.
 - AC6: Authored tests remain not-run and acceptance remains false until Stage B executable evidence exists.
 
+
+## Round 35 request-side acceptance criteria
+
+- AC7: canonical `DESTROY_SESSION_CONSTRUCTOR` and `build_destroy_session` exist.
+- AC8: source inspection shows exactly constructor + one `i64` and no policy transformation or extra bytes.
+- AC9: request builder/contracts remain separate from the existing `DestroySessionRes` parser; desktop provider api/lib are byte-identical after synchronization.
+- AC10: request contracts are authored but not run; ledger/P0/source-closure/evidence record `implemented / validation_status=not-run / accepted=false`; live teardown remains fail-closed.
 
 ## Source-level implementation review
 
