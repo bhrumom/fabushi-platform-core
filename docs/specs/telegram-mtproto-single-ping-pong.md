@@ -123,3 +123,22 @@ Additional acceptance criteria:
 - AC-8: Request serialization stays separate from `Pong` response parsing and current-ping correlation/settlement.
 - AC-9: Desktop protocol provider sources are synchronized byte-for-byte from canonical sources; authored request contracts remain not-run and `accepted=false`.
 - AC-10: Ordinary-ping timer/session scheduling and the broader historical sent/resend/container lifecycle remain explicit fail-closed scope; gzip and complete difference/differenceSlice decoding/application remain untouched.
+
+
+## 19. Round 37 request-side source-level compliance readback
+
+Canonical implementation commit: `d6ef74975d3541ddb4d187bfb5641773dc01a32d`.  
+Desktop provider synchronization commit: `36b425e547509f334453ac5ebf09033e366fe6ae`.  
+Desktop bookkeeping commit: `d33003c70384b7f80769982b7c684ec9ea6096ed`.  
+Canonical and desktop protocol blobs: api `714c24a5f1727e13693008ea42676831b3e8d3fd`, lib `ef44b1bb7fcac0183f1b83cca8c9d994ecc8ce9c`.
+
+- R9: satisfied by source inspection — `PING_CONSTRUCTOR` is exported as fixed-U `0x7abe77ec`.
+- R10: satisfied by source inspection — `build_ping(ping_id: i64) -> Vec<u8>` is public and re-exported by the protocol crate.
+- R11: satisfied by source inspection — the builder writes only the constructor then one little-endian `i64`, yielding the exact 12-byte contract.
+- R12: satisfied by source inspection — `ping_id` is written directly with no validation, clamp, timer, connection, retry, main-session, correlation, or reconnect transformation.
+- R13: satisfied by source inspection — request serialization is a distinct builder; `parse_pong` and current-ping receive correlation/settlement are unchanged and remain separate receive-side responsibilities.
+- R14: satisfied as an authored-only Stage-A artifact — exact-layout, signed-boundary, and request/Pong-parser separation contracts exist but were not run.
+- R15: satisfied by ownership/source inspection — the builder has no socket, timer, session, request-history, ACK/resend, persistence, timeout/reconnect, or response-settlement side effect.
+- R16: satisfied as an explicit fail-closed boundary — fixed-U ordinary-ping scheduling/selection, message-id assignment, send/ACK settlement and timeout/reconnect remain unclaimed; arbitrary `wasSent/haveSent/_resendingIds/toSend/_sentContainers` history was not introduced.
+
+AC-6 through AC-9 are satisfied at source/implementation/bookkeeping level. AC-10 is satisfied for the fail-closed ownership boundary and remains **blocked/not-run** for executable validation: `validation_status=not-run`, `accepted=false`. TLS camouflage, gzip, complete difference/differenceSlice decoding/application, broader source/legal closure, Stage-B evidence and independent release acceptance remain open. No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried in this review.
