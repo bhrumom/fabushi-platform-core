@@ -99,3 +99,27 @@ Evidence is fixed-U source identity, Git blob identity, authored contracts, cano
 | AC-3 | passed | Desktop ledger/P0/source-closure/evidence commit `770510d554552d5d4aa2f2b69f3d62612e3e33ad`; row `TDRP-R9-MTPROTO-SINGLE-PING-PONG-001` is implemented with empty execution evidence and records `validation_status=not-run`, `accepted=false`. |
 | AC-4 | passed | Desktop ledger/evidence explicitly retain arbitrary `haveSent/_resendingIds/toSend/_sentContainers`, historical sent-message lookup and multi-ping history as open/fail-closed. |
 | AC-5 | passed | Round 21 performed Git/ref/tree/blob/source reads and safe writes only; no Actions/status/check query or trigger and no build, lint, generator, test, package, deployment, installation, or runtime acceptance was performed. |
+
+
+## 18. Round 37 request-side extension — fixed-U ping exact serializer
+
+At live HEAD `eaf1eeefdde1401d820d9fecd15da3b4aa9cfde5`, the canonical protocol owner already has the strict receive-side `Pong` parser and the separately implemented `ping_delay_disconnect` request builder, but fixed-U `ping#7abe77ec ping_id:long = Pong` still has no canonical exact serializer. Fixed-U `SessionPrivate::tryToSend` chooses ordinary `MTPPing` only from connection/main-session state (`sendOnlyFirstPing || !isMainSession`) and otherwise chooses `MTPPing_delay_disconnect`; that scheduling/selection policy is session lifecycle, not wire shape, and is intentionally not inferred here.
+
+Additional requirements:
+
+- R9: The canonical protocol owner SHALL export `PING_CONSTRUCTOR = 0x7abe77ec`.
+- R10: The canonical protocol owner SHALL expose `build_ping(ping_id: i64) -> Vec<u8>`.
+- R11: The builder SHALL encode exactly the request constructor followed by `ping_id:long`, little-endian, for exactly 12 bytes.
+- R12: The builder SHALL preserve the complete signed `i64` domain without applying timer, connection, main-session, retry, correlation, or reconnect policy.
+- R13: The request builder and its contracts SHALL remain structurally separate from `parse_pong`, `PONG_CONSTRUCTOR`, and current-ping receive correlation/settlement.
+- R14: Authored-only request contracts SHALL cover exact layout, a representative value, `i64::MIN` / `i64::MAX`, and request/Pong-parser separation; they SHALL NOT be executed in Stage A.
+- R15: Exact request serialization SHALL have no socket, timer, session, request-history, ACK, resend, persistence, or response-settlement side effects.
+- R16: Live ordinary-ping scheduling/selection, message-id assignment, send/ACK settlement, and timeout/reconnect lifecycle SHALL remain fail-closed unless and until the existing network/session owner can represent the fixed-U semantics precisely without adding arbitrary `wasSent/haveSent/_resendingIds/toSend/_sentContainers` history.
+
+Additional acceptance criteria:
+
+- AC-6: Exact `ping` request serialization is owned by the existing source-neutral `telegram-protocol` owner.
+- AC-7: The serializer emits exactly 12 bytes and preserves signed `ping_id` without policy transformation.
+- AC-8: Request serialization stays separate from `Pong` response parsing and current-ping correlation/settlement.
+- AC-9: Desktop protocol provider sources are synchronized byte-for-byte from canonical sources; authored request contracts remain not-run and `accepted=false`.
+- AC-10: Ordinary-ping timer/session scheduling and the broader historical sent/resend/container lifecycle remain explicit fail-closed scope; gzip and complete difference/differenceSlice decoding/application remain untouched.
