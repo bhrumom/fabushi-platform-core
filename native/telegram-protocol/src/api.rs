@@ -21,6 +21,7 @@ pub const USER_EMPTY_CONSTRUCTOR: u32 = 0xd3bc_4b7a;
 pub const USER_CONSTRUCTOR: u32 = 0xb1b8_cc83;
 pub const MSGS_ACK_CONSTRUCTOR: u32 = 0x62d6_b459;
 pub const PONG_CONSTRUCTOR: u32 = 0x3477_73c5;
+pub const PING_CONSTRUCTOR: u32 = 0x7abe_77ec;
 pub const PING_DELAY_DISCONNECT_CONSTRUCTOR: u32 = 0xf342_7b8c;
 pub const RPC_RESULT_CONSTRUCTOR: u32 = 0xf35c_6d01;
 pub const RPC_ANSWER_UNKNOWN_CONSTRUCTOR: u32 = 0x5e2a_d36e;
@@ -523,6 +524,13 @@ pub fn build_auth_check_password(proof: &PasswordSrpProof) -> Result<Vec<u8>, Ap
     output.extend_from_slice(&AUTH_CHECK_PASSWORD_CONSTRUCTOR.to_le_bytes());
     output.extend_from_slice(&encoded_proof);
     Ok(output)
+}
+
+pub fn build_ping(ping_id: i64) -> Vec<u8> {
+    let mut writer = TlWriter::new();
+    writer.write_u32(PING_CONSTRUCTOR);
+    writer.write_i64(ping_id);
+    writer.into_bytes()
 }
 
 pub fn build_ping_delay_disconnect(ping_id: i64, disconnect_delay: i32) -> Vec<u8> {
@@ -1534,7 +1542,7 @@ mod authorization_identity_contract_tests {
 mod mtproto_service_builder_contract_tests {
     use super::{
         build_destroy_session, build_get_future_salts, build_msg_resend_req, build_msgs_ack,
-        build_msgs_state_req, build_ping_delay_disconnect,
+        build_msgs_state_req, build_ping, build_ping_delay_disconnect,
         parse_bad_msg_notification,
         parse_bad_server_salt,
         parse_future_salts, parse_msg_detailed_info, parse_msg_new_detailed_info, parse_msgs_ack,
@@ -1553,7 +1561,7 @@ mod mtproto_service_builder_contract_tests {
         MSG_NEW_DETAILED_INFO_CONSTRUCTOR, MSGS_ACK_CONSTRUCTOR,
         MSGS_ALL_INFO_CONSTRUCTOR,
         MSGS_STATE_INFO_CONSTRUCTOR, MSGS_STATE_REQ_CONSTRUCTOR, MSG_RESEND_REQ_CONSTRUCTOR,
-        PING_DELAY_DISCONNECT_CONSTRUCTOR, PONG_CONSTRUCTOR, RPC_RESULT_CONSTRUCTOR,
+        PING_CONSTRUCTOR, PING_DELAY_DISCONNECT_CONSTRUCTOR, PONG_CONSTRUCTOR, RPC_RESULT_CONSTRUCTOR,
     };
     use crate::tl::TlWriter;
 
@@ -1640,6 +1648,27 @@ mod mtproto_service_builder_contract_tests {
             expected.extend_from_slice(&num.to_le_bytes());
             assert_eq!(encoded, expected);
             assert!(parse_future_salts(&encoded).is_err());
+        }
+    }
+
+    #[test]
+    fn ping_serializes_fixed_u_request_exactly() {
+        let ping_id = 0x0102_0304_0506_0708_i64;
+        let encoded = build_ping(ping_id);
+        assert_eq!(encoded.len(), 12);
+        assert_eq!(&encoded[0..4], &PING_CONSTRUCTOR.to_le_bytes());
+        assert_eq!(&encoded[4..12], &ping_id.to_le_bytes());
+    }
+
+    #[test]
+    fn ping_preserves_signed_boundaries_and_stays_separate_from_pong_parser() {
+        for ping_id in [i64::MIN, i64::MAX] {
+            let encoded = build_ping(ping_id);
+            let mut expected = Vec::new();
+            expected.extend_from_slice(&PING_CONSTRUCTOR.to_le_bytes());
+            expected.extend_from_slice(&ping_id.to_le_bytes());
+            assert_eq!(encoded, expected);
+            assert!(parse_pong(&encoded).is_err());
         }
     }
 
