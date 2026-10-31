@@ -187,4 +187,17 @@ produced in Stage A. No executable evidence is produced or claimed.
 
 ## 17. Spec compliance record
 
-Pending authored-contract/bookkeeping readback for this Stage-A slice. Executable validation remains intentionally not run.
+| Requirement / AC | Status | Evidence / reason |
+| --- | --- | --- |
+| R1-R8 | passed | Remote source readback at platform checkpoint 7ad951b93b57fc3c4cf33e43eaa157066d452b31: api.rs@ebfb3670b5cd097b9ce288782c7954f5cfe9fc43 preserves constructor 0x2144ca19, typed signed i32 + TL string parsing, non-RpcError discrimination and strict trailing-byte rejection; tl.rs@89256ab35184b6dc06a095ab34abb9f44e95a264 preserves canonical TL string padding, truncation and UTF-8 validation; lib.rs@abab39e42f100972484191f0e52e9edd9b88c6cf exports the same parser/type/constructor. Fixed-U rpc_result handling carries rpc_error as the response body, while request history, gzip and auth-key lifecycle remain outside this slice. |
+| R9 | passed | Canonical authored-only contract file is native/telegram-protocol/tests/protocol_contract.rs@d171a3ab9a43955a693c87162f80c2667fc397ce; desktop mirror commit 885faac55fc8b7d99e4989b438e1a428ac57c1f8 has the same blob. Cases cover exact fields, non-RpcError discrimination, truncation, invalid UTF-8, trailing bytes and EOF. They were not executed. |
+| R10 | passed | Ledger/evidence keep arbitrary request history, connection scheduling, auth-key binding/persistence, gzip and complete difference decoding explicitly open/fail-closed. |
+| AC-1 | passed | Production api/tl/lib blobs remain ebfb3670b5cd097b9ce288782c7954f5cfe9fc43 / 89256ab35184b6dc06a095ab34abb9f44e95a264 / abab39e42f100972484191f0e52e9edd9b88c6cf; no production behavior delta was made. |
+| AC-2 | passed | Authored contract commit 7ad951b93b57fc3c4cf33e43eaa157066d452b31 and blob d171a3ab9a43955a693c87162f80c2667fc397ce lock R1-R7/R9; executable validation is intentionally deferred. |
+| AC-3 | passed | Desktop production api/lib remain ebfb3670b5cd097b9ce288782c7954f5cfe9fc43 / abab39e42f100972484191f0e52e9edd9b88c6cf; desktop contract mirror is byte-identical at d171a3ab9a43955a693c87162f80c2667fc397ce. |
+| AC-4 | passed | Desktop ledger/evidence/P0/source-closure commit 0c9547557a9b69734cedae9ec7d2fcf7607fa0ce records fixed-U identities, no-production-delta disposition and open broader lifecycle boundaries. |
+| AC-5 | passed | Existing parity ledger records TDRP-R9-MTPROTO-RPC-ERROR-WIRE-001 as implemented / validation_status=not-run / accepted=false with responsibilities_total=93, unknown=16172, unread=16145, omitted=0. |
+| AC-6 | passed | This Stage-A round performed source/blob readback and authored/saved code/docs only. No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E execution, GitHub Actions/status/check query, package, deploy, install or runtime acceptance was performed. |
+
+Source-level compliance is complete for this isolated response-wire slice. This does not constitute executable
+verification, candidate readiness, release acceptance, or closure of the broader migration.
