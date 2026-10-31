@@ -1,13 +1,16 @@
 use fabushi_telegram_core::{Command, TelegramEngine};
 use fabushi_telegram_network::{establish_auth_key, EstablishedSession, NetworkConfig};
 use fabushi_telegram_protocol::{
-    build_account_get_password, build_auth_check_password, build_auth_send_code,
+    build_account_get_password, build_account_send_verify_email_code, build_account_verify_email,
+    build_auth_cancel_code, build_auth_check_password, build_auth_check_recovery_password,
+    build_auth_request_password_recovery, build_auth_resend_code, build_auth_send_code,
     build_auth_sign_in, build_auth_sign_up, build_init_connection_get_config,
-    build_updates_get_state, compute_password_srp_proof, parse_account_password_prefix,
-    parse_auth_sent_code, parse_config_dc_directory_prefix, parse_update_state,
+    build_updates_get_state, compute_password_srp_proof, parse_account_email_verified,
+    parse_account_password_prefix, parse_account_sent_email_code, parse_auth_password_recovery,
+    parse_auth_sent_code, parse_bool, parse_config_dc_directory_prefix, parse_update_state,
     try_parse_rpc_error, AccountPasswordState, AuthCommand, AuthorizationMachine,
-    AuthorizationState, CodeDeliveryType, DcDirectory, InitConnection, PasswordSrpParameters,
-    SentCodeDelivery, SentCodeResult, UpdateState,
+    AuthorizationState, CodeDeliveryType, DcDirectory, EmailVerifiedResult, InitConnection,
+    PasswordSrpParameters, SentCodeDelivery, SentCodeResult, UpdateState,
 };
 use fabushi_telegram_storage::{EncryptedSqliteStore, StorageKey};
 use once_cell::sync::Lazy;
@@ -22,6 +25,8 @@ use std::{
 };
 use thiserror::Error;
 use zeroize::Zeroizing;
+
+const AUTH_RUNTIME_STATE_KEY: &str = "authorization-runtime-v1";
 
 static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 static CLIENTS: Lazy<Mutex<BTreeMap<u64, RuntimeClient>>> =
@@ -121,6 +126,121 @@ impl RuntimeError {
     }
 }
 
+fn auth_context_json(context: &AuthContext) -> Value {
+    json!({
+        "phoneNumber": context.phone_number.as_str(),
+        "phoneCodeHash": context.phone_code_hash.as_str(),
+        "passwordSrp": context.password_srp.as_ref().map(|srp| json!({
+            "srpId": srp.srp_id,
+            "salt1": srp.salt1,
+            "salt2": srp.salt2,
+            "generator": srp.generator,
+            "prime": srp.prime,
+            "serverB": srp.server_b,
+        })),
+    })
+}
+
+fn json_bytes(value: &Value, field: &'static str) -> Result<Vec<u8>, RuntimeError> {
+    value
+        .as_array()
+        .ok_or(RuntimeError::InvalidParameter(field))?
+        .iter()
+        .map(|byte| {
+            byte.as_u64()
+                .and_then(|value| u8::try_from(value).ok())
+                .ok_or(RuntimeError::InvalidParameter(field))
+        })
+        .collect()
+}
+
+fn auth_context_from_json(value: &Value) -> Result<AuthContext, RuntimeError> {
+    let phone_number = required_string(value, "phoneNumber")?;
+    let phone_code_hash = required_string(value, "phoneCodeHash")?;
+    let password_srp = value
+        .get("passwordSrp")
+        .filter(|value| !value.is_null())
+        .map(|srp| {
+            Ok::<_, RuntimeError>(PasswordSrpParameters {
+                srp_id: srp
+                    .get("srpId")
+                    .and_then(Value::as_i64)
+                    .ok_or(RuntimeError::InvalidParameter("srpId"))?,
+                salt1: json_bytes(
+                    srp.get("salt1")
+                        .ok_or(RuntimeError::InvalidParameter("salt1"))?,
+                    "salt1",
+                )?,
+                salt2: json_bytes(
+                    srp.get("salt2")
+                        .ok_or(RuntimeError::InvalidParameter("salt2"))?,
+                    "salt2",
+                )?,
+                generator: srp
+                    .get("generator")
+                    .and_then(Value::as_i64)
+                    .and_then(|value| i32::try_from(value).ok())
+                    .ok_or(RuntimeError::InvalidParameter("generator"))?,
+                prime: json_bytes(
+                    srp.get("prime")
+                        .ok_or(RuntimeError::InvalidParameter("prime"))?,
+                    "prime",
+                )?,
+                server_b: json_bytes(
+                    srp.get("serverB")
+                        .ok_or(RuntimeError::InvalidParameter("serverB"))?,
+                    "serverB",
+                )?,
+            })
+        })
+        .transpose()?;
+    Ok(AuthContext {
+        phone_number: Zeroizing::new(phone_number.to_string()),
+        phone_code_hash: Zeroizing::new(phone_code_hash.to_string()),
+        password_srp,
+    })
+}
+
+fn serialize_auth_runtime_state(client: &RuntimeClient) -> Result<Vec<u8>, RuntimeError> {
+    serde_json::to_vec(&json!({
+        "authorizationState": client.authorization.state(),
+        "authContext": client.auth_context.as_ref().map(auth_context_json),
+    }))
+    .map_err(RuntimeError::from)
+}
+
+fn restore_auth_runtime_state(
+    bytes: Option<Vec<u8>>,
+) -> Result<(AuthorizationMachine, Option<AuthContext>), RuntimeError> {
+    let Some(bytes) = bytes else {
+        return Ok((AuthorizationMachine::new(), None));
+    };
+    let value: Value = serde_json::from_slice(&bytes)?;
+    let state: AuthorizationState = serde_json::from_value(
+        value
+            .get("authorizationState")
+            .cloned()
+            .ok_or(RuntimeError::InvalidParameter("authorizationState"))?,
+    )?;
+    let context = value
+        .get("authContext")
+        .filter(|value| !value.is_null())
+        .map(auth_context_from_json)
+        .transpose()?;
+    Ok((AuthorizationMachine::from_state(state), context))
+}
+
+fn persist_auth_runtime_state(client: &mut RuntimeClient) -> Result<(), RuntimeError> {
+    let payload = serialize_auth_runtime_state(client)?;
+    if let Some(persistence) = &mut client.persistence {
+        persistence
+            .store
+            .save_secure_value(AUTH_RUNTIME_STATE_KEY, &payload)
+            .map_err(|error| RuntimeError::Storage(error.to_string()))?;
+    }
+    Ok(())
+}
+
 pub fn create_client() -> u64 {
     insert_client(RuntimeClient::default())
 }
@@ -136,6 +256,10 @@ pub fn create_persistent_client(
     let snapshot = store
         .load_snapshot()
         .map_err(|error| RuntimeError::Storage(error.to_string()))?;
+    let auth_runtime_state = store
+        .load_secure_value(AUTH_RUNTIME_STATE_KEY)
+        .map_err(|error| RuntimeError::Storage(error.to_string()))?;
+    let (authorization, auth_context) = restore_auth_runtime_state(auth_runtime_state)?;
     let (core, revision) = snapshot.map_or_else(
         || (TelegramEngine::new(), 0),
         |snapshot| {
@@ -147,11 +271,11 @@ pub fn create_persistent_client(
     );
     Ok(insert_client(RuntimeClient {
         core,
-        authorization: AuthorizationMachine::new(),
+        authorization,
         persistence: Some(PersistentClientStorage { store, revision }),
         transport: None,
         server_directory: None,
-        auth_context: None,
+        auth_context,
         update_state: None,
     }))
 }
@@ -225,6 +349,27 @@ fn execute_value(client_id: u64, request: Value) -> Result<Value, RuntimeError> 
     }
     if request_type == "telegram.submitRegistration" {
         return submit_registration(client_id, &request);
+    }
+    if request_type == "telegram.resendAuthenticationCode" {
+        return resend_authentication_code(client_id, &request);
+    }
+    if request_type == "telegram.cancelAuthenticationCode" {
+        return cancel_authentication_code(client_id);
+    }
+    if request_type == "telegram.requestPasswordRecovery" {
+        return request_password_recovery(client_id);
+    }
+    if request_type == "telegram.checkRecoveryPassword" {
+        return check_recovery_password(client_id, &request);
+    }
+    if request_type == "telegram.sendVerifyEmailCode" {
+        return send_verify_email_code(client_id, &request);
+    }
+    if request_type == "telegram.verifyEmail" {
+        return verify_email(client_id, &request);
+    }
+    if request_type == "telegram.refreshPasswordChallenge" {
+        return refresh_password_challenge(client_id);
     }
     if request_type == "telegram.beginUpdateSync" {
         return begin_update_sync(client_id);
@@ -306,6 +451,7 @@ fn execute_value(client_id: u64, request: Value) -> Result<Value, RuntimeError> 
                 .authorization
                 .execute(command)
                 .map_err(|error| RuntimeError::Authorization(error.to_string()))?;
+            persist_auth_runtime_state(client)?;
             Ok(json!({
                 "@type": "telegram.authorizationResult",
                 "events": events,
@@ -490,6 +636,7 @@ fn send_authentication_code(client_id: u64, request: &Value) -> Result<Value, Ru
                 phone_code_hash: Zeroizing::new(code.phone_code_hash),
                 password_srp: None,
             });
+            persist_auth_runtime_state(client)?;
             Ok(json!({
                 "@type": "telegram.authenticationCodeSent",
                 "events": events,
@@ -507,6 +654,7 @@ fn send_authentication_code(client_id: u64, request: &Value) -> Result<Value, Ru
                 })
                 .map_err(|error| RuntimeError::Authorization(error.to_string()))?;
             client.auth_context = None;
+            persist_auth_runtime_state(client)?;
             Ok(json!({
                 "@type": "telegram.authorizationReady",
                 "events": events,
@@ -658,6 +806,7 @@ fn submit_authentication_code(client_id: u64, request: &Value) -> Result<Value, 
     if matches!(state, AuthorizationState::Ready) {
         client.auth_context = None;
     }
+    persist_auth_runtime_state(client)?;
     Ok(json!({
         "@type": response_type,
         "events": events,
@@ -736,6 +885,7 @@ fn submit_authentication_password(client_id: u64, request: &Value) -> Result<Val
         })
         .map_err(|error| RuntimeError::Authorization(error.to_string()))?;
     client.auth_context = None;
+    persist_auth_runtime_state(client)?;
     Ok(json!({
         "@type": "telegram.authorizationReady",
         "events": events,
@@ -813,6 +963,427 @@ fn submit_registration(client_id: u64, request: &Value) -> Result<Value, Runtime
     client.auth_context = None;
     Ok(json!({
         "@type": "telegram.authorizationReady",
+        "events": events,
+        "authorizationState": state,
+    }))
+}
+
+
+fn auth_context_phone_hash(
+    client_id: u64,
+) -> Result<(Zeroizing<String>, Zeroizing<String>), RuntimeError> {
+    let clients = CLIENTS
+        .lock()
+        .map_err(|_| RuntimeError::RegistryUnavailable)?;
+    let client = clients
+        .get(&client_id)
+        .ok_or(RuntimeError::ClientNotFound(client_id))?;
+    let context = client
+        .auth_context
+        .as_ref()
+        .ok_or(RuntimeError::AuthContextMissing)?;
+    Ok((
+        Zeroizing::new(context.phone_number.to_string()),
+        Zeroizing::new(context.phone_code_hash.to_string()),
+    ))
+}
+
+fn rpc_error_from_body(body: &[u8]) -> Result<Option<RuntimeError>, RuntimeError> {
+    Ok(try_parse_rpc_error(body)
+        .map_err(|error| RuntimeError::Protocol(error.to_string()))?
+        .map(|error| RuntimeError::RemoteRpc {
+            code: error.code,
+            message: error.message,
+        }))
+}
+
+fn resend_authentication_code(client_id: u64, request: &Value) -> Result<Value, RuntimeError> {
+    let reason = request.get("reason").and_then(Value::as_str);
+    let (phone_number, phone_code_hash) = auth_context_phone_hash(client_id)?;
+    let body = build_auth_resend_code(&phone_number, &phone_code_hash, reason)
+        .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
+    let mut session = take_transport(client_id)?;
+    let operation = (|| -> Result<SentCodeResult, RuntimeError> {
+        let result = session
+            .invoke_raw(&body)
+            .map_err(|error| RuntimeError::Network(error.to_string()))?;
+        if let Some(error) = rpc_error_from_body(&result.body)? {
+            return Err(error);
+        }
+        parse_auth_sent_code(&result.body)
+            .map_err(|error| RuntimeError::Protocol(error.to_string()))
+    })();
+    let mut clients = CLIENTS
+        .lock()
+        .map_err(|_| RuntimeError::RegistryUnavailable)?;
+    let client = clients
+        .get_mut(&client_id)
+        .ok_or(RuntimeError::ClientNotFound(client_id))?;
+    client.transport = Some(session);
+    match operation? {
+        SentCodeResult::Code { code } => {
+            let (delivery_type, code_length) = delivery_state(&code.delivery);
+            let state = AuthorizationState::WaitCode {
+                phone_number: phone_number.to_string(),
+                delivery_type,
+                code_length,
+                timeout_seconds: code
+                    .timeout_seconds
+                    .and_then(|value| u32::try_from(value).ok()),
+            };
+            let events = client
+                .authorization
+                .execute(AuthCommand::ApplyRemoteState {
+                    state: state.clone(),
+                })
+                .map_err(|error| RuntimeError::Authorization(error.to_string()))?;
+            client.auth_context = Some(AuthContext {
+                phone_number,
+                phone_code_hash: Zeroizing::new(code.phone_code_hash),
+                password_srp: None,
+            });
+            persist_auth_runtime_state(client)?;
+            Ok(json!({
+                "@type": "telegram.authenticationCodeResent",
+                "events": events,
+                "authorizationState": state,
+                "delivery": code.delivery,
+                "nextType": code.next_type,
+            }))
+        }
+        SentCodeResult::Success => {
+            let state = AuthorizationState::Ready;
+            let events = client
+                .authorization
+                .execute(AuthCommand::ApplyRemoteState {
+                    state: state.clone(),
+                })
+                .map_err(|error| RuntimeError::Authorization(error.to_string()))?;
+            client.auth_context = None;
+            persist_auth_runtime_state(client)?;
+            Ok(json!({
+                "@type": "telegram.authorizationReady",
+                "events": events,
+                "authorizationState": state,
+            }))
+        }
+        payment @ SentCodeResult::PaymentRequired { .. } => Ok(json!({
+            "@type": "telegram.authenticationPaymentRequired",
+            "details": payment,
+            "authorizationState": client.authorization.state(),
+        })),
+    }
+}
+
+fn cancel_authentication_code(client_id: u64) -> Result<Value, RuntimeError> {
+    let (phone_number, phone_code_hash) = auth_context_phone_hash(client_id)?;
+    let body = build_auth_cancel_code(&phone_number, &phone_code_hash)
+        .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
+    let mut session = take_transport(client_id)?;
+    let operation = (|| -> Result<(), RuntimeError> {
+        let result = session
+            .invoke_raw(&body)
+            .map_err(|error| RuntimeError::Network(error.to_string()))?;
+        if let Some(error) = rpc_error_from_body(&result.body)? {
+            return Err(error);
+        }
+        if !parse_bool(&result.body)
+            .map_err(|error| RuntimeError::Protocol(error.to_string()))?
+        {
+            return Err(RuntimeError::Protocol(
+                "auth.cancelCode returned Bool false".to_string(),
+            ));
+        }
+        Ok(())
+    })();
+    let mut clients = CLIENTS
+        .lock()
+        .map_err(|_| RuntimeError::RegistryUnavailable)?;
+    let client = clients
+        .get_mut(&client_id)
+        .ok_or(RuntimeError::ClientNotFound(client_id))?;
+    client.transport = Some(session);
+    operation?;
+    let state = AuthorizationState::WaitPhoneNumber;
+    let events = client
+        .authorization
+        .execute(AuthCommand::ApplyRemoteState {
+            state: state.clone(),
+        })
+        .map_err(|error| RuntimeError::Authorization(error.to_string()))?;
+    client.auth_context = None;
+    persist_auth_runtime_state(client)?;
+    Ok(json!({
+        "@type": "telegram.authenticationCodeCancelled",
+        "events": events,
+        "authorizationState": state,
+    }))
+}
+
+fn request_password_recovery(client_id: u64) -> Result<Value, RuntimeError> {
+    {
+        let clients = CLIENTS
+            .lock()
+            .map_err(|_| RuntimeError::RegistryUnavailable)?;
+        let client = clients
+            .get(&client_id)
+            .ok_or(RuntimeError::ClientNotFound(client_id))?;
+        if !matches!(client.authorization.state(), AuthorizationState::WaitPassword { .. }) {
+            return Err(RuntimeError::Authorization(
+                "password recovery requires waitPassword state".to_string(),
+            ));
+        }
+    }
+    let mut session = take_transport(client_id)?;
+    let operation = (|| {
+        let result = session
+            .invoke_raw(&build_auth_request_password_recovery())
+            .map_err(|error| RuntimeError::Network(error.to_string()))?;
+        if let Some(error) = rpc_error_from_body(&result.body)? {
+            return Err(error);
+        }
+        parse_auth_password_recovery(&result.body)
+            .map_err(|error| RuntimeError::Protocol(error.to_string()))
+    })();
+    let mut clients = CLIENTS
+        .lock()
+        .map_err(|_| RuntimeError::RegistryUnavailable)?;
+    let client = clients
+        .get_mut(&client_id)
+        .ok_or(RuntimeError::ClientNotFound(client_id))?;
+    client.transport = Some(session);
+    let recovery = operation?;
+    let events = client
+        .authorization
+        .execute(AuthCommand::RequestPasswordRecovery)
+        .map_err(|error| RuntimeError::Authorization(error.to_string()))?;
+    Ok(json!({
+        "@type": "telegram.passwordRecoveryRequested",
+        "events": events,
+        "emailPattern": recovery.email_pattern,
+        "authorizationState": client.authorization.state(),
+    }))
+}
+
+fn check_recovery_password(client_id: u64, request: &Value) -> Result<Value, RuntimeError> {
+    let code = required_string(request, "code")?;
+    {
+        let clients = CLIENTS
+            .lock()
+            .map_err(|_| RuntimeError::RegistryUnavailable)?;
+        let client = clients
+            .get(&client_id)
+            .ok_or(RuntimeError::ClientNotFound(client_id))?;
+        if !matches!(client.authorization.state(), AuthorizationState::WaitPassword { .. }) {
+            return Err(RuntimeError::Authorization(
+                "recovery code validation requires waitPassword state".to_string(),
+            ));
+        }
+    }
+    let body = build_auth_check_recovery_password(code)
+        .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
+    let mut session = take_transport(client_id)?;
+    let operation = (|| -> Result<(), RuntimeError> {
+        let result = session
+            .invoke_raw(&body)
+            .map_err(|error| RuntimeError::Network(error.to_string()))?;
+        if let Some(error) = rpc_error_from_body(&result.body)? {
+            return Err(error);
+        }
+        if !parse_bool(&result.body)
+            .map_err(|error| RuntimeError::Protocol(error.to_string()))?
+        {
+            return Err(RuntimeError::Protocol(
+                "auth.checkRecoveryPassword returned Bool false".to_string(),
+            ));
+        }
+        Ok(())
+    })();
+    let mut clients = CLIENTS
+        .lock()
+        .map_err(|_| RuntimeError::RegistryUnavailable)?;
+    let client = clients
+        .get_mut(&client_id)
+        .ok_or(RuntimeError::ClientNotFound(client_id))?;
+    client.transport = Some(session);
+    operation?;
+    Ok(json!({
+        "@type": "telegram.passwordRecoveryCodeAccepted",
+        "authorizationState": client.authorization.state(),
+    }))
+}
+
+fn send_verify_email_code(client_id: u64, request: &Value) -> Result<Value, RuntimeError> {
+    let email = required_string(request, "email")?;
+    let (phone_number, phone_code_hash) = auth_context_phone_hash(client_id)?;
+    let body = build_account_send_verify_email_code(&phone_number, &phone_code_hash, email)
+        .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
+    let mut session = take_transport(client_id)?;
+    let operation = (|| {
+        let result = session
+            .invoke_raw(&body)
+            .map_err(|error| RuntimeError::Network(error.to_string()))?;
+        if let Some(error) = rpc_error_from_body(&result.body)? {
+            return Err(error);
+        }
+        parse_account_sent_email_code(&result.body)
+            .map_err(|error| RuntimeError::Protocol(error.to_string()))
+    })();
+    let mut clients = CLIENTS
+        .lock()
+        .map_err(|_| RuntimeError::RegistryUnavailable)?;
+    let client = clients
+        .get_mut(&client_id)
+        .ok_or(RuntimeError::ClientNotFound(client_id))?;
+    client.transport = Some(session);
+    let sent = operation?;
+    Ok(json!({
+        "@type": "telegram.authenticationEmailCodeSent",
+        "emailPattern": sent.email_pattern,
+        "codeLength": sent.length,
+        "authorizationState": client.authorization.state(),
+    }))
+}
+
+fn verify_email(client_id: u64, request: &Value) -> Result<Value, RuntimeError> {
+    let code = required_string(request, "code")?;
+    let (phone_number, phone_code_hash) = auth_context_phone_hash(client_id)?;
+    let body = build_account_verify_email(&phone_number, &phone_code_hash, code)
+        .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
+    let mut session = take_transport(client_id)?;
+    let operation = (|| {
+        let result = session
+            .invoke_raw(&body)
+            .map_err(|error| RuntimeError::Network(error.to_string()))?;
+        if let Some(error) = rpc_error_from_body(&result.body)? {
+            return Err(error);
+        }
+        parse_account_email_verified(&result.body)
+            .map_err(|error| RuntimeError::Protocol(error.to_string()))
+    })();
+    let mut clients = CLIENTS
+        .lock()
+        .map_err(|_| RuntimeError::RegistryUnavailable)?;
+    let client = clients
+        .get_mut(&client_id)
+        .ok_or(RuntimeError::ClientNotFound(client_id))?;
+    client.transport = Some(session);
+    match operation? {
+        EmailVerifiedResult::LoginCode { email, code } => {
+            let (delivery_type, code_length) = delivery_state(&code.delivery);
+            let state = AuthorizationState::WaitCode {
+                phone_number: phone_number.to_string(),
+                delivery_type,
+                code_length,
+                timeout_seconds: code
+                    .timeout_seconds
+                    .and_then(|value| u32::try_from(value).ok()),
+            };
+            let events = client
+                .authorization
+                .execute(AuthCommand::ApplyRemoteState {
+                    state: state.clone(),
+                })
+                .map_err(|error| RuntimeError::Authorization(error.to_string()))?;
+            client.auth_context = Some(AuthContext {
+                phone_number,
+                phone_code_hash: Zeroizing::new(code.phone_code_hash),
+                password_srp: None,
+            });
+            persist_auth_runtime_state(client)?;
+            Ok(json!({
+                "@type": "telegram.authenticationEmailVerified",
+                "email": email,
+                "events": events,
+                "authorizationState": state,
+                "delivery": code.delivery,
+                "nextType": code.next_type,
+            }))
+        }
+        EmailVerifiedResult::LoginSuccess { email } => {
+            let state = AuthorizationState::Ready;
+            let events = client
+                .authorization
+                .execute(AuthCommand::ApplyRemoteState {
+                    state: state.clone(),
+                })
+                .map_err(|error| RuntimeError::Authorization(error.to_string()))?;
+            client.auth_context = None;
+            persist_auth_runtime_state(client)?;
+            Ok(json!({
+                "@type": "telegram.authorizationReady",
+                "email": email,
+                "events": events,
+                "authorizationState": state,
+            }))
+        }
+        EmailVerifiedResult::LoginPaymentRequired { .. } => Err(RuntimeError::Protocol(
+            "email verification returned authentication payment requirement".to_string(),
+        )),
+        EmailVerifiedResult::Verified { .. } => Err(RuntimeError::Protocol(
+            "login email verification returned non-login account.emailVerified".to_string(),
+        )),
+    }
+}
+
+fn refresh_password_challenge(client_id: u64) -> Result<Value, RuntimeError> {
+    {
+        let clients = CLIENTS
+            .lock()
+            .map_err(|_| RuntimeError::RegistryUnavailable)?;
+        let client = clients
+            .get(&client_id)
+            .ok_or(RuntimeError::ClientNotFound(client_id))?;
+        if !matches!(client.authorization.state(), AuthorizationState::WaitPassword { .. }) {
+            return Err(RuntimeError::Authorization(
+                "password challenge refresh requires waitPassword state".to_string(),
+            ));
+        }
+        if client.auth_context.is_none() {
+            return Err(RuntimeError::AuthContextMissing);
+        }
+    }
+    let mut session = take_transport(client_id)?;
+    let operation = (|| -> Result<AccountPasswordState, RuntimeError> {
+        let result = session
+            .invoke_raw(&build_account_get_password())
+            .map_err(|error| RuntimeError::Network(error.to_string()))?;
+        if let Some(error) = rpc_error_from_body(&result.body)? {
+            return Err(error);
+        }
+        parse_account_password_prefix(&result.body)
+            .map_err(|error| RuntimeError::Protocol(error.to_string()))
+    })();
+    let mut clients = CLIENTS
+        .lock()
+        .map_err(|_| RuntimeError::RegistryUnavailable)?;
+    let client = clients
+        .get_mut(&client_id)
+        .ok_or(RuntimeError::ClientNotFound(client_id))?;
+    client.transport = Some(session);
+    let password = operation?;
+    let srp = password.srp.ok_or_else(|| {
+        RuntimeError::Protocol("account.Password omitted current SRP parameters".to_string())
+    })?;
+    let state = AuthorizationState::WaitPassword {
+        password_hint: password.hint.unwrap_or_default(),
+        has_recovery_email: password.has_recovery,
+        recovery_email_pattern: password.email_unconfirmed_pattern,
+    };
+    let events = client
+        .authorization
+        .execute(AuthCommand::ApplyRemoteState {
+            state: state.clone(),
+        })
+        .map_err(|error| RuntimeError::Authorization(error.to_string()))?;
+    client
+        .auth_context
+        .as_mut()
+        .ok_or(RuntimeError::AuthContextMissing)?
+        .password_srp = Some(srp);
+    persist_auth_runtime_state(client)?;
+    Ok(json!({
+        "@type": "telegram.authenticationPasswordChallengeRefreshed",
         "events": events,
         "authorizationState": state,
     }))

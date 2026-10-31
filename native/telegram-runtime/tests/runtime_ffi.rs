@@ -191,6 +191,21 @@ fn api_connection_initialization_requires_product_configuration_and_transport() 
         }),
     );
     assert_eq!(missing_code_context["errorCode"], "auth_context_missing");
+    let missing_resend_context = execute(
+        client,
+        json!({"@type": "telegram.resendAuthenticationCode"}),
+    );
+    assert_eq!(missing_resend_context["errorCode"], "auth_context_missing");
+    let missing_cancel_context = execute(
+        client,
+        json!({"@type": "telegram.cancelAuthenticationCode"}),
+    );
+    assert_eq!(missing_cancel_context["errorCode"], "auth_context_missing");
+    let missing_email_context = execute(
+        client,
+        json!({"@type": "telegram.sendVerifyEmailCode", "email": "a@example.test"}),
+    );
+    assert_eq!(missing_email_context["errorCode"], "auth_context_missing");
     let missing_password_context = execute(
         client,
         json!({
@@ -268,5 +283,53 @@ fn live_runtime_bootstrap_keeps_an_encrypted_transport_session() {
     let status = execute(client, json!({"@type": "telegram.getStatus"}));
     assert_eq!(status["data"]["transportConnected"], true);
     assert_eq!(status["data"]["dcId"], 2);
+    close_client(client).unwrap();
+}
+
+
+#[test]
+fn persistent_authorization_machine_state_is_restored_without_running_network() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("auth-runtime.sqlite3");
+    let path_string = path.to_string_lossy();
+    let key = [12_u8; 32];
+    let client = create_persistent_client(&path_string, &key).unwrap();
+    let configured = execute(
+        client,
+        json!({
+            "@type": "telegram.executeAuthorizationCommand",
+            "command": {"type": "parametersAccepted"}
+        }),
+    );
+    assert_eq!(
+        configured["data"]["authorizationState"]["type"],
+        "waitPhoneNumber"
+    );
+    close_client(client).unwrap();
+
+    let restored = create_persistent_client(&path_string, &key).unwrap();
+    let state = execute(
+        restored,
+        json!({"@type": "telegram.getAuthorizationState"}),
+    );
+    assert_eq!(
+        state["data"]["authorizationState"]["type"],
+        "waitPhoneNumber"
+    );
+    close_client(restored).unwrap();
+}
+
+#[test]
+fn recovery_and_challenge_commands_do_not_fabricate_ready_without_required_state() {
+    let client = create_client();
+    for request in [
+        json!({"@type": "telegram.requestPasswordRecovery"}),
+        json!({"@type": "telegram.checkRecoveryPassword", "code": "123456"}),
+        json!({"@type": "telegram.refreshPasswordChallenge"}),
+    ] {
+        let response = execute(client, request);
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["errorCode"], "authorization_command_failed");
+    }
     close_client(client).unwrap();
 }
