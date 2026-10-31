@@ -55,3 +55,14 @@ Do not run build, typecheck, lint, schema validation, generators, unit/contract/
 - AC4: No session teardown/history semantics or second owner is introduced.
 - AC5: Desktop provider protocol sources are byte-identical to canonical protocol sources after synchronization.
 - AC6: Authored tests remain not-run and acceptance remains false until Stage B executable evidence exists.
+
+
+## Source-level implementation review
+
+Canonical implementation commit: `cfe6a0564c40d2c9b9ea62b686470139a1eeb2ab`. Canonical blobs: protocol api `d82cca134274b8d939c1140ec44ee00230e2cfac`, protocol lib `655498ce9db2faf8a76f093250d4a1f02f77ff67`. Desktop synchronization commit: `b179796344fba3e22bccb1310b74f229d613b531`; desktop bookkeeping/evidence commit: `c4329d6c1212d1f6309c0876580e5fe5a10b4ca7`.
+
+- R1-R4: satisfied by source inspection — the protocol owner exports both fixed-U result constructor IDs, typed `DestroySessionResult`, and `parse_destroy_session_result`; Ok and None each consume exactly one `session_id:long`; unknown constructors, truncation, and trailing bytes fail closed.
+- R5-R6: satisfied by source inspection and repository state — no outbound `destroy_session` production command/call path, live teardown mutation, historical request/container mutation, or second owner was added. The missing canonical teardown lifecycle remains an explicit blocker rather than being synthesized in telegram-network.
+- R7: satisfied by remote blob readback — desktop provider api/lib blobs are byte-identical to canonical api/lib blobs.
+
+Acceptance criteria AC1-AC5 are satisfied at source/implementation level. AC6 remains intentionally **blocked/not-run** until Stage B executable validation. No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried in this review.
