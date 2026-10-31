@@ -101,5 +101,10 @@ Evidence consists of fixed-U source/schema blob identities, canonical source blo
 
 | Requirement / AC | Status | Evidence / reason |
 | --- | --- | --- |
-| R1-R10 | blocked | Implementation not yet applied at spec-authoring checkpoint. |
-| AC-1..AC-6 | blocked | Implementation, desktop sync, and bookkeeping evidence not yet applied at spec-authoring checkpoint. |
+| R1-R10 | passed | Platform-core implementation `5bdf993dc1048ed22194d7f1c0439049e820ee5f`: protocol api `eff20dbc601ca78fa7e6a4662bfeda088706d4f4`, protocol lib `b6ab0397cbad0776b269d965f89427030824ba4c`, network `7f3b140a9becda2305a2f5e252fcea61108597e0`; full `msg_new_detailed_info` parsing precedes the existing reconciliation, contracts are authored but not run, and no historical request/decompression owner was added. |
+| AC-1 | passed | Existing protocol/network owners implement the exact typed parser and current-session reconciliation at `5bdf993dc1048ed22194d7f1c0439049e820ee5f`. |
+| AC-2 | passed | `parse_msg_new_detailed_info` rejects wrong/truncated/trailing objects before `reconcile_detailed_answer` can emit an ACK or resend. |
+| AC-3 | passed | Desktop implementation `3b37ff49e7c3b100af12206ab88662f4d83959c2` synchronizes provider blobs byte-for-byte to `eff20dbc601ca78fa7e6a4662bfeda088706d4f4`, `b6ab0397cbad0776b269d965f89427030824ba4c`, and `7f3b140a9becda2305a2f5e252fcea61108597e0`. |
+| AC-4 | passed | Desktop bookkeeping commit `f50194055cf2db53b7f8be3c4d9e4793465511b4` records `TDRP-R9-MTPROTO-NEW-DETAILED-INFO-WIRE-001` as implemented with empty execution evidence, `validation_status=not-run`, `accepted=false`, and `responsibilities_total=66`. |
+| AC-5 | passed | Gzip remains explicitly blocked because canonical `Cargo.toml@d8a5261034b1eb395d12149a6bcc34cd7e371b73` / `Cargo.lock@97ad9046ce8926764258c978664cd8cd92fce503` have no approved `flate2`/\`miniz_oxide` owner or bounded decompression lifecycle; `wasSent/haveSent/_resendingIds/toSend/_sentContainers` remain open/fail-closed. |
+| AC-6 | passed | Round 24 performed source/ref/blob reads, authored contracts, and CAS writes only; no Actions/status/check query or trigger and no build, lint, validator, generator, test, package, deployment, installation, or runtime acceptance was performed. |
