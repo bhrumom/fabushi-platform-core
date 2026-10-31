@@ -107,3 +107,21 @@ Git blob identities, commit identities, manual source review, and authored contr
 | AC-4 | passed | Desktop bookkeeping `2a07441ec1deba938b706d5298ec0b21b98c2a7a` records `TDRP-R9-MTPROTO-NEW-SESSION-WIRE-001` as implemented with `test_execution_evidence=[]`, notes `validation_status=not-run` / `accepted=false`, and `responsibilities_total=67`. |
 | AC-5 | passed | High-level new-session difference recovery is explicitly fail-closed in `telegram-new-session-update-difference-recovery.md`: full/slice TL object decoding and canonical application are missing, so this wire slice does not claim that responsibility complete. |
 | AC-6 | passed | Round 25 performed source/ref/blob reads, authored contracts, and conditional Git writes only; no Actions/status/check query or trigger and no build, lint, validator, generator, test, package, deployment, installation, or runtime acceptance was performed. |
+
+
+## Round 62 adjacent source-level revalidation
+
+Fixed-U adjacency was re-read from `mtproto.tl@76225965bfc794388db241f3f760db8ab79e84f8` and `session_private.cpp@13cbc76ec723386027b5b4dcac79999b791c4614`. Immediately after `DestroySessionRes`, the service-message type is `new_session_created#9ec20908 first_msg_id:long unique_id:long server_salt:long = NewSession`.
+
+Current canonical production ownership remains exact with **no production delta**:
+
+- `native/telegram-protocol/src/updates.rs@23a09bb6e4e78ef526823cf01d0a207565fb2a3e` owns `NEW_SESSION_CREATED_CONSTRUCTOR`, typed `NewSessionCreated`, and `parse_new_session_created`.
+- The parser consumes exactly constructor 4 + first_msg_id 8 + unique_id 8 + server_salt 8 = 28 bytes through the bounded little-endian `TlReader`, preserves signed `i64` values, rejects any constructor mismatch or truncation, and requires strict EOF.
+- Current `native/telegram-network/src/lib.rs@1fc1b1f69e3e37377400d078f916599e0c7b20bc` calls that parser before either server-salt mutation or the existing one-current-RPC replay decision, and the ping/service path likewise parses before salt adoption.
+- Desktop provider copies of protocol updates and network remain byte-identical to the canonical blobs. Current protocol `lib.rs` re-exports the same parser/type/constructor; later unrelated service-wire additions do not change this responsibility.
+
+Round-62 authored-only external contracts SHALL pin the exact 28-byte object, field offsets `0..4 / 4..12 / 12..20 / 20..28`, signed `i64::MIN` / `i64::MAX` preservation, every truncation cut from 0 through 27 bytes, wrong-constructor rejection, and trailing-byte rejection. They SHALL NOT execute in Stage A.
+
+The existing ledger responsibility `TDRP-R9-MTPROTO-NEW-SESSION-WIRE-001` remains the sole row and stays `implemented / validation_status=not-run / accepted=false`. Arbitrary `wasSent/haveSent/_resendingIds/toSend/_sentContainers` history, broader connection scheduling, auth-key binding/persistence, `gzip_packed`, and complete `updates.difference/updates.differenceSlice` decoding/application remain outside this wire-only revalidation or open/fail-closed.
+
+No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, or runtime acceptance is permitted or claimed for this Stage-A revalidation.
