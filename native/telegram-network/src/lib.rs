@@ -26,7 +26,6 @@ const PING_CONSTRUCTOR: u32 = 0x7abe_77ec;
 const PONG_CONSTRUCTOR: u32 = 0x3477_73c5;
 const MSGS_STATE_INFO_CONSTRUCTOR: u32 = 0x04de_b57d;
 const MSGS_ALL_INFO_CONSTRUCTOR: u32 = 0x8cc0_d131;
-const BAD_MSG_NOTIFICATION_CONSTRUCTOR: u32 = 0xa7ef_f811;
 const MSGS_ACK_CONSTRUCTOR: u32 = 0x62d6_b459;
 const RPC_RESULT_CONSTRUCTOR: u32 = 0xf35c_6d01;
 const DEFAULT_MAX_RPC_MESSAGES: usize = 64;
@@ -460,10 +459,12 @@ impl EstablishedSession {
                 self.server_salt = notification.new_server_salt;
                 Ok(RpcOutcome::NewSalt)
             }
-            BAD_MSG_NOTIFICATION_CONSTRUCTOR => {
-                let message_id = read_i64_at(body, 4)?;
-                let code = read_i32_at(body, 16)?;
-                if message_id != request_message_id {
+            fabushi_telegram_protocol::BAD_MSG_NOTIFICATION_CONSTRUCTOR => {
+                let notification = fabushi_telegram_protocol::parse_bad_msg_notification(body)
+                    .map_err(|_| NetworkError::InvalidServiceMessage)?;
+                let message_id = notification.bad_message_id;
+                let code = notification.error_code;
+                if !bad_msg_notification_matches_request(message_id, request_message_id) {
                     return Err(NetworkError::BadServerMessage { message_id, code });
                 }
                 match bad_message_recovery_action(code) {
@@ -674,10 +675,12 @@ impl EstablishedSession {
                 self.server_salt = notification.new_server_salt;
                 Ok(ServiceOutcome::NewSalt)
             }
-            BAD_MSG_NOTIFICATION_CONSTRUCTOR => {
-                let message_id = read_i64_at(body, 4)?;
-                let code = read_i32_at(body, 16)?;
-                if message_id != request_message_id {
+            fabushi_telegram_protocol::BAD_MSG_NOTIFICATION_CONSTRUCTOR => {
+                let notification = fabushi_telegram_protocol::parse_bad_msg_notification(body)
+                    .map_err(|_| NetworkError::InvalidServiceMessage)?;
+                let message_id = notification.bad_message_id;
+                let code = notification.error_code;
+                if !bad_msg_notification_matches_request(message_id, request_message_id) {
                     return Err(NetworkError::BadServerMessage { message_id, code });
                 }
                 match bad_message_recovery_action(code) {
@@ -794,6 +797,13 @@ fn bad_server_salt_matches_request(
     response_request_message_id == request_message_id
 }
 
+fn bad_msg_notification_matches_request(
+    response_request_message_id: i64,
+    request_message_id: i64,
+) -> bool {
+    response_request_message_id == request_message_id
+}
+
 fn request_state_requires_resend(state: u8) -> bool {
     (state & 0x07) != 0x04
 }
@@ -818,8 +828,9 @@ fn bad_message_recovery_action(code: i32) -> Option<BadMessageRecoveryAction> {
 }
 
 fn direct_bad_message_time_recovery(body: &[u8]) -> bool {
-    read_u32_at(body, 0).ok() == Some(BAD_MSG_NOTIFICATION_CONSTRUCTOR)
-        && matches!(read_i32_at(body, 16).ok(), Some(16 | 17 | 64))
+    fabushi_telegram_protocol::parse_bad_msg_notification(body)
+        .map(|notification| matches!(notification.error_code, 16 | 17 | 64))
+        .unwrap_or(false)
 }
 
 fn clock_offset_seconds(server_time: i32) -> Result<i64, NetworkError> {
@@ -1017,21 +1028,27 @@ fn read_i64_at(input: &[u8], offset: usize) -> Result<i64, NetworkError> {
 mod recovery_contract_tests {
     use super::{
         acknowledgement_mentions_request, bad_message_recovery_action,
-        bad_server_salt_matches_request, contained_message_requires_ack,
+        bad_msg_notification_matches_request, bad_server_salt_matches_request,
+        contained_message_requires_ack,
         direct_bad_message_time_recovery, detailed_info_matches_request,
         future_salts_matches_request, new_session_requires_replay, pong_matches_request,
         request_state_requires_resend, rpc_result_matches_request,
         state_reconciliation_requires_resend, BadMessageRecoveryAction,
-        BAD_MSG_NOTIFICATION_CONSTRUCTOR,
     };
 
     fn bad_message(code: i32) -> Vec<u8> {
         let mut body = Vec::with_capacity(20);
-        body.extend_from_slice(&BAD_MSG_NOTIFICATION_CONSTRUCTOR.to_le_bytes());
+        body.extend_from_slice(&fabushi_telegram_protocol::BAD_MSG_NOTIFICATION_CONSTRUCTOR.to_le_bytes());
         body.extend_from_slice(&123_i64.to_le_bytes());
         body.extend_from_slice(&1_i32.to_le_bytes());
         body.extend_from_slice(&code.to_le_bytes());
         body
+    }
+
+    #[test]
+    fn bad_msg_notification_correlation_is_current_request_only() {
+        assert!(bad_msg_notification_matches_request(123, 123));
+        assert!(!bad_msg_notification_matches_request(123, 124));
     }
 
     #[test]
@@ -1153,5 +1170,13 @@ mod recovery_contract_tests {
         assert!(direct_bad_message_time_recovery(&bad_message(64)));
         assert!(!direct_bad_message_time_recovery(&[0_u8; 20]));
         assert!(!direct_bad_message_time_recovery(&[0_u8; 8]));
+
+        let mut trailing = bad_message(16);
+        trailing.extend_from_slice(&0_u32.to_le_bytes());
+        assert!(!direct_bad_message_time_recovery(&trailing));
+
+        let mut truncated = bad_message(16);
+        truncated.truncate(truncated.len() - 1);
+        assert!(!direct_bad_message_time_recovery(&truncated));
     }
 }
