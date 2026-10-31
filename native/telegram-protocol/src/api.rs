@@ -26,6 +26,18 @@ pub const ACCOUNT_GET_PASSWORD_CONSTRUCTOR: u32 = 0x548a_30f5;
 pub const ACCOUNT_PASSWORD_CONSTRUCTOR: u32 = 0x957b_50fb;
 pub const PASSWORD_KDF_ALGO_CONSTRUCTOR: u32 = 0x3a91_2d4a;
 pub const AUTH_CHECK_PASSWORD_CONSTRUCTOR: u32 = 0xd18b_4d16;
+pub const AUTH_REQUEST_PASSWORD_RECOVERY_CONSTRUCTOR: u32 = 0xd897_bc66;
+pub const AUTH_PASSWORD_RECOVERY_CONSTRUCTOR: u32 = 0x1379_48a5;
+pub const AUTH_CHECK_RECOVERY_PASSWORD_CONSTRUCTOR: u32 = 0x0d36_bf79;
+pub const AUTH_RESEND_CODE_CONSTRUCTOR: u32 = 0xcae4_7523;
+pub const AUTH_CANCEL_CODE_CONSTRUCTOR: u32 = 0x1f04_0578;
+pub const ACCOUNT_SEND_VERIFY_EMAIL_CODE_CONSTRUCTOR: u32 = 0x98e0_37bb;
+pub const ACCOUNT_VERIFY_EMAIL_CONSTRUCTOR: u32 = 0x032d_a4cf;
+pub const EMAIL_VERIFY_PURPOSE_LOGIN_SETUP_CONSTRUCTOR: u32 = 0x4345_be73;
+pub const EMAIL_VERIFICATION_CODE_CONSTRUCTOR: u32 = 0x922e_55a9;
+pub const ACCOUNT_SENT_EMAIL_CODE_CONSTRUCTOR: u32 = 0x811f_854f;
+pub const ACCOUNT_EMAIL_VERIFIED_CONSTRUCTOR: u32 = 0x2b96_cd1b;
+pub const ACCOUNT_EMAIL_VERIFIED_LOGIN_CONSTRUCTOR: u32 = 0xe1bb_0d61;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitConnection<'a> {
@@ -104,6 +116,37 @@ pub enum NextCodeType {
 pub struct RpcErrorResponse {
     pub code: i32,
     pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasswordRecovery {
+    pub email_pattern: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SentEmailCode {
+    pub email_pattern: String,
+    pub length: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum EmailVerifiedResult {
+    LoginCode { email: String, code: SentCode },
+    LoginSuccess { email: String },
+    LoginPaymentRequired {
+        email: String,
+        store_product: String,
+        phone_code_hash: String,
+        support_email_address: String,
+        support_email_subject: String,
+        premium_days: i32,
+        currency: String,
+        amount: i64,
+    },
+    Verified { email: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,6 +253,85 @@ pub fn build_auth_sign_up(
     writer.write_string(phone_code_hash)?;
     writer.write_string(first_name.trim())?;
     writer.write_string(last_name.trim())?;
+    Ok(writer.into_bytes())
+}
+
+pub fn build_auth_resend_code(
+    phone_number: &str,
+    phone_code_hash: &str,
+    reason: Option<&str>,
+) -> Result<Vec<u8>, ApiRequestError> {
+    validate_phone_number(phone_number)?;
+    require_nonempty(phone_code_hash, "phone_code_hash")?;
+    let reason = reason.map(str::trim).filter(|value| !value.is_empty());
+    let mut writer = TlWriter::new();
+    writer.write_u32(AUTH_RESEND_CODE_CONSTRUCTOR);
+    writer.write_i32(i32::from(reason.is_some()));
+    writer.write_string(phone_number)?;
+    writer.write_string(phone_code_hash)?;
+    if let Some(reason) = reason {
+        writer.write_string(reason)?;
+    }
+    Ok(writer.into_bytes())
+}
+
+pub fn build_auth_cancel_code(
+    phone_number: &str,
+    phone_code_hash: &str,
+) -> Result<Vec<u8>, ApiRequestError> {
+    validate_phone_number(phone_number)?;
+    require_nonempty(phone_code_hash, "phone_code_hash")?;
+    let mut writer = TlWriter::new();
+    writer.write_u32(AUTH_CANCEL_CODE_CONSTRUCTOR);
+    writer.write_string(phone_number)?;
+    writer.write_string(phone_code_hash)?;
+    Ok(writer.into_bytes())
+}
+
+pub fn build_auth_request_password_recovery() -> Vec<u8> {
+    AUTH_REQUEST_PASSWORD_RECOVERY_CONSTRUCTOR.to_le_bytes().to_vec()
+}
+
+pub fn build_auth_check_recovery_password(code: &str) -> Result<Vec<u8>, ApiRequestError> {
+    require_nonempty(code, "recovery_code")?;
+    let mut writer = TlWriter::new();
+    writer.write_u32(AUTH_CHECK_RECOVERY_PASSWORD_CONSTRUCTOR);
+    writer.write_string(code.trim())?;
+    Ok(writer.into_bytes())
+}
+
+pub fn build_account_send_verify_email_code(
+    phone_number: &str,
+    phone_code_hash: &str,
+    email: &str,
+) -> Result<Vec<u8>, ApiRequestError> {
+    validate_phone_number(phone_number)?;
+    require_nonempty(phone_code_hash, "phone_code_hash")?;
+    require_nonempty(email, "email")?;
+    let mut writer = TlWriter::new();
+    writer.write_u32(ACCOUNT_SEND_VERIFY_EMAIL_CODE_CONSTRUCTOR);
+    writer.write_u32(EMAIL_VERIFY_PURPOSE_LOGIN_SETUP_CONSTRUCTOR);
+    writer.write_string(phone_number)?;
+    writer.write_string(phone_code_hash)?;
+    writer.write_string(email.trim())?;
+    Ok(writer.into_bytes())
+}
+
+pub fn build_account_verify_email(
+    phone_number: &str,
+    phone_code_hash: &str,
+    code: &str,
+) -> Result<Vec<u8>, ApiRequestError> {
+    validate_phone_number(phone_number)?;
+    require_nonempty(phone_code_hash, "phone_code_hash")?;
+    require_nonempty(code, "email_code")?;
+    let mut writer = TlWriter::new();
+    writer.write_u32(ACCOUNT_VERIFY_EMAIL_CONSTRUCTOR);
+    writer.write_u32(EMAIL_VERIFY_PURPOSE_LOGIN_SETUP_CONSTRUCTOR);
+    writer.write_string(phone_number)?;
+    writer.write_string(phone_code_hash)?;
+    writer.write_u32(EMAIL_VERIFICATION_CODE_CONSTRUCTOR);
+    writer.write_string(code.trim())?;
     Ok(writer.into_bytes())
 }
 
@@ -347,6 +469,124 @@ pub fn parse_auth_sent_code(input: &[u8]) -> Result<SentCodeResult, ApiRequestEr
         }
         actual => Err(ApiRequestError::Tl(TlError::UnexpectedConstructor {
             expected: AUTH_SENT_CODE_CONSTRUCTOR,
+            actual,
+        })),
+    }
+}
+
+pub fn parse_bool(input: &[u8]) -> Result<bool, ApiRequestError> {
+    let mut reader = TlReader::new(input);
+    let value = reader.read_bool()?;
+    if !reader.is_finished() {
+        return Err(ApiRequestError::TrailingBytes(reader.remaining()));
+    }
+    Ok(value)
+}
+
+pub fn parse_auth_password_recovery(input: &[u8]) -> Result<PasswordRecovery, ApiRequestError> {
+    let mut reader = TlReader::new(input);
+    let constructor = reader.read_u32()?;
+    if constructor != AUTH_PASSWORD_RECOVERY_CONSTRUCTOR {
+        return Err(ApiRequestError::Tl(TlError::UnexpectedConstructor {
+            expected: AUTH_PASSWORD_RECOVERY_CONSTRUCTOR,
+            actual: constructor,
+        }));
+    }
+    let recovery = PasswordRecovery {
+        email_pattern: reader.read_string()?.to_string(),
+    };
+    if !reader.is_finished() {
+        return Err(ApiRequestError::TrailingBytes(reader.remaining()));
+    }
+    Ok(recovery)
+}
+
+pub fn parse_account_sent_email_code(input: &[u8]) -> Result<SentEmailCode, ApiRequestError> {
+    let mut reader = TlReader::new(input);
+    let constructor = reader.read_u32()?;
+    if constructor != ACCOUNT_SENT_EMAIL_CODE_CONSTRUCTOR {
+        return Err(ApiRequestError::Tl(TlError::UnexpectedConstructor {
+            expected: ACCOUNT_SENT_EMAIL_CODE_CONSTRUCTOR,
+            actual: constructor,
+        }));
+    }
+    let sent = SentEmailCode {
+        email_pattern: reader.read_string()?.to_string(),
+        length: reader.read_i32()?,
+    };
+    if !reader.is_finished() {
+        return Err(ApiRequestError::TrailingBytes(reader.remaining()));
+    }
+    Ok(sent)
+}
+
+pub fn parse_account_email_verified(input: &[u8]) -> Result<EmailVerifiedResult, ApiRequestError> {
+    let mut reader = TlReader::new(input);
+    let constructor = reader.read_u32()?;
+    match constructor {
+        ACCOUNT_EMAIL_VERIFIED_CONSTRUCTOR => {
+            let email = reader.read_string()?.to_string();
+            if !reader.is_finished() {
+                return Err(ApiRequestError::TrailingBytes(reader.remaining()));
+            }
+            Ok(EmailVerifiedResult::Verified { email })
+        }
+        ACCOUNT_EMAIL_VERIFIED_LOGIN_CONSTRUCTOR => {
+            let email = reader.read_string()?.to_string();
+            let sent_constructor = reader.read_u32()?;
+            match sent_constructor {
+                AUTH_SENT_CODE_CONSTRUCTOR => {
+                    let flags = reader.read_i32()?;
+                    let delivery = parse_sent_code_delivery(&mut reader)?;
+                    let phone_code_hash = reader.read_string()?.to_string();
+                    let next_type = if flags & 2 != 0 {
+                        Some(parse_next_code_type(&mut reader)?)
+                    } else {
+                        None
+                    };
+                    let timeout_seconds = if flags & 4 != 0 {
+                        Some(reader.read_i32()?)
+                    } else {
+                        None
+                    };
+                    if !reader.is_finished() {
+                        return Err(ApiRequestError::TrailingBytes(reader.remaining()));
+                    }
+                    Ok(EmailVerifiedResult::LoginCode {
+                        email,
+                        code: SentCode {
+                            phone_code_hash,
+                            delivery,
+                            next_type,
+                            timeout_seconds,
+                        },
+                    })
+                }
+                AUTH_SENT_CODE_SUCCESS_CONSTRUCTOR => Ok(EmailVerifiedResult::LoginSuccess { email }),
+                AUTH_SENT_CODE_PAYMENT_REQUIRED_CONSTRUCTOR => {
+                    let result = EmailVerifiedResult::LoginPaymentRequired {
+                        email,
+                        store_product: reader.read_string()?.to_string(),
+                        phone_code_hash: reader.read_string()?.to_string(),
+                        support_email_address: reader.read_string()?.to_string(),
+                        support_email_subject: reader.read_string()?.to_string(),
+                        premium_days: reader.read_i32()?,
+                        currency: reader.read_string()?.to_string(),
+                        amount: reader.read_i64()?,
+                    };
+                    if !reader.is_finished() {
+                        return Err(ApiRequestError::TrailingBytes(reader.remaining()));
+                    }
+                    Ok(result)
+                }
+                actual => Err(ApiRequestError::Tl(TlError::UnexpectedConstructor {
+                    expected: AUTH_SENT_CODE_CONSTRUCTOR,
+                    actual,
+                })),
+            }
+        }
+        actual => Err(ApiRequestError::Tl(TlError::UnexpectedConstructor {
+            expected: ACCOUNT_EMAIL_VERIFIED_LOGIN_CONSTRUCTOR,
             actual,
         })),
     }

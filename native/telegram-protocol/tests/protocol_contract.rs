@@ -17,10 +17,15 @@ use fabushi_telegram_protocol::{
     SERVER_DH_PARAMS_OK_CONSTRUCTOR, SET_CLIENT_DH_PARAMS_CONSTRUCTOR, WIRE_CONSTRUCTORS,
 };
 use fabushi_telegram_protocol::{
-    build_account_get_password, build_auth_check_password, compute_password_srp_proof_with_random,
-    parse_account_password_prefix, parse_auth_sent_code, parse_config_dc_directory_prefix,
-    try_parse_rpc_error, ApiRequestError, InitConnection, NextCodeType, SentCode, SentCodeDelivery,
-    SentCodeResult, ACCOUNT_GET_PASSWORD_CONSTRUCTOR, ACCOUNT_PASSWORD_CONSTRUCTOR,
+    build_account_get_password, build_account_send_verify_email_code, build_account_verify_email,
+    build_auth_cancel_code, build_auth_check_password, build_auth_check_recovery_password,
+    build_auth_request_password_recovery, build_auth_resend_code,
+    compute_password_srp_proof_with_random,
+    parse_account_email_verified, parse_account_password_prefix, parse_account_sent_email_code,
+    parse_auth_password_recovery, parse_auth_sent_code, parse_bool, parse_config_dc_directory_prefix,
+    try_parse_rpc_error, ApiRequestError, EmailVerifiedResult, InitConnection, NextCodeType,
+    SentCode, SentCodeDelivery, SentCodeResult, ACCOUNT_EMAIL_VERIFIED_LOGIN_CONSTRUCTOR,
+    ACCOUNT_GET_PASSWORD_CONSTRUCTOR, ACCOUNT_PASSWORD_CONSTRUCTOR,
     AUTH_CHECK_PASSWORD_CONSTRUCTOR, AUTH_SEND_CODE_CONSTRUCTOR, AUTH_SENT_CODE_CONSTRUCTOR,
     AUTH_SIGN_IN_CONSTRUCTOR, AUTH_SIGN_UP_CONSTRUCTOR, CODE_SETTINGS_CONSTRUCTOR,
     CONFIG_CONSTRUCTOR, DC_OPTION_CONSTRUCTOR, HELP_GET_CONFIG_CONSTRUCTOR,
@@ -1429,4 +1434,97 @@ fn dc_routing_switches_main_for_account_migrations_but_keeps_file_routes_isolate
             purpose: DcPurpose::Main,
         }
     );
+}
+
+
+#[test]
+fn fixed_u_auth_lifecycle_builders_preserve_constructor_and_field_order() {
+    let resend = build_auth_resend_code("+15551234567", "phone-hash", Some("timeout")).unwrap();
+    let mut reader = TlReader::new(&resend);
+    assert_eq!(reader.read_u32().unwrap(), 0xcae4_7523);
+    assert_eq!(reader.read_i32().unwrap(), 1);
+    assert_eq!(reader.read_string().unwrap(), "+15551234567");
+    assert_eq!(reader.read_string().unwrap(), "phone-hash");
+    assert_eq!(reader.read_string().unwrap(), "timeout");
+    assert!(reader.is_finished());
+
+    let cancel = build_auth_cancel_code("+15551234567", "phone-hash").unwrap();
+    let mut reader = TlReader::new(&cancel);
+    assert_eq!(reader.read_u32().unwrap(), 0x1f04_0578);
+    assert_eq!(reader.read_string().unwrap(), "+15551234567");
+    assert_eq!(reader.read_string().unwrap(), "phone-hash");
+    assert!(reader.is_finished());
+
+    assert_eq!(
+        u32::from_le_bytes(build_auth_request_password_recovery().try_into().unwrap()),
+        0xd897_bc66
+    );
+    let recovery = build_auth_check_recovery_password("123456").unwrap();
+    let mut reader = TlReader::new(&recovery);
+    assert_eq!(reader.read_u32().unwrap(), 0x0d36_bf79);
+    assert_eq!(reader.read_string().unwrap(), "123456");
+    assert!(reader.is_finished());
+
+    let send_email =
+        build_account_send_verify_email_code("+15551234567", "phone-hash", "a@example.test")
+            .unwrap();
+    let mut reader = TlReader::new(&send_email);
+    assert_eq!(reader.read_u32().unwrap(), 0x98e0_37bb);
+    assert_eq!(reader.read_u32().unwrap(), 0x4345_be73);
+    assert_eq!(reader.read_string().unwrap(), "+15551234567");
+    assert_eq!(reader.read_string().unwrap(), "phone-hash");
+    assert_eq!(reader.read_string().unwrap(), "a@example.test");
+    assert!(reader.is_finished());
+
+    let verify = build_account_verify_email("+15551234567", "phone-hash", "654321").unwrap();
+    let mut reader = TlReader::new(&verify);
+    assert_eq!(reader.read_u32().unwrap(), 0x032d_a4cf);
+    assert_eq!(reader.read_u32().unwrap(), 0x4345_be73);
+    assert_eq!(reader.read_string().unwrap(), "+15551234567");
+    assert_eq!(reader.read_string().unwrap(), "phone-hash");
+    assert_eq!(reader.read_u32().unwrap(), 0x922e_55a9);
+    assert_eq!(reader.read_string().unwrap(), "654321");
+    assert!(reader.is_finished());
+}
+
+#[test]
+fn fixed_u_auth_lifecycle_parsers_keep_recovery_email_and_login_code_state() {
+    let mut recovery = TlWriter::new();
+    recovery.write_u32(0x1379_48a5);
+    recovery.write_string("m***@example.test").unwrap();
+    assert_eq!(
+        parse_auth_password_recovery(recovery.as_slice())
+            .unwrap()
+            .email_pattern,
+        "m***@example.test"
+    );
+
+    let mut sent_email = TlWriter::new();
+    sent_email.write_u32(0x811f_854f);
+    sent_email.write_string("m***@example.test").unwrap();
+    sent_email.write_i32(6);
+    let sent = parse_account_sent_email_code(sent_email.as_slice()).unwrap();
+    assert_eq!(sent.email_pattern, "m***@example.test");
+    assert_eq!(sent.length, 6);
+
+    let mut bool_true = TlWriter::new();
+    bool_true.write_bool(true);
+    assert!(parse_bool(bool_true.as_slice()).unwrap());
+
+    let mut verified = TlWriter::new();
+    verified.write_u32(ACCOUNT_EMAIL_VERIFIED_LOGIN_CONSTRUCTOR);
+    verified.write_string("member@example.test").unwrap();
+    verified.write_u32(AUTH_SENT_CODE_CONSTRUCTOR);
+    verified.write_i32(0);
+    verified.write_u32(0xc000_bba2);
+    verified.write_i32(5);
+    verified.write_string("next-phone-hash").unwrap();
+    match parse_account_email_verified(verified.as_slice()).unwrap() {
+        EmailVerifiedResult::LoginCode { email, code } => {
+            assert_eq!(email, "member@example.test");
+            assert_eq!(code.phone_code_hash, "next-phone-hash");
+            assert_eq!(code.delivery, SentCodeDelivery::Sms { length: 5 });
+        }
+        other => panic!("unexpected email verification result: {other:?}"),
+    }
 }
