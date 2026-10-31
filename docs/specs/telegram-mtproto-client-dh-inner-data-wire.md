@@ -31,3 +31,25 @@ Implementation may advance only to `implemented`, `validation_status=not-run`, `
 ## Fail-closed boundary
 
 Temporary-key `p_q_inner_data_temp_dc` lifecycle, connection probing/racing, plaintext/not-secure framing, message-id generation, network send/retry/timeout, server response correlation/application, broader auth-key persistence/session lifecycle, arbitrary sent/resend/container histories, gzip, complete difference decoding/application, broader fixed-U source/legal closure, and independent release ACCEPT remain outside this slice.
+
+
+## Round 74 source-level compliance readback
+
+Spec-first commit `20049ba38728a50239a900a1c0a684527d427b30` established this contract before production changes. Canonical implementation commit `b5e5f9cd85ed663b0c2ab35998bc1fbf116df0e9` produces handshake `0e5e6c0fa306f75aa1fcb5c26440b1c39f87c9f9`, lib `7273e030bf02c248d9b592b2578cb5dc9716b485`, and authored-contract blob `7236df6bec3c832363901034d6a7d1c7cd3df3fc`.
+
+Desktop synchronization commit `1de1da4bf045c405d26ff44c373ad2dd63bf9ce1` mirrors lib/contracts byte-for-byte. Desktop bookkeeping commit `661b882e5d2a777e3cd85f33ff6e88b88bda9566` records `TDRP-R9-MTPROTO-CLIENT-DH-INNER-DATA-WIRE-001` with `responsibilities_total=84`, `unknown=16172`, `unread=16145`, `omitted=0`, `implementation_status=implemented`, `validation_status=not-run`, and `accepted=false`.
+
+| Requirement | Status | Evidence / reason |
+| --- | --- | --- |
+| R1 | passed | Canonical `CLIENT_DH_INNER_DATA_CONSTRUCTOR=0x6643b654` remains in `handshake.rs@0e5e6c0fa306f75aa1fcb5c26440b1c39f87c9f9`. |
+| R2 | passed | Public pure `build_client_dh_inner_data` is present in canonical handshake source and re-exported by `lib.rs@7273e030bf02c248d9b592b2578cb5dc9716b485`. |
+| R3 | passed | Source readback shows constructor, raw nonce, raw server_nonce, little-endian retry_id and canonical TL bytes framing for g_b only; exact-layout/padding/no-trailing contract is authored in `protocol_contract.rs@7236df6bec3c832363901034d6a7d1c7cd3df3fc`. |
+| R4 | passed | `prepare_client_dh` delegates only client_DH_inner_data framing; DH validation/randomness/g_b/auth-key derivation/SHA-1 prefixing/padding/AES-IGE/salt/final set_client_DH_params ownership remain in the same existing function. |
+| R5 | passed | Builder is synchronous and stateless over caller-owned fields; no network, message-id, request-history, persistence, scheduler, gzip, updates or connection lifecycle is introduced. |
+| R6 | passed | Canonical public facade and desktop tracked facade/contracts are byte-identical; desktop has no second handshake implementation. |
+| R7 | passed | Exact serializer contract is authored and no executable validation was performed during Stage A. |
+| R8 | passed | Adjacent `p_q_inner_data_temp_dc#56fddf88` is explicitly fail-closed because current `AuthKeyHandshake::prepare_req_dh_params*` lacks temporary-key `expires_in`; no unused serializer is misreported as lifecycle closure. |
+
+R1-R8 are satisfied at source/ownership/bookkeeping level. This is not executable verification or release acceptance. Temporary-key `p_q_inner_data_temp_dc` lifecycle, connection probing/racing, message-id generation, plaintext/not-secure framing, network send/retry/timeout, response correlation/application, broader auth-key persistence/session lifecycle, arbitrary sent/resend/container histories, gzip, complete difference decoding/application, broader fixed-U source/legal closure, Stage-B evidence and independent release ACCEPT remain open/fail-closed.
+
+No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, or runtime acceptance was performed.
