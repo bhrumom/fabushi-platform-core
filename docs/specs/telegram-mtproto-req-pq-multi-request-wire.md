@@ -26,7 +26,7 @@ It does not implement, broaden, or claim ownership of connection probing, endpoi
 - R3: The builder emits exactly 20 bytes: four little-endian constructor bytes followed by the caller's 16 nonce bytes unchanged, with no TL bytes/string framing, padding, reversal, or reinterpretation.
 - R4: `AuthKeyHandshake::begin` may delegate only request-body serialization to `build_req_pq_multi`; its existing invalid-state guard, caller-supplied message id, transition to `AwaitingResPq`, and `PlaintextEnvelope` behavior must remain unchanged.
 - R5: The builder is synchronous and side-effect free: no randomness, clock, network, persistence, scheduler, callback registry, request history, ACK/resend/container, gzip, or updates-difference interaction.
-- R6: Canonical and desktop provider source for the changed protocol files remain byte-identical after synchronization.
+- R6: Canonical and desktop provider source for the tracked mirrored request-wire files (`api.rs`, `lib.rs`, and `tests/protocol_contract.rs`) remain byte-identical after synchronization; desktop does not gain a second handshake lifecycle owner.
 - R7: Dedicated exact-layout/raw-nonce contracts are authored in Stage A but no build, test, validator, Actions, status, or check execution/query is performed.
 
 ## Authored contracts
@@ -51,4 +51,21 @@ Connection-probe scheduling/transport racing, attempt nonce generation, MTProto 
 
 | Requirement | Status | Evidence / reason |
 | --- | --- | --- |
-| R1-R7 | pending | Implementation and source-level readback not yet recorded. |
+| R1 | passed | Public `REQ_PQ_MULTI_CONSTRUCTOR=0xbe7e8ef1` is exported from canonical `api.rs@3e3b250b709ce2f307f896dda6d1c2da55559f7b`. |
+| R2 | passed | Public `build_req_pq_multi(nonce:&[u8;16])` is present in canonical `api.rs` and re-exported by `lib.rs@2d48c2fe1c677b4b4672e7e76d8bd0a29a7ac003`. |
+| R3 | passed | Source readback shows the builder writes the little-endian constructor and raw int128 bytes only; exact-layout/raw-nonce contracts are authored in `protocol_contract.rs@bf5aeb85f10baeeb7e645a660fd3bf26259e5989`. |
+| R4 | passed | `AuthKeyHandshake::begin` in `handshake.rs@b1b22af0e83b577d6152beb11a75e44eb76ffdbe` keeps its existing invalid-state guard and `AwaitingResPq` transition and delegates only body construction to `build_req_pq_multi`. |
+| R5 | passed | The builder is a synchronous TL writer over caller-owned nonce bytes and contains no randomness, clock, network, persistence, scheduler, callback, request-history, gzip, or updates interaction. |
+| R6 | passed | Remote readback confirms canonical and desktop tracked mirrors are byte-identical: api `3e3b250b709ce2f307f896dda6d1c2da55559f7b`, lib `2d48c2fe1c677b4b4672e7e76d8bd0a29a7ac003`, contracts `bf5aeb85f10baeeb7e645a660fd3bf26259e5989`; no desktop handshake lifecycle file was introduced. |
+| R7 | passed | Dedicated serializer/begin-body contracts are authored and no build/test/validator/Actions/status/check execution or query was performed in Stage A. |
+
+
+## Round 72 source-level compliance readback
+
+Spec-first commit `c5b3021a760892eaf05fcd9b40dc35dff4c2c783` established this contract before implementation. Canonical implementation commits `60e4b9165c0f41804bf68e7270aa52f39e824f14` and `591176a5ba091bb2a00f925d38ed87a1fdae0b11` produce api `3e3b250b709ce2f307f896dda6d1c2da55559f7b`, handshake `b1b22af0e83b577d6152beb11a75e44eb76ffdbe`, lib `2d48c2fe1c677b4b4672e7e76d8bd0a29a7ac003`, and authored-contract blob `bf5aeb85f10baeeb7e645a660fd3bf26259e5989`.
+
+Desktop synchronization commit `59e08389bae4ab2cdcbb3f67808da44dff452ca9` mirrors api/lib/contracts byte-for-byte. Desktop bookkeeping commit `f62e64429136d5355fed4089cb6adbc5863a4eb3` records `TDRP-R9-MTPROTO-REQ-PQ-MULTI-REQUEST-WIRE-001` with `responsibilities_total=82`, `unknown=16172`, `unread=16145`, `omitted=0`, `implementation_status=implemented`, `validation_status=not-run`, and `accepted=false`.
+
+R1-R7 are satisfied at source/ownership/bookkeeping level. This does not constitute executable verification or release acceptance. Connection probing/racing, nonce/message-id generation, plaintext/not-secure framing, network send/retry/timeout, response correlation/application, broader auth-key creation/persistence/session lifecycle, arbitrary sent/resend/container histories, gzip, complete difference/differenceSlice decoding/application, broader fixed-U source/legal closure, Stage-B evidence and independent release ACCEPT remain open/fail-closed.
+
+No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, or runtime acceptance was performed.
