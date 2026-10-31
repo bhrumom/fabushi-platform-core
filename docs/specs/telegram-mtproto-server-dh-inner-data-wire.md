@@ -194,11 +194,11 @@ No executable evidence is produced or claimed.
 
 | Requirement / AC | Status | Evidence / reason |
 | --- | --- | --- |
-| R1-R12 | pending | Final source-level readback is recorded after authored contracts/bookkeeping are saved. |
-| R13 | pending | Canonical and desktop mirrored contracts are authored after this spec commit and remain unrun. |
-| AC-1 | pending | Final source-level readback required. |
-| AC-2 | pending | Authored contract matrix not yet committed at spec creation time. |
-| AC-3 | pending | Desktop mirror not yet committed at spec creation time. |
-| AC-4 | pending | Ledger/P0/source-closure/evidence sync not yet committed at spec creation time. |
-| AC-5 | pending | Ledger row not yet committed at spec creation time. |
-| AC-6 | pending | Final source-level execution-timing review required. |
+| R1-R12 | passed | Remote source readback confirms unchanged canonical `handshake.rs@87616f4b96a1775455da42b0bbed77711fb3c9f6` already performs non-empty AES-block framing, exact fixed-U constructor/field decode, active nonce binding, SHA-1 authentication of exactly consumed TL bytes, residual padding bound, signed server_time preservation and DH safety before the existing client-DH continuation. |
+| R13 | passed | Canonical authored-only contracts are `protocol_contract.rs@256f421f54c41256646388833b634cf1191afd91` from commit `d724e29265e53a7ee7efd821c8bb37f6e4994cb2`; desktop sync `4323b97d3b6041731d5b547118fb746d2eba37a6` mirrors the same blob. They were not executed. |
+| AC-1 | passed | Existing AuthKeyHandshake/decrypt_server_dh_inner_data remains the only canonical production owner; no production behavior change or second owner was added. |
+| AC-2 | passed | Authored source covers exact signed server_time plus malformed ciphertext, unknown constructor, every serialized-inner truncation cut, nonce/server_nonce mismatch, SHA-1 mismatch, >15 residual padding, invalid generator, dh_prime length/trust, empty/oversized/unsafe g_a and rejected-inner state continuity. |
+| AC-3 | passed | Desktop mirrors only the contract surface at blob `256f421f54c41256646388833b634cf1191afd91`; facade remains `abab39e42f100972484191f0e52e9edd9b88c6cf` and no desktop handshake core was introduced. |
+| AC-4 | passed | Desktop bookkeeping commit `1ebaad62706f6d92f0ae537ea68f38e5883c9a1f` records the same fixed-U/source/target identities in the single ledger, both existing P0 surfaces, source-closure and Round 80 evidence. |
+| AC-5 | passed | Ledger row `TDRP-R9-MTPROTO-SERVER-DH-INNER-DATA-WIRE-001` is `implemented / validation_status=not-run / accepted=false`; coverage is 90 responsibilities, 16172 unknown, 16145 unread, 0 omitted. |
+| AC-6 | passed | This Stage-A slice used only Git/API source reads and writes; no build, lint, schema/generator execution, test execution, package/deploy/install/runtime acceptance, Actions trigger, or status/check query was performed. |
