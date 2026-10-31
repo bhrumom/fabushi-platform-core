@@ -26,7 +26,6 @@ const PING_CONSTRUCTOR: u32 = 0x7abe_77ec;
 const PONG_CONSTRUCTOR: u32 = 0x3477_73c5;
 const NEW_SESSION_CREATED_CONSTRUCTOR: u32 = 0x9ec2_0908;
 const MSG_DETAILED_INFO_CONSTRUCTOR: u32 = 0x276d_3ec6;
-const MSG_NEW_DETAILED_INFO_CONSTRUCTOR: u32 = 0x809d_b6df;
 const MSGS_STATE_INFO_CONSTRUCTOR: u32 = 0x04de_b57d;
 const MSGS_ALL_INFO_CONSTRUCTOR: u32 = 0x8cc0_d131;
 const BAD_SERVER_SALT_CONSTRUCTOR: u32 = 0xedab_447b;
@@ -437,9 +436,10 @@ impl EstablishedSession {
                 }
                 Ok(RpcOutcome::Continue)
             }
-            MSG_NEW_DETAILED_INFO_CONSTRUCTOR => {
-                let answer_message_id = read_i64_at(body, 4)?;
-                self.reconcile_detailed_answer(answer_message_id, acknowledgements)?;
+            fabushi_telegram_protocol::MSG_NEW_DETAILED_INFO_CONSTRUCTOR => {
+                let info = fabushi_telegram_protocol::parse_msg_new_detailed_info(body)
+                    .map_err(|_| NetworkError::InvalidServiceMessage)?;
+                self.reconcile_detailed_answer(info.answer_message_id, acknowledgements)?;
                 Ok(RpcOutcome::Continue)
             }
             BAD_SERVER_SALT_CONSTRUCTOR => {
