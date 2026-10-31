@@ -45,3 +45,25 @@ The exact response-wire responsibility belongs to the existing canonical `native
 ## Stage A acceptance state
 
 Implementation may advance only to `implemented`, `validation_status=not-run`, `accepted=false`. Contracts are authored but not executed. No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation or runtime acceptance is permitted in Stage A.
+
+## Round 76 source-level compliance readback
+
+Canonical implementation readback at platform-core head `ebb1e5f859e224c45f9d34beb1aa32b4c18ca4b2` confirms api/lib/contracts blobs `ebfb3670b5cd097b9ce288782c7954f5cfe9fc43` / `abab39e42f100972484191f0e52e9edd9b88c6cf` / `a53c90f09ec18f8e99d8cfb36eb8c8842f27635e`. Desktop tracked provider api/lib/contracts at desktop head `3d4f33c87609fbaf13b39f15bb221bbf0686b7b0` are byte-identical.
+
+| Requirement | Source-level status | Evidence / reason |
+| --- | --- | --- |
+| R1 | passed | All three fixed-U `DestroyAuthKeyRes` constructor constants are present with exact IDs. |
+| R2 | passed | `DestroyAuthKeyResult::{Ok,None,Fail}` is defined in the existing telegram-protocol API owner. |
+| R3 | passed | `parse_destroy_auth_key_result` reads exactly one constructor, maps only the three allowed variants, rejects unknown constructors, and enforces no trailing bytes. |
+| R4 | passed | Parser/result/constants are exported through the canonical facade; desktop api/lib/contracts are byte-identical mirrors. |
+| R5 | authored / not run | Contracts cover all three variants, unknown constructor, every truncation cut before the four-byte constructor is complete, and trailing bytes. Stage A executable validation remains intentionally absent. |
+| R6 | passed / fail-closed boundary preserved | No destruction eligibility, local key deletion, persisted-key mutation, transport/session teardown, reconnect or retry lifecycle was added. |
+| R7 | passed | Fixed-U `DcKeyCreator` always carries `protocolDcId` and selects only the existing `p_q_inner_data_dc` or `p_q_inner_data_temp_dc` variants; no builders were added for the non-shipping no-dc variants. |
+| R8 | passed | No connection scheduling/racing, arbitrary multi-request history, gzip, complete difference decoding/application, packaging, deployment or release logic was added. |
+
+Desktop ledger responsibility `TDRP-R9-MTPROTO-DESTROY-AUTH-KEY-RESULT-WIRE-001` is `implemented / validation_status=not-run / accepted=false`; ledger blob `b1d9d51b6cf3511e021a97d5a0dd1def63c02554` reports `responsibilities_total=86`, `unknown=16172`, `unread=16145`, `omitted=0`.
+
+This is source/ownership/bookkeeping compliance only, not executable verification or release acceptance. Broader auth-key destruction eligibility/local deletion/persistence/teardown, temporary/permanent binding and expiry lifecycle, connection scheduling/racing, arbitrary sent/resend/container history, gzip, complete updates difference decoding/application, broader source/legal closure, Stage-B evidence and independent release ACCEPT remain open/fail-closed.
+
+No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation or runtime acceptance was performed.
+
