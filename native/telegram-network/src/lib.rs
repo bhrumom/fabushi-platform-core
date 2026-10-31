@@ -24,7 +24,6 @@ const DEFAULT_MAX_DH_RETRIES: usize = 3;
 const DEFAULT_MAX_SERVICE_MESSAGES: usize = 8;
 const PING_CONSTRUCTOR: u32 = 0x7abe_77ec;
 const PONG_CONSTRUCTOR: u32 = 0x3477_73c5;
-const MSG_DETAILED_INFO_CONSTRUCTOR: u32 = 0x276d_3ec6;
 const MSGS_STATE_INFO_CONSTRUCTOR: u32 = 0x04de_b57d;
 const MSGS_ALL_INFO_CONSTRUCTOR: u32 = 0x8cc0_d131;
 const BAD_SERVER_SALT_CONSTRUCTOR: u32 = 0xedab_447b;
@@ -430,11 +429,11 @@ impl EstablishedSession {
                     Ok(RpcOutcome::Continue)
                 }
             }
-            MSG_DETAILED_INFO_CONSTRUCTOR => {
-                let sent_message_id = read_i64_at(body, 4)?;
-                let answer_message_id = read_i64_at(body, 12)?;
-                if detailed_info_matches_request(sent_message_id, request_message_id) {
-                    self.reconcile_detailed_answer(answer_message_id, acknowledgements)?;
+            fabushi_telegram_protocol::MSG_DETAILED_INFO_CONSTRUCTOR => {
+                let info = fabushi_telegram_protocol::parse_msg_detailed_info(body)
+                    .map_err(|_| NetworkError::InvalidServiceMessage)?;
+                if detailed_info_matches_request(info.message_id, request_message_id) {
+                    self.reconcile_detailed_answer(info.answer_message_id, acknowledgements)?;
                 }
                 Ok(RpcOutcome::Continue)
             }

@@ -28,6 +28,7 @@ pub const MSG_RESEND_REQ_CONSTRUCTOR: u32 = 0x7d86_1a08;
 pub const MSGS_STATE_REQ_CONSTRUCTOR: u32 = 0xda69_fb52;
 pub const MSGS_STATE_INFO_CONSTRUCTOR: u32 = 0x04de_b57d;
 pub const MSGS_ALL_INFO_CONSTRUCTOR: u32 = 0x8cc0_d131;
+pub const MSG_DETAILED_INFO_CONSTRUCTOR: u32 = 0x276d_3ec6;
 pub const MSG_NEW_DETAILED_INFO_CONSTRUCTOR: u32 = 0x809d_b6df;
 pub const CONFIG_CONSTRUCTOR: u32 = 0xcc1a_241e;
 pub const DC_OPTION_CONSTRUCTOR: u32 = 0x18b7_a10d;
@@ -182,6 +183,14 @@ pub struct MsgsStateInfo {
 pub struct MsgsAllInfo {
     pub message_ids: Vec<i64>,
     pub states: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MsgDetailedInfo {
+    pub message_id: i64,
+    pub answer_message_id: i64,
+    pub bytes: i32,
+    pub status: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -590,6 +599,27 @@ pub fn parse_msgs_all_info(input: &[u8]) -> Result<MsgsAllInfo, ApiRequestError>
         message_ids,
         states,
     })
+}
+
+pub fn parse_msg_detailed_info(input: &[u8]) -> Result<MsgDetailedInfo, ApiRequestError> {
+    let mut reader = TlReader::new(input);
+    let constructor = reader.read_u32()?;
+    if constructor != MSG_DETAILED_INFO_CONSTRUCTOR {
+        return Err(ApiRequestError::Tl(TlError::UnexpectedConstructor {
+            expected: MSG_DETAILED_INFO_CONSTRUCTOR,
+            actual: constructor,
+        }));
+    }
+    let info = MsgDetailedInfo {
+        message_id: reader.read_i64()?,
+        answer_message_id: reader.read_i64()?,
+        bytes: reader.read_i32()?,
+        status: reader.read_i32()?,
+    };
+    if !reader.is_finished() {
+        return Err(ApiRequestError::TrailingBytes(reader.remaining()));
+    }
+    Ok(info)
 }
 
 pub fn parse_msg_new_detailed_info(
@@ -1147,10 +1177,11 @@ mod authorization_identity_contract_tests {
 #[cfg(test)]
 mod mtproto_service_builder_contract_tests {
     use super::{
-        build_msg_resend_req, build_msgs_ack, build_msgs_state_req, parse_msg_new_detailed_info,
-        parse_msgs_ack, parse_message_container, parse_msgs_all_info, parse_msgs_state_info,
-        parse_pong, parse_rpc_result, MESSAGE_CONTAINER_CONSTRUCTOR,
-        MSG_NEW_DETAILED_INFO_CONSTRUCTOR, MSGS_ACK_CONSTRUCTOR, MSGS_ALL_INFO_CONSTRUCTOR,
+        build_msg_resend_req, build_msgs_ack, build_msgs_state_req, parse_msg_detailed_info,
+        parse_msg_new_detailed_info, parse_msgs_ack, parse_message_container, parse_msgs_all_info,
+        parse_msgs_state_info, parse_pong, parse_rpc_result, MESSAGE_CONTAINER_CONSTRUCTOR,
+        MSG_DETAILED_INFO_CONSTRUCTOR, MSG_NEW_DETAILED_INFO_CONSTRUCTOR, MSGS_ACK_CONSTRUCTOR,
+        MSGS_ALL_INFO_CONSTRUCTOR,
         MSGS_STATE_INFO_CONSTRUCTOR, MSGS_STATE_REQ_CONSTRUCTOR, MSG_RESEND_REQ_CONSTRUCTOR,
         PONG_CONSTRUCTOR, RPC_RESULT_CONSTRUCTOR,
     };
@@ -1324,6 +1355,47 @@ mod mtproto_service_builder_contract_tests {
         let parsed = parse_msgs_all_info(writer.as_slice()).expect("parse all info");
         assert_eq!(parsed.message_ids, vec![first, second]);
         assert_eq!(parsed.states, vec![0x04, 0x01]);
+    }
+
+    #[test]
+    fn msg_detailed_info_parses_all_fixed_u_fields() {
+        let message_id = 0x3132_3334_3536_3738_i64;
+        let answer_message_id = 0x4142_4344_4546_4748_i64;
+        let mut writer = TlWriter::new();
+        writer.write_u32(MSG_DETAILED_INFO_CONSTRUCTOR);
+        writer.write_i64(message_id);
+        writer.write_i64(answer_message_id);
+        writer.write_i32(8192);
+        writer.write_i32(5);
+
+        let parsed = parse_msg_detailed_info(writer.as_slice()).expect("parse detailed info");
+        assert_eq!(parsed.message_id, message_id);
+        assert_eq!(parsed.answer_message_id, answer_message_id);
+        assert_eq!(parsed.bytes, 8192);
+        assert_eq!(parsed.status, 5);
+    }
+
+    #[test]
+    fn msg_detailed_info_rejects_wrong_constructor_truncation_and_trailing_bytes() {
+        let mut writer = TlWriter::new();
+        writer.write_u32(MSG_DETAILED_INFO_CONSTRUCTOR);
+        writer.write_i64(0x5152_5354_5556_5758_i64);
+        writer.write_i64(0x6162_6364_6566_6768_i64);
+        writer.write_i32(32);
+        writer.write_i32(7);
+        let exact = writer.into_bytes();
+
+        let mut wrong_constructor = exact.clone();
+        wrong_constructor[..4].copy_from_slice(&0_u32.to_le_bytes());
+        assert!(parse_msg_detailed_info(&wrong_constructor).is_err());
+
+        for cut in [1_usize, 4, 8, 12, 20, exact.len() - 1] {
+            assert!(parse_msg_detailed_info(&exact[..cut]).is_err());
+        }
+
+        let mut trailing = exact;
+        trailing.extend_from_slice(&0_u32.to_le_bytes());
+        assert!(parse_msg_detailed_info(&trailing).is_err());
     }
 
     #[test]
