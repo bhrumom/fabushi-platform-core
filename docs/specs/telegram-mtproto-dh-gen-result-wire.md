@@ -153,5 +153,23 @@ No executable evidence is produced.
 
 | Requirement / AC | Status | Evidence / reason |
 | --- | --- | --- |
-| R1-R9 | pending | Spec committed before implementation. |
-| AC-1-AC-6 | pending | Source-level compliance review follows implementation; executable validation remains deferred to Stage B. |
+| R1-R9 | passed | Source readback confirms constructor-first three-way discrimination in `handshake.rs@87616f4b96a1775455da42b0bbed77711fb3c9f6`, unchanged active nonce and constant-time tag-specific hash authentication, the existing `AuthKeyHandshake::receive_dh_gen` OK/RETRY/FAIL owner, and authored-only canonical contracts in `protocol_contract.rs@6710d6ef3fd915689792c68d69b3922b446c9bfa`. Desktop sync `965db14afa7104deae0fc63a76d2cc0df35d81fd` mirrors that contract blob without adding a second handshake core. No executable validation was run. |
+| AC-1-AC-5 | passed | Unknown constructors are rejected before field reads; all fixed-U variants retain exact nonce, tag-specific hash and EOF semantics; RETRY remains entirely inside the existing `AwaitingDhGen` owner; canonical and desktop authored contract surfaces are remotely readable and byte-identical. |
+| AC-6 | passed / not-run | Desktop bookkeeping commit `802e9db9a33f70b6bf1c48838054f23330d3fc1c` records `TDRP-R9-MTPROTO-DH-GEN-RESULT-WIRE-001` as `implemented / validation_status=not-run / accepted=false`; coverage is `responsibilities_total=88`, `unknown=16172`, `unread=16145`, `omitted=0`. |
+
+
+## 18. Round 47 Stage-A implementation evidence
+
+- spec-first commit: `0c16a7c83a7e511484f5099399acb4c308aecb6c`
+- canonical implementation commit: `5a5c6095d3e049de5d187b89c4942d7f3377ae00`
+- canonical handshake: `native/telegram-protocol/src/handshake.rs@87616f4b96a1775455da42b0bbed77711fb3c9f6`
+- canonical authored-contract commit: `39fce63bce58718727541ac9f18dbc258766d159`
+- canonical authored contracts: `native/telegram-protocol/tests/protocol_contract.rs@6710d6ef3fd915689792c68d69b3922b446c9bfa`
+- canonical public facade remains: `native/telegram-protocol/src/lib.rs@abab39e42f100972484191f0e52e9edd9b88c6cf`
+- desktop authored-contract sync: `bhrumom/fabushi-desktop@965db14afa7104deae0fc63a76d2cc0df35d81fd`
+- desktop ledger/P0/source-closure evidence: `bhrumom/fabushi-desktop@802e9db9a33f70b6bf1c48838054f23330d3fc1c`
+
+Executable build/test/validator/CI evidence is intentionally absent in Stage A. Temporary/permanent auth-key
+binding/expiry/persistence/teardown, connection scheduling/racing/send lifecycle, arbitrary multi-request history,
+gzip, complete updates difference decoding/application, broader source/legal closure and independent release ACCEPT
+remain outside this responsibility and open/fail-closed.
