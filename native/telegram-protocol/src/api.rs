@@ -22,6 +22,9 @@ pub const USER_CONSTRUCTOR: u32 = 0xb1b8_cc83;
 pub const MSGS_ACK_CONSTRUCTOR: u32 = 0x62d6_b459;
 pub const PONG_CONSTRUCTOR: u32 = 0x3477_73c5;
 pub const RPC_RESULT_CONSTRUCTOR: u32 = 0xf35c_6d01;
+pub const RPC_ANSWER_UNKNOWN_CONSTRUCTOR: u32 = 0x5e2a_d36e;
+pub const RPC_ANSWER_DROPPED_RUNNING_CONSTRUCTOR: u32 = 0xcd78_e586;
+pub const RPC_ANSWER_DROPPED_CONSTRUCTOR: u32 = 0xa43a_d8b7;
 pub const MESSAGE_CONTAINER_CONSTRUCTOR: u32 = 0x73f1_f8dc;
 pub const MAX_MESSAGE_CONTAINER_ENTRIES: usize = 1024;
 pub const MSG_RESEND_REQ_CONSTRUCTOR: u32 = 0x7d86_1a08;
@@ -245,6 +248,17 @@ pub struct RpcResultEnvelope {
     pub result_body: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RpcDropAnswer {
+    Unknown,
+    DroppedRunning,
+    Dropped {
+        message_id: i64,
+        sequence_number: i32,
+        bytes: i32,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageContainerEntry {
     pub message_id: i64,
@@ -273,6 +287,8 @@ pub enum ApiRequestError {
     InvalidMessageState,
     #[error("Telegram MTProto rpc_result body has invalid length {0}")]
     InvalidRpcResultBodyLength(usize),
+    #[error("Telegram MTProto RpcDropAnswer has unexpected constructor {0:#010x}")]
+    UnexpectedRpcDropAnswerConstructor(u32),
     #[error("Telegram MTProto message container is malformed")]
     InvalidMessageContainer,
     #[error("Telegram MTProto future-salts payload is malformed")]
@@ -523,6 +539,25 @@ pub fn parse_rpc_result(input: &[u8]) -> Result<RpcResultEnvelope, ApiRequestErr
         request_message_id,
         result_body,
     })
+}
+
+pub fn parse_rpc_drop_answer(input: &[u8]) -> Result<RpcDropAnswer, ApiRequestError> {
+    let mut reader = TlReader::new(input);
+    let constructor = reader.read_u32()?;
+    let answer = match constructor {
+        RPC_ANSWER_UNKNOWN_CONSTRUCTOR => RpcDropAnswer::Unknown,
+        RPC_ANSWER_DROPPED_RUNNING_CONSTRUCTOR => RpcDropAnswer::DroppedRunning,
+        RPC_ANSWER_DROPPED_CONSTRUCTOR => RpcDropAnswer::Dropped {
+            message_id: reader.read_i64()?,
+            sequence_number: reader.read_i32()?,
+            bytes: reader.read_i32()?,
+        },
+        actual => return Err(ApiRequestError::UnexpectedRpcDropAnswerConstructor(actual)),
+    };
+    if !reader.is_finished() {
+        return Err(ApiRequestError::TrailingBytes(reader.remaining()));
+    }
+    Ok(answer)
 }
 
 pub fn parse_message_container(input: &[u8]) -> Result<MessageContainer, ApiRequestError> {
@@ -1399,6 +1434,63 @@ mod mtproto_service_builder_contract_tests {
         assert_eq!(parsed.entries[0].body, 0x9972_75b5_u32.to_le_bytes());
         assert_eq!(parsed.entries[1].sequence_number, 2);
         assert_eq!(parsed.entries[1].body.len(), 8);
+    }
+
+    #[test]
+    fn rpc_drop_answer_parses_all_fixed_u_variants() {
+        assert_eq!(
+            parse_rpc_drop_answer(&RPC_ANSWER_UNKNOWN_CONSTRUCTOR.to_le_bytes())
+                .expect("parse rpc_answer_unknown"),
+            RpcDropAnswer::Unknown
+        );
+        assert_eq!(
+            parse_rpc_drop_answer(&RPC_ANSWER_DROPPED_RUNNING_CONSTRUCTOR.to_le_bytes())
+                .expect("parse rpc_answer_dropped_running"),
+            RpcDropAnswer::DroppedRunning
+        );
+
+        let message_id = 0x1112_1314_1516_1718_i64;
+        let mut dropped = TlWriter::new();
+        dropped.write_u32(RPC_ANSWER_DROPPED_CONSTRUCTOR);
+        dropped.write_i64(message_id);
+        dropped.write_i32(7);
+        dropped.write_i32(4096);
+        assert_eq!(
+            parse_rpc_drop_answer(dropped.as_slice()).expect("parse rpc_answer_dropped"),
+            RpcDropAnswer::Dropped {
+                message_id,
+                sequence_number: 7,
+                bytes: 4096,
+            }
+        );
+    }
+
+    #[test]
+    fn rpc_drop_answer_rejects_unknown_constructor_truncation_and_trailing_bytes() {
+        assert!(parse_rpc_drop_answer(&0_u32.to_le_bytes()).is_err());
+        let unknown = RPC_ANSWER_UNKNOWN_CONSTRUCTOR.to_le_bytes();
+        assert!(parse_rpc_drop_answer(&unknown[..3]).is_err());
+
+        let mut unknown_trailing = unknown.to_vec();
+        unknown_trailing.extend_from_slice(&0_u32.to_le_bytes());
+        assert!(parse_rpc_drop_answer(&unknown_trailing).is_err());
+
+        let mut running_trailing = RPC_ANSWER_DROPPED_RUNNING_CONSTRUCTOR.to_le_bytes().to_vec();
+        running_trailing.extend_from_slice(&0_u32.to_le_bytes());
+        assert!(parse_rpc_drop_answer(&running_trailing).is_err());
+
+        let mut dropped = TlWriter::new();
+        dropped.write_u32(RPC_ANSWER_DROPPED_CONSTRUCTOR);
+        dropped.write_i64(0x2122_2324_2526_2728_i64);
+        dropped.write_i32(3);
+        dropped.write_i32(64);
+        let exact = dropped.into_bytes();
+        for cut in [4_usize, 8, 12, 16, exact.len() - 1] {
+            assert!(parse_rpc_drop_answer(&exact[..cut]).is_err());
+        }
+        let mut dropped_trailing = exact;
+        dropped_trailing.extend_from_slice(&0_u32.to_le_bytes());
+        assert!(parse_rpc_drop_answer(&dropped_trailing).is_err());
     }
 
     #[test]
