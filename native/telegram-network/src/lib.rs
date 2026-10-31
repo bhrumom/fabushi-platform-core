@@ -25,7 +25,6 @@ const DEFAULT_MAX_SERVICE_MESSAGES: usize = 8;
 const PING_CONSTRUCTOR: u32 = 0x7abe_77ec;
 const PONG_CONSTRUCTOR: u32 = 0x3477_73c5;
 const NEW_SESSION_CREATED_CONSTRUCTOR: u32 = 0x9ec2_0908;
-const MESSAGE_CONTAINER_CONSTRUCTOR: u32 = 0x73f1_f8dc;
 const MSG_DETAILED_INFO_CONSTRUCTOR: u32 = 0x276d_3ec6;
 const MSG_NEW_DETAILED_INFO_CONSTRUCTOR: u32 = 0x809d_b6df;
 const MSGS_STATE_INFO_CONSTRUCTOR: u32 = 0x04de_b57d;
@@ -473,47 +472,25 @@ impl EstablishedSession {
                     None => Err(NetworkError::BadServerMessage { message_id, code }),
                 }
             },
-            MESSAGE_CONTAINER_CONSTRUCTOR => {
-                let count = read_i32_at(body, 4)?;
-                if !(0..=1024).contains(&count) {
-                    return Err(NetworkError::InvalidServiceMessage);
-                }
-                let mut offset = 8_usize;
+            fabushi_telegram_protocol::MESSAGE_CONTAINER_CONSTRUCTOR => {
+                let container = fabushi_telegram_protocol::parse_message_container(body)
+                    .map_err(|_| NetworkError::InvalidServiceMessage)?;
                 let mut outcome = RpcOutcome::Continue;
-                for _ in 0..count {
-                    let message_id = read_i64_at(body, offset)?;
-                    let sequence_number = read_i32_at(body, offset + 8)?;
-                    let body_length = read_i32_at(body, offset + 12)?;
-                    if body_length < 0 {
-                        return Err(NetworkError::InvalidServiceMessage);
-                    }
-                    let body_start = offset
-                        .checked_add(16)
-                        .ok_or(NetworkError::InvalidServiceMessage)?;
-                    let body_end = body_start
-                        .checked_add(body_length as usize)
-                        .ok_or(NetworkError::InvalidServiceMessage)?;
-                    let inner = body
-                        .get(body_start..body_end)
-                        .ok_or(NetworkError::InvalidServiceMessage)?;
-                    self.validate_incoming_message_id(message_id, inner)?;
-                    if sequence_number.rem_euclid(2) == 1 {
-                        acknowledgements.push(message_id);
+                for entry in container.entries {
+                    self.validate_incoming_message_id(entry.message_id, &entry.body)?;
+                    if contained_message_requires_ack(entry.sequence_number) {
+                        acknowledgements.push(entry.message_id);
                     }
                     let inner_outcome = self.scan_rpc_body(
-                        inner,
+                        &entry.body,
                         request_message_id,
                         state_query_message_id,
-                        message_id,
+                        entry.message_id,
                         acknowledgements,
                     )?;
                     if !matches!(inner_outcome, RpcOutcome::Continue) {
                         outcome = inner_outcome;
                     }
-                    offset = body_end;
-                }
-                if offset != body.len() {
-                    return Err(NetworkError::InvalidServiceMessage);
                 }
                 Ok(outcome)
             }
@@ -704,42 +681,21 @@ impl EstablishedSession {
                     None => Err(NetworkError::BadServerMessage { message_id, code }),
                 }
             }
-            MESSAGE_CONTAINER_CONSTRUCTOR => {
-                let count = read_i32_at(body, 4)?;
-                if !(0..=1024).contains(&count) {
-                    return Err(NetworkError::InvalidServiceMessage);
-                }
-                let mut offset = 8_usize;
+            fabushi_telegram_protocol::MESSAGE_CONTAINER_CONSTRUCTOR => {
+                let container = fabushi_telegram_protocol::parse_message_container(body)
+                    .map_err(|_| NetworkError::InvalidServiceMessage)?;
                 let mut outcome = ServiceOutcome::Continue;
-                for _ in 0..count {
-                    let message_id = read_i64_at(body, offset)?;
-                    let body_length = read_i32_at(body, offset + 12)?;
-                    if body_length < 0 {
-                        return Err(NetworkError::InvalidServiceMessage);
-                    }
-                    let body_start = offset
-                        .checked_add(16)
-                        .ok_or(NetworkError::InvalidServiceMessage)?;
-                    let body_end = body_start
-                        .checked_add(body_length as usize)
-                        .ok_or(NetworkError::InvalidServiceMessage)?;
-                    let inner = body
-                        .get(body_start..body_end)
-                        .ok_or(NetworkError::InvalidServiceMessage)?;
-                    self.validate_incoming_message_id(message_id, inner)?;
+                for entry in container.entries {
+                    self.validate_incoming_message_id(entry.message_id, &entry.body)?;
                     let inner_outcome = self.process_service_body(
-                        inner,
+                        &entry.body,
                         ping_id,
                         request_message_id,
-                        message_id,
+                        entry.message_id,
                     )?;
                     if !matches!(inner_outcome, ServiceOutcome::Continue) {
                         outcome = inner_outcome;
                     }
-                    offset = body_end;
-                }
-                if offset != body.len() {
-                    return Err(NetworkError::InvalidServiceMessage);
                 }
                 Ok(outcome)
             }
@@ -784,6 +740,10 @@ fn new_session_requires_replay(request_message_id: i64, first_message_id: i64) -
 
 fn detailed_info_matches_request(sent_message_id: i64, request_message_id: i64) -> bool {
     sent_message_id == request_message_id
+}
+
+fn contained_message_requires_ack(sequence_number: i32) -> bool {
+    sequence_number.rem_euclid(2) == 1
 }
 
 fn acknowledgement_mentions_request(
@@ -1032,6 +992,7 @@ fn read_i64_at(input: &[u8], offset: usize) -> Result<i64, NetworkError> {
 mod recovery_contract_tests {
     use super::{
         acknowledgement_mentions_request, bad_message_recovery_action,
+        contained_message_requires_ack,
         direct_bad_message_time_recovery, detailed_info_matches_request,
         new_session_requires_replay, pong_matches_request, request_state_requires_resend,
         rpc_result_matches_request, state_reconciliation_requires_resend, BadMessageRecoveryAction,
@@ -1078,6 +1039,14 @@ mod recovery_contract_tests {
         assert!(new_session_requires_replay(100, 104));
         assert!(!new_session_requires_replay(104, 104));
         assert!(!new_session_requires_replay(108, 104));
+    }
+
+    #[test]
+    fn fixed_u_container_sequence_parity_drives_current_ack_accumulation() {
+        assert!(!contained_message_requires_ack(0));
+        assert!(contained_message_requires_ack(1));
+        assert!(!contained_message_requires_ack(2));
+        assert!(contained_message_requires_ack(3));
     }
 
     #[test]

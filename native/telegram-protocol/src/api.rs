@@ -22,6 +22,8 @@ pub const USER_CONSTRUCTOR: u32 = 0xb1b8_cc83;
 pub const MSGS_ACK_CONSTRUCTOR: u32 = 0x62d6_b459;
 pub const PONG_CONSTRUCTOR: u32 = 0x3477_73c5;
 pub const RPC_RESULT_CONSTRUCTOR: u32 = 0xf35c_6d01;
+pub const MESSAGE_CONTAINER_CONSTRUCTOR: u32 = 0x73f1_f8dc;
+pub const MAX_MESSAGE_CONTAINER_ENTRIES: usize = 1024;
 pub const MSG_RESEND_REQ_CONSTRUCTOR: u32 = 0x7d86_1a08;
 pub const MSGS_STATE_REQ_CONSTRUCTOR: u32 = 0xda69_fb52;
 pub const MSGS_STATE_INFO_CONSTRUCTOR: u32 = 0x04de_b57d;
@@ -193,6 +195,18 @@ pub struct RpcResultEnvelope {
     pub result_body: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageContainerEntry {
+    pub message_id: i64,
+    pub sequence_number: i32,
+    pub body: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageContainer {
+    pub entries: Vec<MessageContainerEntry>,
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ApiRequestError {
     #[error("Telegram api_id must be positive")]
@@ -209,6 +223,8 @@ pub enum ApiRequestError {
     InvalidMessageState,
     #[error("Telegram MTProto rpc_result body has invalid length {0}")]
     InvalidRpcResultBodyLength(usize),
+    #[error("Telegram MTProto message container is malformed")]
+    InvalidMessageContainer,
     #[error("Telegram Config contains an invalid IP address: {0}")]
     InvalidIpAddress(String),
     #[error("Telegram Config contains an invalid port: {0}")]
@@ -455,6 +471,53 @@ pub fn parse_rpc_result(input: &[u8]) -> Result<RpcResultEnvelope, ApiRequestErr
         request_message_id,
         result_body,
     })
+}
+
+pub fn parse_message_container(input: &[u8]) -> Result<MessageContainer, ApiRequestError> {
+    let mut reader = TlReader::new(input);
+    let constructor = reader.read_u32()?;
+    if constructor != MESSAGE_CONTAINER_CONSTRUCTOR {
+        return Err(ApiRequestError::Tl(TlError::UnexpectedConstructor {
+            expected: MESSAGE_CONTAINER_CONSTRUCTOR,
+            actual: constructor,
+        }));
+    }
+    let count = reader.read_i32()?;
+    let count = usize::try_from(count).map_err(|_| ApiRequestError::InvalidMessageContainer)?;
+    if count > MAX_MESSAGE_CONTAINER_ENTRIES {
+        return Err(ApiRequestError::InvalidMessageContainer);
+    }
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        let message_id = reader.read_i64()?;
+        let sequence_number = reader.read_i32()?;
+        let body_length = reader.read_i32()?;
+        let body_length =
+            usize::try_from(body_length).map_err(|_| ApiRequestError::InvalidMessageContainer)?;
+        if body_length < 4 || !body_length.is_multiple_of(4) || body_length > reader.remaining() {
+            return Err(ApiRequestError::InvalidMessageContainer);
+        }
+        let start = reader.position();
+        let end = start
+            .checked_add(body_length)
+            .ok_or(ApiRequestError::InvalidMessageContainer)?;
+        let body = input
+            .get(start..end)
+            .ok_or(ApiRequestError::InvalidMessageContainer)?
+            .to_vec();
+        for _ in 0..(body_length / 4) {
+            reader.read_u32()?;
+        }
+        entries.push(MessageContainerEntry {
+            message_id,
+            sequence_number,
+            body,
+        });
+    }
+    if !reader.is_finished() {
+        return Err(ApiRequestError::InvalidMessageContainer);
+    }
+    Ok(MessageContainer { entries })
 }
 
 pub fn build_msg_resend_req(message_ids: &[i64]) -> Result<Vec<u8>, ApiRequestError> {
@@ -1055,10 +1118,10 @@ mod authorization_identity_contract_tests {
 mod mtproto_service_builder_contract_tests {
     use super::{
         build_msg_resend_req, build_msgs_ack, build_msgs_state_req, parse_msgs_ack,
-        parse_msgs_all_info, parse_msgs_state_info, parse_pong, parse_rpc_result,
-        MSGS_ACK_CONSTRUCTOR, MSGS_ALL_INFO_CONSTRUCTOR, MSGS_STATE_INFO_CONSTRUCTOR,
-        MSGS_STATE_REQ_CONSTRUCTOR, MSG_RESEND_REQ_CONSTRUCTOR, PONG_CONSTRUCTOR,
-        RPC_RESULT_CONSTRUCTOR,
+        parse_message_container, parse_msgs_all_info, parse_msgs_state_info, parse_pong,
+        parse_rpc_result, MESSAGE_CONTAINER_CONSTRUCTOR, MSGS_ACK_CONSTRUCTOR,
+        MSGS_ALL_INFO_CONSTRUCTOR, MSGS_STATE_INFO_CONSTRUCTOR, MSGS_STATE_REQ_CONSTRUCTOR,
+        MSG_RESEND_REQ_CONSTRUCTOR, PONG_CONSTRUCTOR, RPC_RESULT_CONSTRUCTOR,
     };
     use crate::tl::TlWriter;
 
@@ -1124,6 +1187,63 @@ mod mtproto_service_builder_contract_tests {
         let mut unaligned = writer.into_bytes();
         unaligned.push(0xff);
         assert!(parse_rpc_result(&unaligned).is_err());
+    }
+
+    #[test]
+    fn message_container_parses_fixed_u_entries_and_preserves_opaque_bodies() {
+        let mut writer = TlWriter::new();
+        writer.write_u32(MESSAGE_CONTAINER_CONSTRUCTOR);
+        writer.write_i32(2);
+        writer.write_i64(0x1112_1314_1516_1719_i64);
+        writer.write_i32(1);
+        writer.write_i32(4);
+        writer.write_u32(0x9972_75b5);
+        writer.write_i64(0x2122_2324_2526_2729_i64);
+        writer.write_i32(2);
+        writer.write_i32(8);
+        writer.write_u32(0x3477_73c5);
+        writer.write_u32(0x0102_0304);
+
+        let parsed = parse_message_container(writer.as_slice()).expect("parse msg_container");
+        assert_eq!(parsed.entries.len(), 2);
+        assert_eq!(parsed.entries[0].message_id, 0x1112_1314_1516_1719_i64);
+        assert_eq!(parsed.entries[0].sequence_number, 1);
+        assert_eq!(parsed.entries[0].body, 0x9972_75b5_u32.to_le_bytes());
+        assert_eq!(parsed.entries[1].sequence_number, 2);
+        assert_eq!(parsed.entries[1].body.len(), 8);
+    }
+
+    #[test]
+    fn message_container_rejects_invalid_lengths_counts_and_trailing_bytes() {
+        let mut too_short = TlWriter::new();
+        too_short.write_u32(MESSAGE_CONTAINER_CONSTRUCTOR);
+        too_short.write_i32(1);
+        too_short.write_i64(0x1112_1314_1516_1719_i64);
+        too_short.write_i32(1);
+        too_short.write_i32(0);
+        assert!(parse_message_container(too_short.as_slice()).is_err());
+
+        let mut unaligned = TlWriter::new();
+        unaligned.write_u32(MESSAGE_CONTAINER_CONSTRUCTOR);
+        unaligned.write_i32(1);
+        unaligned.write_i64(0x1112_1314_1516_1719_i64);
+        unaligned.write_i32(1);
+        unaligned.write_i32(5);
+        unaligned.write_u32(0x9972_75b5);
+        let mut unaligned_bytes = unaligned.into_bytes();
+        unaligned_bytes.push(0xff);
+        assert!(parse_message_container(&unaligned_bytes).is_err());
+
+        let mut too_many = TlWriter::new();
+        too_many.write_u32(MESSAGE_CONTAINER_CONSTRUCTOR);
+        too_many.write_i32(1025);
+        assert!(parse_message_container(too_many.as_slice()).is_err());
+
+        let mut trailing = TlWriter::new();
+        trailing.write_u32(MESSAGE_CONTAINER_CONSTRUCTOR);
+        trailing.write_i32(0);
+        trailing.write_u32(0);
+        assert!(parse_message_container(trailing.as_slice()).is_err());
     }
 
     #[test]
