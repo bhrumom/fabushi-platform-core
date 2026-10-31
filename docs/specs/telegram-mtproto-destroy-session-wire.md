@@ -97,3 +97,24 @@ Canonical request implementation commit: `5f259ca296432384f5388ffef9539dbbf1f403
 - R14: satisfied as an explicit boundary — the builder touches no socket, timer, session state, request history, persistence, or teardown lifecycle. Live outbound destroy-session/teardown ownership remains fail-closed/open.
 
 Acceptance criteria AC7-AC10 are satisfied at source/implementation/bookkeeping level except executable validation, which remains intentionally blocked/not-run until Stage B. Remote desktop bookkeeping records `TDRP-R9-MTPROTO-DESTROY-SESSION-REQUEST-WIRE-001` as implemented, `validation_status=not-run`, `accepted=false`. No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried.
+
+
+## Round 61 adjacent revalidation: DestroySessionRes result wire
+
+Live authority reread at checkpoint `df3feac4618636cdbc863b19e05106e19ba10446` confirms fixed-U remains `telegramdesktop/tdesktop@f985723b552b30fe1c17d377d57f44e61a15a8c4`, with `mtproto.tl@76225965bfc794388db241f3f760db8ab79e84f8` and `session_private.cpp@13cbc76ec723386027b5b4dcac79999b791c4614`.
+
+The existing response-side owner is already exact and therefore requires **no production delta**:
+
+- `native/telegram-protocol/src/api.rs@ebfb3670b5cd097b9ce288782c7954f5cfe9fc43` dispatches exactly `destroy_session_ok#e22045fc` and `destroy_session_none#62d350c9`.
+- Both variants consume exactly constructor 4 + `session_id:long` 8 = 12 bytes and preserve the complete signed `i64` domain.
+- `native/telegram-protocol/src/tl.rs@89256ab35184b6dc06a095ab34abb9f44e95a264` performs bounded little-endian fixed-width reads and fails closed on every constructor/session-id truncation boundary.
+- Strict EOF in `parse_destroy_session_result` rejects trailing bytes after either exact 12-byte variant.
+- `native/telegram-protocol/src/lib.rs@abab39e42f100972484191f0e52e9edd9b88c6cf` exports the same canonical parser/type/constructors.
+- The desktop provider api/lib copies are byte-identical to those canonical blobs at the live desktop checkpoint.
+- Fixed-U `session_private.cpp` has no direct `destroy_session_*` receive branch. Therefore this revalidation does not infer or add live teardown, historical request mutation, scheduler behavior, auth-key lifecycle, resend/container state, or persistence.
+
+Round-61 authored-only external contracts SHALL pin both exact 12-byte variants, exact constructor/session-id offsets, signed `i64::MIN` / `i64::MAX` preservation, every constructor and session-id truncation cut, unknown-constructor rejection, and trailing-byte rejection. These contracts must remain unexecuted in Stage A.
+
+The existing ledger responsibility `TDRP-R9-MTPROTO-DESTROY-SESSION-WIRE-001` remains the sole row; no duplicate responsibility is created. Its state remains `implemented / validation_status=not-run / accepted=false`. Live session teardown/outbound destroy-session lifecycle, arbitrary multi-request history, connection scheduling, auth-key binding/persistence, gzip, complete difference decoding/application, broader source/legal closure, Stage-B executable evidence, and independent release ACCEPT remain open or outside this wire-only claim.
+
+No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, or runtime acceptance is permitted or claimed for this Stage-A revalidation.
