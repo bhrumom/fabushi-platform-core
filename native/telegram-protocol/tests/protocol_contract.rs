@@ -373,6 +373,55 @@ fn rpc_error_parser_preserves_code_and_machine_message() {
 }
 
 #[test]
+fn rpc_error_parser_rejects_malformed_or_trailing_wire_and_discriminates_other_objects() {
+    assert!(try_parse_rpc_error(&0x3477_73c5_u32.to_le_bytes())
+        .unwrap()
+        .is_none());
+
+    assert!(matches!(
+        try_parse_rpc_error(&fabushi_telegram_protocol::RPC_ERROR_CONSTRUCTOR.to_le_bytes()),
+        Err(ApiRequestError::Tl(TlError::UnexpectedEof { .. }))
+    ));
+
+    let mut invalid_utf8 = TlWriter::new();
+    invalid_utf8.write_u32(fabushi_telegram_protocol::RPC_ERROR_CONSTRUCTOR);
+    invalid_utf8.write_i32(-500);
+    invalid_utf8.write_bytes(&[0xff]).unwrap();
+    assert!(matches!(
+        try_parse_rpc_error(&invalid_utf8.into_bytes()),
+        Err(ApiRequestError::Tl(TlError::InvalidUtf8 { .. }))
+    ));
+
+    let mut trailing = TlWriter::new();
+    trailing.write_u32(fabushi_telegram_protocol::RPC_ERROR_CONSTRUCTOR);
+    trailing.write_i32(-303);
+    trailing.write_string("PHONE_MIGRATE_2").unwrap();
+    trailing.write_u32(0xfeed_beef);
+    assert_eq!(
+        try_parse_rpc_error(&trailing.into_bytes()).unwrap_err(),
+        ApiRequestError::TrailingBytes(4)
+    );
+
+    let mut exact = TlWriter::new();
+    exact.write_u32(fabushi_telegram_protocol::RPC_ERROR_CONSTRUCTOR);
+    exact.write_i32(i32::MIN);
+    exact.write_string("EDGE_CASE").unwrap();
+    let exact_bytes = exact.into_bytes();
+    let parsed = try_parse_rpc_error(&exact_bytes).unwrap().unwrap();
+    assert_eq!(parsed.code, i32::MIN);
+    assert_eq!(parsed.message, "EDGE_CASE");
+
+    let mut reader = TlReader::new(&exact_bytes);
+    assert_eq!(
+        reader.read_u32().unwrap(),
+        fabushi_telegram_protocol::RPC_ERROR_CONSTRUCTOR
+    );
+    assert_eq!(reader.read_i32().unwrap(), i32::MIN);
+    assert_eq!(reader.read_string().unwrap(), "EDGE_CASE");
+    assert!(reader.is_finished());
+}
+
+#[test]
 fn account_password_prefix_and_srp_proof_follow_telegram_contract() {
     assert_eq!(
         u32::from_le_bytes(build_account_get_password().try_into().unwrap()),
