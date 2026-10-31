@@ -142,3 +142,16 @@ Canonical and desktop protocol blobs: api `714c24a5f1727e13693008ea42676831b3e8d
 - R16: satisfied as an explicit fail-closed boundary — fixed-U ordinary-ping scheduling/selection, message-id assignment, send/ACK settlement and timeout/reconnect remain unclaimed; arbitrary `wasSent/haveSent/_resendingIds/toSend/_sentContainers` history was not introduced.
 
 AC-6 through AC-9 are satisfied at source/implementation/bookkeeping level. AC-10 is satisfied for the fail-closed ownership boundary and remains **blocked/not-run** for executable validation: `validation_status=not-run`, `accepted=false`. TLS camouflage, gzip, complete difference/differenceSlice decoding/application, broader source/legal closure, Stage-B evidence and independent release acceptance remain open. No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried in this review.
+
+
+## 20. Round 63 adjacent receive-side revalidation — fixed-U Pong exact wire
+
+At live checkpoint `3e24ea732acd2bcb2fe5bf2e5257f275643384de`, fixed U remains `telegramdesktop/tdesktop@f985723b552b30fe1c17d377d57f44e61a15a8c4`. Rereading `mtproto.tl@76225965bfc794388db241f3f760db8ab79e84f8` and `session_private.cpp@13cbc76ec723386027b5b4dcac79999b791c4614` confirms the next shipping service-message branch after `new_session_created` is `pong#347773c5 msg_id:long ping_id:long = Pong`.
+
+This is a source-level **no-production-delta** revalidation. The current canonical protocol `api.rs@ebfb3670b5cd097b9ce288782c7954f5cfe9fc43` already exposes `PONG_CONSTRUCTOR`, typed `Pong`, and `parse_pong`; it consumes constructor 4 + `msg_id` 8 + `ping_id` 8 = exactly 20 bytes, preserves both signed `i64` values, rejects constructor mismatch or truncation through the bounded `TlReader`, and rejects any trailing bytes. The current desktop shipping network blob `1fc1b1f69e3e37377400d078f916599e0c7b20bc` routes `PONG_CONSTRUCTOR` through that parser before exact current-ping `msg_id` + `ping_id` correlation.
+
+Round-63 authored-only external contracts SHALL pin the 20-byte object, offsets `0..4 / 4..12 / 12..20`, signed `i64::MIN` / `i64::MAX` preservation across the two fields, every truncation cut `0..19`, wrong-constructor rejection, and strict EOF. These contracts SHALL NOT be executed during Stage A.
+
+The wire-only boundary remains intentionally separate from fixed-U `SessionPrivate::wasSent`, `requestsFixTimeSalt`, `requestsAcked`, arbitrary `haveSent/_resendingIds/toSend/_sentContainers` history, connection scheduling, auth-key binding/persistence, `gzip_packed`, and complete difference decoding/application. The existing single-current-ping correlation is retained; no wider historical request owner is inferred.
+
+The existing ledger responsibility `TDRP-R9-MTPROTO-SINGLE-PING-PONG-001` remains the sole row and stays `implemented / validation_status=not-run / accepted=false`. No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, or runtime acceptance is permitted or claimed for this Stage-A revalidation.
