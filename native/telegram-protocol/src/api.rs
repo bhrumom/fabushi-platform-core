@@ -46,6 +46,7 @@ pub const BAD_MSG_NOTIFICATION_CONSTRUCTOR: u32 = 0xa7ef_f811;
 pub const BAD_SERVER_SALT_CONSTRUCTOR: u32 = 0xedab_447b;
 pub const FUTURE_SALT_CONSTRUCTOR: u32 = 0x0949_d9dc;
 pub const FUTURE_SALTS_CONSTRUCTOR: u32 = 0xae50_0895;
+pub const GET_FUTURE_SALTS_CONSTRUCTOR: u32 = 0xb921_bd04;
 pub const CONFIG_CONSTRUCTOR: u32 = 0xcc1a_241e;
 pub const DC_OPTION_CONSTRUCTOR: u32 = 0x18b7_a10d;
 pub const AUTH_SENT_CODE_CONSTRUCTOR: u32 = 0x5e00_2502;
@@ -536,6 +537,13 @@ pub fn build_destroy_session(session_id: i64) -> Vec<u8> {
     let mut writer = TlWriter::new();
     writer.write_u32(DESTROY_SESSION_CONSTRUCTOR);
     writer.write_i64(session_id);
+    writer.into_bytes()
+}
+
+pub fn build_get_future_salts(num: i32) -> Vec<u8> {
+    let mut writer = TlWriter::new();
+    writer.write_u32(GET_FUTURE_SALTS_CONSTRUCTOR);
+    writer.write_i32(num);
     writer.into_bytes()
 }
 
@@ -1525,8 +1533,8 @@ mod authorization_identity_contract_tests {
 #[cfg(test)]
 mod mtproto_service_builder_contract_tests {
     use super::{
-        build_destroy_session, build_msg_resend_req, build_msgs_ack, build_msgs_state_req,
-        build_ping_delay_disconnect,
+        build_destroy_session, build_get_future_salts, build_msg_resend_req, build_msgs_ack,
+        build_msgs_state_req, build_ping_delay_disconnect,
         parse_bad_msg_notification,
         parse_bad_server_salt,
         parse_future_salts, parse_msg_detailed_info, parse_msg_new_detailed_info, parse_msgs_ack,
@@ -1536,7 +1544,8 @@ mod mtproto_service_builder_contract_tests {
         AccessPointRule, IpPort, BAD_MSG_NOTIFICATION_CONSTRUCTOR, BAD_SERVER_SALT_CONSTRUCTOR,
         DESTROY_SESSION_CONSTRUCTOR, DESTROY_SESSION_NONE_CONSTRUCTOR,
         DESTROY_SESSION_OK_CONSTRUCTOR, DestroySessionResult,
-        ACCESS_POINT_RULE_CONSTRUCTOR, FUTURE_SALTS_CONSTRUCTOR, HELP_CONFIG_SIMPLE_CONSTRUCTOR,
+        ACCESS_POINT_RULE_CONSTRUCTOR, FUTURE_SALTS_CONSTRUCTOR, GET_FUTURE_SALTS_CONSTRUCTOR,
+        HELP_CONFIG_SIMPLE_CONSTRUCTOR,
         HTTP_WAIT_CONSTRUCTOR, IP_PORT_CONSTRUCTOR, IP_PORT_SECRET_CONSTRUCTOR, RpcDropAnswer,
         RPC_ANSWER_DROPPED_CONSTRUCTOR,
         RPC_ANSWER_DROPPED_RUNNING_CONSTRUCTOR, RPC_ANSWER_UNKNOWN_CONSTRUCTOR,
@@ -1610,6 +1619,27 @@ mod mtproto_service_builder_contract_tests {
             expected.extend_from_slice(&session_id.to_le_bytes());
             assert_eq!(encoded, expected);
             assert!(parse_destroy_session_result(&encoded).is_err());
+        }
+    }
+
+    #[test]
+    fn get_future_salts_serializes_fixed_u_request_exactly() {
+        let num = 0x0102_0304_i32;
+        let encoded = build_get_future_salts(num);
+        assert_eq!(encoded.len(), 8);
+        assert_eq!(&encoded[0..4], &GET_FUTURE_SALTS_CONSTRUCTOR.to_le_bytes());
+        assert_eq!(&encoded[4..8], &num.to_le_bytes());
+    }
+
+    #[test]
+    fn get_future_salts_preserves_signed_boundaries_and_stays_separate_from_response_parser() {
+        for num in [i32::MIN, i32::MAX] {
+            let encoded = build_get_future_salts(num);
+            let mut expected = Vec::new();
+            expected.extend_from_slice(&GET_FUTURE_SALTS_CONSTRUCTOR.to_le_bytes());
+            expected.extend_from_slice(&num.to_le_bytes());
+            assert_eq!(encoded, expected);
+            assert!(parse_future_salts(&encoded).is_err());
         }
     }
 
