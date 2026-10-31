@@ -21,6 +21,7 @@ pub const USER_EMPTY_CONSTRUCTOR: u32 = 0xd3bc_4b7a;
 pub const USER_CONSTRUCTOR: u32 = 0xb1b8_cc83;
 pub const MSGS_ACK_CONSTRUCTOR: u32 = 0x62d6_b459;
 pub const PONG_CONSTRUCTOR: u32 = 0x3477_73c5;
+pub const RPC_RESULT_CONSTRUCTOR: u32 = 0xf35c_6d01;
 pub const MSG_RESEND_REQ_CONSTRUCTOR: u32 = 0x7d86_1a08;
 pub const MSGS_STATE_REQ_CONSTRUCTOR: u32 = 0xda69_fb52;
 pub const MSGS_STATE_INFO_CONSTRUCTOR: u32 = 0x04de_b57d;
@@ -186,6 +187,12 @@ pub struct Pong {
     pub ping_id: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RpcResultEnvelope {
+    pub request_message_id: i64,
+    pub result_body: Vec<u8>,
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ApiRequestError {
     #[error("Telegram api_id must be positive")]
@@ -200,6 +207,8 @@ pub enum ApiRequestError {
     Tl(#[from] TlError),
     #[error("Telegram MTProto message-state payload is malformed")]
     InvalidMessageState,
+    #[error("Telegram MTProto rpc_result body has invalid length {0}")]
+    InvalidRpcResultBodyLength(usize),
     #[error("Telegram Config contains an invalid IP address: {0}")]
     InvalidIpAddress(String),
     #[error("Telegram Config contains an invalid port: {0}")]
@@ -425,6 +434,27 @@ pub fn parse_pong(input: &[u8]) -> Result<Pong, ApiRequestError> {
         return Err(ApiRequestError::TrailingBytes(reader.remaining()));
     }
     Ok(pong)
+}
+
+pub fn parse_rpc_result(input: &[u8]) -> Result<RpcResultEnvelope, ApiRequestError> {
+    let mut reader = TlReader::new(input);
+    let constructor = reader.read_u32()?;
+    if constructor != RPC_RESULT_CONSTRUCTOR {
+        return Err(ApiRequestError::Tl(TlError::UnexpectedConstructor {
+            expected: RPC_RESULT_CONSTRUCTOR,
+            actual: constructor,
+        }));
+    }
+    let request_message_id = reader.read_i64()?;
+    let result_length = reader.remaining();
+    if result_length < 4 || !result_length.is_multiple_of(4) {
+        return Err(ApiRequestError::InvalidRpcResultBodyLength(result_length));
+    }
+    let result_body = input[reader.position()..].to_vec();
+    Ok(RpcResultEnvelope {
+        request_message_id,
+        result_body,
+    })
 }
 
 pub fn build_msg_resend_req(message_ids: &[i64]) -> Result<Vec<u8>, ApiRequestError> {
@@ -1025,9 +1055,10 @@ mod authorization_identity_contract_tests {
 mod mtproto_service_builder_contract_tests {
     use super::{
         build_msg_resend_req, build_msgs_ack, build_msgs_state_req, parse_msgs_ack,
-        parse_msgs_all_info, parse_msgs_state_info, parse_pong, MSGS_ACK_CONSTRUCTOR,
-        MSGS_ALL_INFO_CONSTRUCTOR, MSGS_STATE_INFO_CONSTRUCTOR, MSGS_STATE_REQ_CONSTRUCTOR,
-        MSG_RESEND_REQ_CONSTRUCTOR, PONG_CONSTRUCTOR,
+        parse_msgs_all_info, parse_msgs_state_info, parse_pong, parse_rpc_result,
+        MSGS_ACK_CONSTRUCTOR, MSGS_ALL_INFO_CONSTRUCTOR, MSGS_STATE_INFO_CONSTRUCTOR,
+        MSGS_STATE_REQ_CONSTRUCTOR, MSG_RESEND_REQ_CONSTRUCTOR, PONG_CONSTRUCTOR,
+        RPC_RESULT_CONSTRUCTOR,
     };
     use crate::tl::TlWriter;
 
@@ -1068,6 +1099,31 @@ mod mtproto_service_builder_contract_tests {
         writer.write_i64(200);
         writer.write_i32(0);
         assert!(parse_pong(writer.as_slice()).is_err());
+    }
+
+    #[test]
+    fn rpc_result_parses_fixed_u_request_id_and_preserves_opaque_result() {
+        let request_message_id = 0x5152_5354_5556_5758_i64;
+        let result_constructor = 0x9972_75b5_u32;
+        let mut writer = TlWriter::new();
+        writer.write_u32(RPC_RESULT_CONSTRUCTOR);
+        writer.write_i64(request_message_id);
+        writer.write_u32(result_constructor);
+        let parsed = parse_rpc_result(writer.as_slice()).expect("parse rpc_result");
+        assert_eq!(parsed.request_message_id, request_message_id);
+        assert_eq!(parsed.result_body, result_constructor.to_le_bytes());
+    }
+
+    #[test]
+    fn rpc_result_rejects_missing_or_unaligned_result_object() {
+        let mut writer = TlWriter::new();
+        writer.write_u32(RPC_RESULT_CONSTRUCTOR);
+        writer.write_i64(100);
+        assert!(parse_rpc_result(writer.as_slice()).is_err());
+
+        let mut unaligned = writer.into_bytes();
+        unaligned.push(0xff);
+        assert!(parse_rpc_result(&unaligned).is_err());
     }
 
     #[test]

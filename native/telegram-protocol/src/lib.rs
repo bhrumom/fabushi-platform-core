@@ -27,9 +27,10 @@ pub use api::{
     parse_account_email_verified, parse_account_password_prefix, parse_account_sent_email_code,
     parse_auth_authorization_user_id, parse_auth_password_recovery, parse_auth_sent_code, parse_bool,
     parse_config_dc_directory_prefix, parse_msgs_ack, parse_msgs_all_info, parse_msgs_state_info,
-    parse_pong, try_parse_rpc_error,
+    parse_pong, parse_rpc_result, try_parse_rpc_error,
     AccountPasswordState, ApiRequestError, ConfigDcDirectory, EmailVerifiedResult, InitConnection,
-    MsgsAllInfo, MsgsStateInfo, NextCodeType, PasswordRecovery, Pong, RpcErrorResponse, SentCode,
+    MsgsAllInfo, MsgsStateInfo, NextCodeType, PasswordRecovery, Pong, RpcErrorResponse,
+    RpcResultEnvelope, SentCode,
     SentCodeDelivery, SentCodeResult, SentEmailCode,
     ACCOUNT_EMAIL_VERIFIED_CONSTRUCTOR, ACCOUNT_EMAIL_VERIFIED_LOGIN_CONSTRUCTOR,
     ACCOUNT_GET_PASSWORD_CONSTRUCTOR, ACCOUNT_PASSWORD_CONSTRUCTOR,
@@ -46,7 +47,7 @@ pub use api::{
     INIT_CONNECTION_CONSTRUCTOR, INVOKE_WITH_LAYER_CONSTRUCTOR, MSG_RESEND_REQ_CONSTRUCTOR,
     MSGS_ACK_CONSTRUCTOR, MSGS_ALL_INFO_CONSTRUCTOR, MSGS_STATE_INFO_CONSTRUCTOR,
     MSGS_STATE_REQ_CONSTRUCTOR, MTPROTO_LAYER, PASSWORD_KDF_ALGO_CONSTRUCTOR, PONG_CONSTRUCTOR,
-    RPC_ERROR_CONSTRUCTOR,
+    RPC_ERROR_CONSTRUCTOR, RPC_RESULT_CONSTRUCTOR,
     USER_CONSTRUCTOR, USER_EMPTY_CONSTRUCTOR,
 };
 pub use auth::{
