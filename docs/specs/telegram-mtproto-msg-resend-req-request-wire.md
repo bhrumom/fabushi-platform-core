@@ -181,4 +181,16 @@ produced in Stage A. No executable evidence is produced or claimed.
 
 ## 17. Spec compliance record
 
-Pending implementation/bookkeeping readback for this Stage-A slice. Executable validation remains intentionally not run.
+| Requirement / AC | Status | Evidence / reason |
+| --- | --- | --- |
+| R1-R8 | passed | Remote source readback at platform checkpoint 161d78f68715540e733c43895aba2f1be4619755: api.rs@ebfb3670b5cd097b9ce288782c7954f5cfe9fc43 preserves constructor 0x7d861a08 and exact constructor/Vector/count/i64 order; tl.rs@89256ab35184b6dc06a095ab34abb9f44e95a264 preserves canonical Vector framing plus usize-to-i32 overflow failure before header emission; lib.rs@abab39e42f100972484191f0e52e9edd9b88c6cf exports the same builder. Fixed-U SessionPrivate::tryToSend emits msg_resend_req only for non-empty _resendRequestData, while arbitrary resend-history lifecycle remains explicitly outside this slice. |
+| R9 | passed | Canonical authored-only contract file is native/telegram-protocol/tests/protocol_contract.rs@89692a28620b2d8465703a1335458d5fbd15aee6 from commit 161d78f68715540e733c43895aba2f1be4619755; desktop mirror commit 37299e18e3018e988d541607d5ba7842713d9fd1 has the same blob. Cases cover zero, one, multiple signed longs, exact EOF and vector-count overflow/no-partial-header. They were not executed. |
+| AC-1 | passed | Production api/tl/lib blobs remain ebfb3670b5cd097b9ce288782c7954f5cfe9fc43 / 89256ab35184b6dc06a095ab34abb9f44e95a264 / abab39e42f100972484191f0e52e9edd9b88c6cf; no production behavior delta was made. |
+| AC-2 | passed | Authored contract commit 161d78f68715540e733c43895aba2f1be4619755 and blob 89692a28620b2d8465703a1335458d5fbd15aee6 lock R1-R7; executable validation is intentionally deferred. |
+| AC-3 | passed | Desktop production api remains ebfb3670b5cd097b9ce288782c7954f5cfe9fc43, desktop facade remains abab39e42f100972484191f0e52e9edd9b88c6cf, and desktop contract mirror is byte-identical at 89692a28620b2d8465703a1335458d5fbd15aee6. |
+| AC-4 | passed | Desktop ledger/evidence commit 5cd36cdd14e7321b0d96526f334b1f97e4243510 and P0/source-closure sync commit f0500022cdb18c66f4d2dbef98479c77e0bea61f record fixed-U identities, no-production-delta disposition and open broader lifecycle boundaries. |
+| AC-5 | passed | Existing parity ledger records TDRP-R9-MTPROTO-MSG-RESEND-REQ-REQUEST-WIRE-001 as implemented / validation_status=not-run / accepted=false with responsibilities_total=92, unknown=16172, unread=16145, omitted=0. |
+| AC-6 | passed | This Stage-A round performed source/blob readback and authored/saved code/docs only. No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E execution, GitHub Actions/status/check query, package, deploy, install or runtime acceptance was performed; arbitrary multi-request history remains open/fail-closed. |
+
+Source-level compliance is complete for this isolated request-wire slice. This does not constitute executable
+verification, candidate readiness, release acceptance, or closure of the broader migration.
