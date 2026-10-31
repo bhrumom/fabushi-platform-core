@@ -1,6 +1,7 @@
 use fabushi_telegram_protocol::{
     aes_ige_encrypt, build_auth_send_code, build_auth_sign_in, build_auth_sign_up,
     build_init_connection_get_config, build_msgs_ack, build_p_q_inner_data_dc, build_req_dh_params,
+    build_req_pq_multi,
     decrypt_message, decrypt_server_dh_inner_data, derive_aes_key_iv, derive_tmp_aes_key_iv,
     encrypt_message, factor_res_pq, parse_dh_gen_result, parse_schema_catalog,
     parse_server_dh_params, parse_td_api_schema, prepare_client_dh, quick_ack_token,
@@ -925,6 +926,29 @@ fn sequence_numbers_follow_content_related_rules() {
 }
 
 #[test]
+fn req_pq_multi_builder_serializes_fixed_u_nonce_exactly() {
+    let nonce = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+    ];
+    let encoded = build_req_pq_multi(&nonce);
+    assert_eq!(encoded.len(), 20);
+    assert_eq!(&encoded[0..4], &REQ_PQ_MULTI_CONSTRUCTOR.to_le_bytes());
+    assert_eq!(&encoded[4..20], &nonce);
+}
+
+#[test]
+fn req_pq_multi_builder_preserves_raw_int128_bytes_without_tl_bytes_framing() {
+    for nonce in [[0_u8; 16], [0xff_u8; 16]] {
+        let encoded = build_req_pq_multi(&nonce);
+        let mut expected = Vec::with_capacity(20);
+        expected.extend_from_slice(&REQ_PQ_MULTI_CONSTRUCTOR.to_le_bytes());
+        expected.extend_from_slice(&nonce);
+        assert_eq!(encoded, expected);
+    }
+}
+
+#[test]
 fn plaintext_envelope_and_req_pq_multi_begin_auth_key_exchange() {
     let nonce = [0x11; 16];
     let mut handshake = AuthKeyHandshake::new(nonce);
@@ -935,6 +959,7 @@ fn plaintext_envelope_and_req_pq_multi_begin_auth_key_exchange() {
         REQ_PQ_MULTI_CONSTRUCTOR
     );
     assert_eq!(&request.body[4..], &nonce);
+    assert_eq!(request.body, build_req_pq_multi(&nonce));
     assert_eq!(handshake.state(), &AuthKeyHandshakeState::AwaitingResPq);
 
     let encoded = request.encode().unwrap();
