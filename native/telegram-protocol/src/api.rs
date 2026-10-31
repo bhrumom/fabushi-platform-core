@@ -27,6 +27,7 @@ pub const RPC_ANSWER_DROPPED_RUNNING_CONSTRUCTOR: u32 = 0xcd78_e586;
 pub const RPC_ANSWER_DROPPED_CONSTRUCTOR: u32 = 0xa43a_d8b7;
 pub const DESTROY_SESSION_OK_CONSTRUCTOR: u32 = 0xe220_45fc;
 pub const DESTROY_SESSION_NONE_CONSTRUCTOR: u32 = 0x62d3_50c9;
+pub const HTTP_WAIT_CONSTRUCTOR: u32 = 0x9299_359f;
 pub const MESSAGE_CONTAINER_CONSTRUCTOR: u32 = 0x73f1_f8dc;
 pub const MAX_MESSAGE_CONTAINER_ENTRIES: usize = 1024;
 pub const MSG_RESEND_REQ_CONSTRUCTOR: u32 = 0x7d86_1a08;
@@ -265,6 +266,13 @@ pub enum RpcDropAnswer {
 pub enum DestroySessionResult {
     Ok { session_id: i64 },
     None { session_id: i64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpWait {
+    pub max_delay: i32,
+    pub wait_after: i32,
+    pub max_wait: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -585,6 +593,26 @@ pub fn parse_destroy_session_result(
         return Err(ApiRequestError::TrailingBytes(reader.remaining()));
     }
     Ok(result)
+}
+
+pub fn parse_http_wait(input: &[u8]) -> Result<HttpWait, ApiRequestError> {
+    let mut reader = TlReader::new(input);
+    let constructor = reader.read_u32()?;
+    if constructor != HTTP_WAIT_CONSTRUCTOR {
+        return Err(ApiRequestError::Tl(TlError::UnexpectedConstructor {
+            expected: HTTP_WAIT_CONSTRUCTOR,
+            actual: constructor,
+        }));
+    }
+    let wait = HttpWait {
+        max_delay: reader.read_i32()?,
+        wait_after: reader.read_i32()?,
+        max_wait: reader.read_i32()?,
+    };
+    if !reader.is_finished() {
+        return Err(ApiRequestError::TrailingBytes(reader.remaining()));
+    }
+    Ok(wait)
 }
 
 pub fn parse_message_container(input: &[u8]) -> Result<MessageContainer, ApiRequestError> {
@@ -1364,11 +1392,12 @@ mod mtproto_service_builder_contract_tests {
         build_msg_resend_req, build_msgs_ack, build_msgs_state_req, parse_bad_msg_notification,
         parse_bad_server_salt,
         parse_future_salts, parse_msg_detailed_info, parse_msg_new_detailed_info, parse_msgs_ack,
-        parse_destroy_session_result, parse_message_container, parse_msgs_all_info,
+        parse_destroy_session_result, parse_http_wait, parse_message_container, parse_msgs_all_info,
         parse_msgs_state_info, parse_pong, parse_rpc_drop_answer, parse_rpc_result,
         BAD_MSG_NOTIFICATION_CONSTRUCTOR, BAD_SERVER_SALT_CONSTRUCTOR,
         DESTROY_SESSION_NONE_CONSTRUCTOR, DESTROY_SESSION_OK_CONSTRUCTOR, DestroySessionResult,
-        FUTURE_SALTS_CONSTRUCTOR, RpcDropAnswer, RPC_ANSWER_DROPPED_CONSTRUCTOR,
+        FUTURE_SALTS_CONSTRUCTOR, HTTP_WAIT_CONSTRUCTOR, RpcDropAnswer,
+        RPC_ANSWER_DROPPED_CONSTRUCTOR,
         RPC_ANSWER_DROPPED_RUNNING_CONSTRUCTOR, RPC_ANSWER_UNKNOWN_CONSTRUCTOR,
         FUTURE_SALT_CONSTRUCTOR, MESSAGE_CONTAINER_CONSTRUCTOR, MSG_DETAILED_INFO_CONSTRUCTOR,
         MSG_NEW_DETAILED_INFO_CONSTRUCTOR, MSGS_ACK_CONSTRUCTOR,
@@ -1566,6 +1595,43 @@ mod mtproto_service_builder_contract_tests {
         let mut trailing = exact;
         trailing.extend_from_slice(&0_u32.to_le_bytes());
         assert!(parse_destroy_session_result(&trailing).is_err());
+    }
+
+    #[test]
+    fn http_wait_parses_all_fixed_u_fields_exactly() {
+        let mut writer = TlWriter::new();
+        writer.write_u32(HTTP_WAIT_CONSTRUCTOR);
+        writer.write_i32(100);
+        writer.write_i32(30);
+        writer.write_i32(25_000);
+        let parsed = parse_http_wait(writer.as_slice()).expect("parse http_wait");
+        assert_eq!(parsed.max_delay, 100);
+        assert_eq!(parsed.wait_after, 30);
+        assert_eq!(parsed.max_wait, 25_000);
+    }
+
+    #[test]
+    fn http_wait_rejects_wrong_constructor_truncation_and_trailing_bytes() {
+        let mut wrong = TlWriter::new();
+        wrong.write_u32(0);
+        wrong.write_i32(100);
+        wrong.write_i32(30);
+        wrong.write_i32(25_000);
+        assert!(parse_http_wait(wrong.as_slice()).is_err());
+
+        let mut exact = TlWriter::new();
+        exact.write_u32(HTTP_WAIT_CONSTRUCTOR);
+        exact.write_i32(-1);
+        exact.write_i32(i32::MIN);
+        exact.write_i32(i32::MAX);
+        let exact = exact.into_bytes();
+        for cut in 0..exact.len() {
+            assert!(parse_http_wait(&exact[..cut]).is_err());
+        }
+
+        let mut trailing = exact;
+        trailing.extend_from_slice(&0_u32.to_le_bytes());
+        assert!(parse_http_wait(&trailing).is_err());
     }
 
     #[test]
