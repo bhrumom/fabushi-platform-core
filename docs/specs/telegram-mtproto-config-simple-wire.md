@@ -153,3 +153,14 @@ Disposition remains **no production delta**. Live canonical production blobs are
 Special-config acquisition/decryption/expiry/phone-prefix/DC endpoint application, connection scheduling, arbitrary request/container history, auth-key binding/persistence, `gzip_packed`, and complete difference/differenceSlice decoding/application remain outside this wire-only responsibility and must not be synthesized here.
 
 No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, or runtime acceptance is permitted or claimed by this revalidation.
+
+
+## Round 65 final source-level compliance
+
+Spec-first revalidation commit is `99bb755e64a1fb96889acf0b4b673f855f5e48b6` / spec blob `a80fb4dd9dd7a6855fb28162ba03716daa000b09`. The authored-only public API regression contract is canonical commit `2d78cb1aa4ad7e7edb3a31bb596b9eb79e610d32` / blob `bc5c49ee5be958a49f16d7c14617e51e47c3961b`, mirrored byte-identically into the desktop provider at commit `231337450087a652b678747b98359914c20c8058` with the same blob.
+
+Source-level disposition remains **no production delta**. The live canonical production blobs are api `ebfb3670b5cd097b9ce288782c7954f5cfe9fc43` and lib `abab39e42f100972484191f0e52e9edd9b88c6cf`; live desktop provider api/lib readback is byte-identical. The external contract pins the public parsers independently of their internal module tests: it preserves signed field values and binary secrets through nested config decoding, accepts empty `rules` at the wire layer rather than importing Telegram Desktop's higher-level non-empty policy, and rejects every truncation boundary, wrong top-level/nested/vector constructors, and trailing bytes for the public IpPort/AccessPointRule/help.ConfigSimple entrypoints.
+
+The higher `SpecialConfigRequest` acquisition/decryption/HTTP-time/expiry/phone-prefix/IP conversion/DC callback lifecycle remains deliberately separate and fail-closed/open; no DC directory mutation, request-history state, connection scheduling, auth-key persistence/binding, gzip runtime, or complete difference decoder/application was introduced.
+
+The existing ledger responsibility `TDRP-R9-MTPROTO-CONFIG-SIMPLE-WIRE-001` remains `implemented / validation_status=not-run / accepted=false`. The newly authored external contract was not executed. No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, or runtime acceptance was performed.
