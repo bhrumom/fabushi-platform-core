@@ -89,8 +89,8 @@ pub use generated::{
     WIRE_CONSTRUCTORS,
 };
 pub use handshake::{
-    build_client_dh_inner_data, build_p_q_inner_data_dc, build_req_dh_params,
-    build_set_client_dh_params, decrypt_server_dh_inner_data,
+    build_client_dh_inner_data, build_p_q_inner_data_dc, build_p_q_inner_data_temp_dc,
+    build_req_dh_params, build_set_client_dh_params, decrypt_server_dh_inner_data,
     derive_tmp_aes_key_iv, factor_res_pq, parse_dh_gen_result, parse_res_pq,
     parse_server_dh_params, prepare_client_dh, rsa_pad, rsa_pad_with_random,
     select_server_key_fingerprint, telegram_server_rsa_key, validate_server_dh_parameters,
@@ -99,7 +99,7 @@ pub use handshake::{
     ServerDhInnerData, ServerDhParams, CLIENT_DH_INNER_DATA_CONSTRUCTOR,
     DEFAULT_MAX_PLAINTEXT_BODY, DH_GEN_FAIL_CONSTRUCTOR, DH_GEN_OK_CONSTRUCTOR,
     DH_GEN_RETRY_CONSTRUCTOR, KNOWN_DH_PRIME_HEX, P_Q_INNER_DATA_DC_CONSTRUCTOR,
-    REQ_DH_PARAMS_CONSTRUCTOR, RES_PQ_CONSTRUCTOR,
+    P_Q_INNER_DATA_TEMP_DC_CONSTRUCTOR, REQ_DH_PARAMS_CONSTRUCTOR, RES_PQ_CONSTRUCTOR,
     SERVER_DH_INNER_DATA_CONSTRUCTOR, SERVER_DH_PARAMS_FAIL_CONSTRUCTOR,
     SERVER_DH_PARAMS_OK_CONSTRUCTOR, SET_CLIENT_DH_PARAMS_CONSTRUCTOR,
     TELEGRAM_MAIN_RSA_MODULUS_HEX, TELEGRAM_TEST_RSA_MODULUS_HEX,
