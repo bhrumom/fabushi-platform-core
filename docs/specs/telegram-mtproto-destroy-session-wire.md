@@ -85,3 +85,15 @@ Canonical implementation commit: `cfe6a0564c40d2c9b9ea62b686470139a1eeb2ab`. Can
 - R7: satisfied by remote blob readback — desktop provider api/lib blobs are byte-identical to canonical api/lib blobs.
 
 Acceptance criteria AC1-AC5 are satisfied at source/implementation level. AC6 remains intentionally **blocked/not-run** until Stage B executable validation. No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried in this review.
+
+
+## Round 35 request-side source-level implementation review
+
+Canonical request implementation commit: `5f259ca296432384f5388ffef9539dbbf1f4033a`. Canonical blobs: protocol api `2f0c2893e256064f822082dd2fd7deae394b5763`, protocol lib `05c690a72f5f9b5a547f10486a5289229d7bb0ff`. Desktop synchronization commit: `28d36535b4d4d342b72c6a0e35752ce56dbcfd26`; desktop bookkeeping/evidence commit: `f3fdcfaffa64e44850be9527669b3d972ff658a7`.
+
+- R8-R11: satisfied by source inspection — `DESTROY_SESSION_CONSTRUCTOR` is exactly `0xe7512126`; `build_destroy_session` writes constructor then one `session_id:i64` through the existing TL writer, producing exactly 12 bytes and imposing no policy transformation.
+- R12: satisfied by source inspection — request serialization is a distinct function and constructor from `parse_destroy_session_result`; authored separation contracts explicitly reject request bytes at the response parser boundary.
+- R13: satisfied at authored-contract level — exact layout, representative value, and signed i64 minimum/maximum contracts exist and were not run.
+- R14: satisfied as an explicit boundary — the builder touches no socket, timer, session state, request history, persistence, or teardown lifecycle. Live outbound destroy-session/teardown ownership remains fail-closed/open.
+
+Acceptance criteria AC7-AC10 are satisfied at source/implementation/bookkeeping level except executable validation, which remains intentionally blocked/not-run until Stage B. Remote desktop bookkeeping records `TDRP-R9-MTPROTO-DESTROY-SESSION-REQUEST-WIRE-001` as implemented, `validation_status=not-run`, `accepted=false`. No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried.
