@@ -125,3 +125,17 @@ Round-62 authored-only external contracts SHALL pin the exact 28-byte object, fi
 The existing ledger responsibility `TDRP-R9-MTPROTO-NEW-SESSION-WIRE-001` remains the sole row and stays `implemented / validation_status=not-run / accepted=false`. Arbitrary `wasSent/haveSent/_resendingIds/toSend/_sentContainers` history, broader connection scheduling, auth-key binding/persistence, `gzip_packed`, and complete `updates.difference/updates.differenceSlice` decoding/application remain outside this wire-only revalidation or open/fail-closed.
 
 No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, or runtime acceptance is permitted or claimed for this Stage-A revalidation.
+
+
+## Round 62 final source-level compliance
+
+Remote desktop readback closes this adjacent fixed-U `NewSession` wire revalidation at source level with **no production delta**.
+
+- Canonical production protocol updates/lib/network blobs remain `23a09bb6e4e78ef526823cf01d0a207565fb2a3e` / `abab39e42f100972484191f0e52e9edd9b88c6cf` / `1fc1b1f69e3e37377400d078f916599e0c7b20bc`.
+- The authored-only canonical external contract is commit `0db067351aef9365ada9e168f041599983dc1693`, blob `32a60800c34d53223fed2f1e4aa521e300b510d7`.
+- Desktop mirrors that contract byte-identically and synchronizes evidence/ledger/P0/source-closure in commit `f21b763c3ce954b49d7fc06afcb188a13f3160f3`.
+- Desktop remote readback reports contract / ledger / P0 / source-closure / round93 evidence blobs as `32a60800c34d53223fed2f1e4aa521e300b510d7` / `74c3320ab5cfcd62510b023dfd0d23adac120761` / `6b67537ecccf6b3ba0dee1285ac8a90b379c5610` / `ae80906f597a0421749e0e2be8c2791f6dce315c` / `99ed0083b64743b3b8fe4d79d2aa2013dbc1bdea`.
+- The existing `TDRP-R9-MTPROTO-NEW-SESSION-WIRE-001` row remains `implemented / validation_status=not-run / accepted=false`; no duplicate responsibility is created.
+- Arbitrary multi-request history, connection scheduling, auth-key binding/persistence, gzip, complete difference decoding/application, broader source/legal closure, Stage-B executable evidence, and independent release ACCEPT remain open or outside this wire-only claim.
+
+No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, or runtime acceptance was performed.
