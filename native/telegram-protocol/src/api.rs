@@ -20,6 +20,7 @@ pub const AUTH_AUTHORIZATION_SIGN_UP_REQUIRED_CONSTRUCTOR: u32 = 0x4474_7e9a;
 pub const USER_EMPTY_CONSTRUCTOR: u32 = 0xd3bc_4b7a;
 pub const USER_CONSTRUCTOR: u32 = 0xb1b8_cc83;
 pub const MSGS_ACK_CONSTRUCTOR: u32 = 0x62d6_b459;
+pub const PONG_CONSTRUCTOR: u32 = 0x3477_73c5;
 pub const MSG_RESEND_REQ_CONSTRUCTOR: u32 = 0x7d86_1a08;
 pub const MSGS_STATE_REQ_CONSTRUCTOR: u32 = 0xda69_fb52;
 pub const MSGS_STATE_INFO_CONSTRUCTOR: u32 = 0x04de_b57d;
@@ -177,6 +178,12 @@ pub struct MsgsStateInfo {
 pub struct MsgsAllInfo {
     pub message_ids: Vec<i64>,
     pub states: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pong {
+    pub message_id: i64,
+    pub ping_id: i64,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -399,6 +406,25 @@ pub fn parse_msgs_ack(input: &[u8]) -> Result<Vec<i64>, ApiRequestError> {
         return Err(ApiRequestError::TrailingBytes(reader.remaining()));
     }
     Ok(message_ids)
+}
+
+pub fn parse_pong(input: &[u8]) -> Result<Pong, ApiRequestError> {
+    let mut reader = TlReader::new(input);
+    let constructor = reader.read_u32()?;
+    if constructor != PONG_CONSTRUCTOR {
+        return Err(ApiRequestError::Tl(TlError::UnexpectedConstructor {
+            expected: PONG_CONSTRUCTOR,
+            actual: constructor,
+        }));
+    }
+    let pong = Pong {
+        message_id: reader.read_i64()?,
+        ping_id: reader.read_i64()?,
+    };
+    if !reader.is_finished() {
+        return Err(ApiRequestError::TrailingBytes(reader.remaining()));
+    }
+    Ok(pong)
 }
 
 pub fn build_msg_resend_req(message_ids: &[i64]) -> Result<Vec<u8>, ApiRequestError> {
@@ -999,9 +1025,9 @@ mod authorization_identity_contract_tests {
 mod mtproto_service_builder_contract_tests {
     use super::{
         build_msg_resend_req, build_msgs_ack, build_msgs_state_req, parse_msgs_ack,
-        parse_msgs_all_info, parse_msgs_state_info, MSGS_ACK_CONSTRUCTOR,
+        parse_msgs_all_info, parse_msgs_state_info, parse_pong, MSGS_ACK_CONSTRUCTOR,
         MSGS_ALL_INFO_CONSTRUCTOR, MSGS_STATE_INFO_CONSTRUCTOR, MSGS_STATE_REQ_CONSTRUCTOR,
-        MSG_RESEND_REQ_CONSTRUCTOR,
+        MSG_RESEND_REQ_CONSTRUCTOR, PONG_CONSTRUCTOR,
     };
     use crate::tl::TlWriter;
 
@@ -1019,6 +1045,29 @@ mod mtproto_service_builder_contract_tests {
         let mut encoded = build_msgs_ack(&[0x2122_2324_2526_2728_i64]).expect("encode ack");
         encoded.extend_from_slice(&0_i32.to_le_bytes());
         assert!(parse_msgs_ack(&encoded).is_err());
+    }
+
+    #[test]
+    fn pong_parses_fixed_u_message_and_ping_ids() {
+        let message_id = 0x3132_3334_3536_3738_i64;
+        let ping_id = 0x4142_4344_4546_4748_i64;
+        let mut writer = TlWriter::new();
+        writer.write_u32(PONG_CONSTRUCTOR);
+        writer.write_i64(message_id);
+        writer.write_i64(ping_id);
+        let parsed = parse_pong(writer.as_slice()).expect("parse pong");
+        assert_eq!(parsed.message_id, message_id);
+        assert_eq!(parsed.ping_id, ping_id);
+    }
+
+    #[test]
+    fn pong_rejects_trailing_bytes() {
+        let mut writer = TlWriter::new();
+        writer.write_u32(PONG_CONSTRUCTOR);
+        writer.write_i64(100);
+        writer.write_i64(200);
+        writer.write_i32(0);
+        assert!(parse_pong(writer.as_slice()).is_err());
     }
 
     #[test]

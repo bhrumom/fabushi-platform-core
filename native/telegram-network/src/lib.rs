@@ -661,12 +661,17 @@ impl EstablishedSession {
     ) -> Result<ServiceOutcome, NetworkError> {
         match read_u32_at(body, 0)? {
             PONG_CONSTRUCTOR => {
-                let response_message_id = read_i64_at(body, 4)?;
-                let response_ping_id = read_i64_at(body, 12)?;
-                if response_message_id != request_message_id || response_ping_id != ping_id {
+                let pong = fabushi_telegram_protocol::parse_pong(body)
+                    .map_err(|_| NetworkError::InvalidServiceMessage)?;
+                if !pong_matches_request(
+                    pong.message_id,
+                    pong.ping_id,
+                    request_message_id,
+                    ping_id,
+                ) {
                     return Err(NetworkError::PingMismatch);
                 }
-                Ok(ServiceOutcome::Pong(response_message_id))
+                Ok(ServiceOutcome::Pong(pong.message_id))
             }
             NEW_SESSION_CREATED_CONSTRUCTOR => {
                 self.server_salt = read_i64_at(body, 20)?;
@@ -789,6 +794,15 @@ fn acknowledgement_mentions_request(
     request_message_id: i64,
 ) -> bool {
     message_ids.contains(&request_message_id)
+}
+
+fn pong_matches_request(
+    response_message_id: i64,
+    response_ping_id: i64,
+    request_message_id: i64,
+    ping_id: i64,
+) -> bool {
+    response_message_id == request_message_id && response_ping_id == ping_id
 }
 
 fn request_state_requires_resend(state: u8) -> bool {
@@ -1015,7 +1029,7 @@ mod recovery_contract_tests {
     use super::{
         acknowledgement_mentions_request, bad_message_recovery_action,
         direct_bad_message_time_recovery, detailed_info_matches_request,
-        new_session_requires_replay, request_state_requires_resend,
+        new_session_requires_replay, pong_matches_request, request_state_requires_resend,
         state_reconciliation_requires_resend, BadMessageRecoveryAction,
         BAD_MSG_NOTIFICATION_CONSTRUCTOR,
     };
@@ -1067,6 +1081,13 @@ mod recovery_contract_tests {
         assert!(acknowledgement_mentions_request(&[100, 200, 300], 200));
         assert!(!acknowledgement_mentions_request(&[100, 200, 300], 400));
         assert!(!acknowledgement_mentions_request(&[], 200));
+    }
+
+    #[test]
+    fn fixed_u_pong_matches_only_the_current_outstanding_ping() {
+        assert!(pong_matches_request(100, 200, 100, 200));
+        assert!(!pong_matches_request(101, 200, 100, 200));
+        assert!(!pong_matches_request(100, 201, 100, 200));
     }
 
     #[test]
