@@ -112,11 +112,12 @@ Repository commits and exact blob SHAs are the Stage A evidence. Runtime RPC err
 
 | Requirement / AC | Status | Evidence / reason |
 | --- | --- | --- |
-| R1-R9 | implemented / not-run | Protocol commit 314e8804ddfc997acdde2c19bff831b5e26b1706, encrypted storage commit bcb8298a4622616f2f8a226899c0e3dc8aa3ba8f, and runtime commit ec854e93fb1523d95225203554600858798e4981 implement the specified owners. Executable validation was intentionally not run in Stage A. |
-| R10 | implemented | Contract tests are authored in protocol/storage/runtime test owners and remain unexecuted. |
-| AC-1-AC-3 | implemented / not-run | Runtime/protocol/storage source is committed on the isolated checkpoint; no executable verification is claimed. |
-| AC-4 | implemented / not-run | Desktop checkpoint 169d6cc7798507f0302d6c93fef7deef1a302d28 wires all seven commands through the existing TelegramClientLease and feature.auth chain. |
-| AC-5-AC-6 | implemented / not-run | Test execution evidence remains empty; migration ledger/evidence update is performed in the desktop checkpoint and acceptance remains false. |
+| R1-R9 | implemented / not-run | Original lifecycle primitives remain present and are fused into the canonical identity/transport runtime through commits 6b1a75a74f5ee2b100f70d905051bf961a040585, b2a45edb2e4e3e62a1543410e9ad87f4c1a87e2a and 4fbff4f54caed03b7b1ba68efe2f008fa4447622. Executable validation was intentionally not run in Stage A. |
+| R10 | implemented | Contract tests are authored in protocol/storage/runtime test owners and remain unexecuted; historical-v3 migration shapes are corrected in 13f5458aadf19a87c52bfa904f9942d81c88979a. |
+| R11-R13 | implemented / not-run | AuthorizationSnapshot/self_user_id, auth.Authorization identity parsing, resumable transport, serializable SRP challenge state and unified storage schema v4 are committed on this checkpoint. |
+| R14 | implemented / not-run | Desktop checkpoint 43d9d398801f2885da982d106c17a74efb1f9472 carries the exact Mahayana workspace/path manifests and synchronized providers/telegram-* production blobs; authored integration contracts continue through 221a661e17f2ad417e349df6604815d3fbfa946f. |
+| R15 | implemented | Composition, runtime, protocol and both historical v3 storage migration contracts are authored only; no executable evidence exists yet. |
+| AC-1-AC-6 | implemented / not-run | Production and ledger/source-closure evidence is committed; acceptance remains false until Stage B executable verification and independent review. |
 
 ## 17A. Composition authority reconciliation (round 17)
 
@@ -138,12 +139,20 @@ Additional requirements:
 
 Canonical platform-core checkpoint: `checkpoint/tdrp-telegram-auth-lifecycle-7457eb1c-r16`.
 
-- protocol source: `native/telegram-protocol/src/api.rs@f680705bd87a26e39e9fb0d9bd83337e338512f3`
-- protocol exports: `native/telegram-protocol/src/lib.rs@fd74519aefe597ff127fa9a2b8067eaa4d8cdb01`
-- protocol authored tests: `native/telegram-protocol/tests/protocol_contract.rs@4d6bec0d84016fc7651c69985ad19f005f22eaa1`
-- encrypted runtime-state storage: `native/telegram-storage/src/sqlite.rs@b07f8e95efba8a2f910f4d85345deb2619c23a84`
-- storage authored tests: `native/telegram-storage/tests/encrypted_store.rs@9103d6d7118f82c7252d27e771a9c352c6b4f548`
-- runtime commands/persistence: `native/telegram-runtime/src/runtime.rs@adb9d29f352cc8e8a62ecdb90e77d546d78b05b3`
-- runtime authored tests: `native/telegram-runtime/tests/runtime_ffi.rs@fcb63dc714a05337732e4318aaaa24f8f582ef3a`
+- composition/spec reconciliation commit: `399f0fdf4d56e8c129118825a34f7d1aa13b6dc1`
+- protocol identity/lifecycle source: `native/telegram-protocol/src/api.rs@751219099926a809d455d31b005c48a841d879f2`
+- protocol exports: `native/telegram-protocol/src/lib.rs@34bcd749f758cfd3f562b6e701ee10eb51d5d0c2`
+- serializable SRP challenge state: `native/telegram-protocol/src/srp.rs@06ff7c4ed54f445c9df8bf96deb1deb7defe4939`
+- transport resume primitive: `native/telegram-network/src/lib.rs@24e236df503e273490e44645251d757e30712ea3`
+- unified encrypted schema-v4 storage: `native/telegram-storage/src/sqlite.rs@e6cc314ec749f8a258bfe0125a25beb3613eb2ca`
+- both-v3-shape authored storage contracts: `native/telegram-storage/tests/encrypted_store.rs@ecde6882fc7265eee0f1c2714a8eb4fa1543d63f`
+- fused runtime identity/transport/lifecycle owner: `native/telegram-runtime/src/runtime.rs@10031c5261bb0810ad2df2fca3de2e2fe4f65301`
+- runtime public projection: `native/telegram-runtime/src/lib.rs@0c79707ba1e0932de15fad3c57ad00fcb9682aff`
+- runtime manifest with persisted-state serde support: `native/telegram-runtime/Cargo.toml@a0d5aee63c886b11c3ad8fbf37885e0a3c5b6053`
+- authored runtime contracts: `native/telegram-runtime/tests/runtime_ffi.rs@97eb341731e6122f615aeac2aba5eaa12d3a9fbd`
+- current implementation/test checkpoint before this evidence-only spec update: `13f5458aadf19a87c52bfa904f9942d81c88979a`
+- desktop static Cargo/provider composition: `bhrumom/fabushi-desktop@43d9d398801f2885da982d106c17a74efb1f9472`
+- desktop authored composition/storage/runtime contracts through: `bhrumom/fabushi-desktop@221a661e17f2ad417e349df6604815d3fbfa946f`
+- desktop ledger/P0/source-closure evidence commit: `bhrumom/fabushi-desktop@3f78d4d44d7d5cc9c1892b2ec2cdd945e2367a66`
 
 No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, packaging, deployment, installation, workflow/status query, or runtime acceptance was executed in Stage A.
