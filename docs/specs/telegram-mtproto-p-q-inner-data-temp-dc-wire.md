@@ -43,3 +43,26 @@ Implementation may advance only to `implemented`, `validation_status=not-run`, `
 ## Fail-closed boundary
 
 Local temporary-auth-key expiry enforcement, key renewal, permanent-key binding, broader auth-key persistence/session lifecycle, connection probing/racing, transport send/retry/timeout, arbitrary sent/resend/container histories, gzip, complete updates difference decoding/application, broader fixed-U source/legal closure, Stage-B executable evidence and independent release ACCEPT remain open.
+
+
+## Round 75 source-level compliance readback
+
+Canonical implementation readback at platform-core head `bcd516892fa49407a4de757e05235ed585ad4338` confirms handshake blob `3e740e0714dfca71bb908ec46f182e98605582e5`, facade blob `a2dc3f48a15c7a14657f598d7a5ce4b1fed9ed7f`, and authored-contract blob `748ca5f7962ff0704a630144c7368c067d212de3`. Desktop tracked facade/contracts at `8206a6cc5bdea79e197dc70fd800e021480f3c7c` are byte-identical to the canonical blobs.
+
+| Requirement | Source-level status | Evidence / reason |
+| --- | --- | --- |
+| R1 | passed | `P_Q_INNER_DATA_TEMP_DC_CONSTRUCTOR = 0x56fddf88` is present in canonical `handshake.rs`. |
+| R2 | passed | Public pure `build_p_q_inner_data_temp_dc` writes pq/p/q, nonce, server_nonce, new_nonce, dc_id and expires_in in fixed-U TL order after the existing pq-factor match check. |
+| R3 | passed | `prepare_temporary_req_dh_params*` rejects `expires_in <= 0` before entering the shared preparation helper and otherwise reuses factorization, trusted RSA selection, new_nonce generation, RSA_PAD, req_DH_params framing and the existing state transition. |
+| R4 | passed | Existing `prepare_req_dh_params*` delegates to the same helper with `None`; source readback shows the persistent branch still selects `build_p_q_inner_data_dc`. |
+| R5 | passed | Temporary preparation consumes the existing `ResPqReceived` state and transitions to `AwaitingServerDh`; there is no standalone second handshake owner. |
+| R6 | passed / fail-closed boundary preserved | telegram-network `establish_auth_key` and runtime `bootstrap_transport` were intentionally not changed to temporary establishment because current persisted transport state has no expiry/binding metadata. No temporary key is silently persisted as permanent material. |
+| R7 | passed | Canonical facade exports the builder/constructor; desktop tracked facade/contracts are byte-identical and no second implementation was added. |
+| R8 | authored / not run | Contracts cover exact field order, expires_in=86400, no trailing bytes, non-positive lifetime rejection before state mutation, and temporary prepare transition. Stage A executable validation remains intentionally absent. |
+| R9 | passed | No connection scheduling/racing, message-id policy, plaintext framing, send/retry/timeout, multi-request history, gzip, complete difference decoder, auth-key persistence/binding/renewal, packaging or release logic was added. |
+
+This is source/ownership/bookkeeping compliance, not executable verification or release acceptance. Ledger responsibility `TDRP-R9-MTPROTO-P-Q-INNER-DATA-TEMP-DC-WIRE-001` is `implemented / validation_status=not-run / accepted=false`; desktop ledger blob is `971489ca6ff27838b1ef884a24ced884f60da4ea` with `responsibilities_total=85`, `unknown=16172`, `unread=16145`, `omitted=0`.
+
+Broader temporary-key expiry enforcement, permanent-key binding, renewal/persistence, network/runtime temporary establishment, connection scheduling/racing, plaintext/send lifecycle, arbitrary sent/resend/container histories, gzip, complete difference decoding/application, broader fixed-U source/legal closure, Stage-B evidence and independent release ACCEPT remain open/fail-closed.
+
+No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation or runtime acceptance was performed.
