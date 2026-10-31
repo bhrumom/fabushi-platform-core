@@ -65,3 +65,17 @@ Do not run build, typecheck, lint, schema validation, generators, unit/contract/
 - AC6: Desktop provider copies are byte-identical to canonical protocol/network sources.
 - AC7: No gzip, complete difference decoder, or historical multi-request/container scope is claimed.
 - AC8: Authored tests remain not-run and acceptance remains false until Stage B executable evidence exists.
+
+## Source-level implementation review
+
+Canonical implementation commit: `0e569130a80a53b48b74f8e27a96004363b30e7e`.
+Canonical blobs: protocol api `15e34bbb0e9c5a5d4fdd8b7a9cdedf3d6b123080`, protocol lib `2c4897cfdba4502d8ca880d7a58cfd0e88877bf7`, network `1fc1b1f69e3e37377400d078f916599e0c7b20bc`.
+Desktop synchronization commit: `1205f8709995aa4f5fd5dafdc9fb5121fbfce06c`; desktop provider blobs are byte-identical to those canonical api/lib/network blobs. Desktop bookkeeping/evidence commit: `878c2d671d00f5d50dc149647d038913a53ea3ea`.
+
+- R1-R3: satisfied by source inspection — `telegram-protocol` exports the constructor, typed `BadMsgNotification`, and `parse_bad_msg_notification`; the parser consumes all three fixed-U fields and rejects wrong constructor, truncation, and trailing bytes.
+- R4-R5: satisfied by source inspection — both existing network receive branches call the typed parser before current-request correlation or recovery mutation.
+- R6: satisfied by source inspection — `direct_bad_message_time_recovery` now uses the same typed parser and only accepts the existing 16/17/64 direct-time recovery codes; malformed/trailing bodies return false.
+- R7-R9: satisfied by source inspection — current-request correlation remains one-outstanding-request only; `bad_msg_seqno` is retained in the typed value; the existing 16/17/64 and 32/33 bounded recovery mapping is unchanged.
+- R10: satisfied by remote blob readback — desktop provider copies are byte-identical to canonical sources.
+
+Acceptance criteria AC1-AC7 are satisfied at source/implementation level. AC8 remains intentionally **blocked/not-run** until Stage B executable validation. No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried in this review.
