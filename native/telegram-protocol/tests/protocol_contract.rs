@@ -1205,6 +1205,101 @@ fn rsa_pad_is_deterministic_with_fixed_entropy_and_enforces_payload_limit() {
 }
 
 #[test]
+fn server_dh_params_union_parses_both_fixed_u_variants_exactly() {
+    let nonce = [0x12; 16];
+    let server_nonce = [0x34; 16];
+    let encrypted_answer = [0x10, 0x20, 0x30, 0x40, 0x50];
+
+    let mut ok = TlWriter::new();
+    ok.write_u32(SERVER_DH_PARAMS_OK_CONSTRUCTOR);
+    ok.write_i128_bytes(&nonce);
+    ok.write_i128_bytes(&server_nonce);
+    ok.write_bytes(&encrypted_answer).unwrap();
+    assert_eq!(
+        parse_server_dh_params(ok.as_slice(), &nonce, &server_nonce).unwrap(),
+        ServerDhParams::Ok {
+            encrypted_answer: encrypted_answer.to_vec(),
+        }
+    );
+
+    let new_nonce_hash = [0xa5; 16];
+    let mut fail = TlWriter::new();
+    fail.write_u32(SERVER_DH_PARAMS_FAIL_CONSTRUCTOR);
+    fail.write_i128_bytes(&nonce);
+    fail.write_i128_bytes(&server_nonce);
+    fail.write_i128_bytes(&new_nonce_hash);
+    assert_eq!(
+        parse_server_dh_params(fail.as_slice(), &nonce, &server_nonce).unwrap(),
+        ServerDhParams::Fail { new_nonce_hash }
+    );
+}
+
+#[test]
+fn server_dh_params_union_rejects_unknown_truncation_nonce_mismatch_and_trailing_bytes() {
+    let nonce = [0x12; 16];
+    let server_nonce = [0x34; 16];
+    let unknown = 0x0102_0304_u32;
+    assert_eq!(
+        parse_server_dh_params(&unknown.to_le_bytes(), &nonce, &server_nonce).unwrap_err(),
+        HandshakeError::UnexpectedServerDhConstructor(unknown)
+    );
+
+    let mut ok = TlWriter::new();
+    ok.write_u32(SERVER_DH_PARAMS_OK_CONSTRUCTOR);
+    ok.write_i128_bytes(&nonce);
+    ok.write_i128_bytes(&server_nonce);
+    ok.write_bytes(&[0x10, 0x20, 0x30, 0x40, 0x50]).unwrap();
+    let ok = ok.into_bytes();
+    for cut in 0..ok.len() {
+        assert!(parse_server_dh_params(&ok[..cut], &nonce, &server_nonce).is_err());
+    }
+
+    let mut fail = TlWriter::new();
+    fail.write_u32(SERVER_DH_PARAMS_FAIL_CONSTRUCTOR);
+    fail.write_i128_bytes(&nonce);
+    fail.write_i128_bytes(&server_nonce);
+    fail.write_i128_bytes(&[0xa5; 16]);
+    let fail = fail.into_bytes();
+    for cut in 0..fail.len() {
+        assert!(parse_server_dh_params(&fail[..cut], &nonce, &server_nonce).is_err());
+    }
+
+    let mut wrong_nonce = TlWriter::new();
+    wrong_nonce.write_u32(SERVER_DH_PARAMS_FAIL_CONSTRUCTOR);
+    wrong_nonce.write_i128_bytes(&[0x99; 16]);
+    wrong_nonce.write_i128_bytes(&server_nonce);
+    wrong_nonce.write_i128_bytes(&[0xa5; 16]);
+    assert_eq!(
+        parse_server_dh_params(wrong_nonce.as_slice(), &nonce, &server_nonce).unwrap_err(),
+        HandshakeError::NonceMismatch
+    );
+
+    let mut wrong_server_nonce = TlWriter::new();
+    wrong_server_nonce.write_u32(SERVER_DH_PARAMS_FAIL_CONSTRUCTOR);
+    wrong_server_nonce.write_i128_bytes(&nonce);
+    wrong_server_nonce.write_i128_bytes(&[0x88; 16]);
+    wrong_server_nonce.write_i128_bytes(&[0xa5; 16]);
+    assert_eq!(
+        parse_server_dh_params(wrong_server_nonce.as_slice(), &nonce, &server_nonce).unwrap_err(),
+        HandshakeError::ServerNonceMismatch
+    );
+
+    let mut trailing_ok = ok;
+    trailing_ok.push(0);
+    assert_eq!(
+        parse_server_dh_params(&trailing_ok, &nonce, &server_nonce).unwrap_err(),
+        HandshakeError::TrailingBodyBytes(1)
+    );
+
+    let mut trailing_fail = fail;
+    trailing_fail.push(0);
+    assert_eq!(
+        parse_server_dh_params(&trailing_fail, &nonce, &server_nonce).unwrap_err(),
+        HandshakeError::TrailingBodyBytes(1)
+    );
+}
+
+#[test]
 fn server_dh_answer_is_nonce_bound_decrypted_and_hash_authenticated() {
     let nonce = [0x12; 16];
     let server_nonce = [0x34; 16];

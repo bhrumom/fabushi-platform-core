@@ -737,6 +737,10 @@ pub fn parse_server_dh_params(
 ) -> Result<ServerDhParams, HandshakeError> {
     let mut reader = TlReader::with_limits(input, DEFAULT_MAX_PLAINTEXT_BODY, 64);
     let constructor = reader.read_u32()?;
+    match constructor {
+        SERVER_DH_PARAMS_OK_CONSTRUCTOR | SERVER_DH_PARAMS_FAIL_CONSTRUCTOR => {}
+        other => return Err(HandshakeError::UnexpectedServerDhConstructor(other)),
+    }
     let nonce = reader.read_i128_bytes()?;
     let server_nonce = reader.read_i128_bytes()?;
     validate_nonce_pair(&nonce, &server_nonce, expected_nonce, expected_server_nonce)?;
@@ -747,7 +751,7 @@ pub fn parse_server_dh_params(
         SERVER_DH_PARAMS_FAIL_CONSTRUCTOR => ServerDhParams::Fail {
             new_nonce_hash: reader.read_i128_bytes()?,
         },
-        other => return Err(HandshakeError::UnexpectedServerDhConstructor(other)),
+        _ => unreachable!("server_DH_params constructor was validated above"),
     };
     if !reader.is_finished() {
         return Err(HandshakeError::TrailingBodyBytes(reader.remaining()));
