@@ -114,3 +114,38 @@ recovery code is evidence that the parser ships, not part of the isolated parser
 No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment,
 installation, GitHub Actions, checks, statuses, or runtime acceptance is executed or queried in Stage A. Executable
 validation remains `not-run` and acceptance remains false.
+
+
+## Round 88 final source-level compliance
+
+Final source-level readback after the durable Stage-A writes confirms:
+
+- live platform-core pre-compliance HEAD: `bc5f9410a520e5e35d40a1c5a1e6a8f2031d6030`;
+- no-production-delta spec commit/blob:
+  `9984ca1b13185693961ff0735156e55ab035e62a@7155c589c1e4090a534060e42fc9ebce1f8c404d`;
+- canonical authored-only contract commit/blob:
+  `bc5f9410a520e5e35d40a1c5a1e6a8f2031d6030@184e5bfa7832e9bc7c7d4f594011b032382e11d3`;
+- canonical production api/tl/lib/network blobs remain unchanged at
+  `ebfb3670b5cd097b9ce288782c7954f5cfe9fc43` /
+  `89256ab35184b6dc06a095ab34abb9f44e95a264` /
+  `abab39e42f100972484191f0e52e9edd9b88c6cf` /
+  `1fc1b1f69e3e37377400d078f916599e0c7b20bc`;
+- desktop contract mirror commit `58237abd9bcb64671d1bbfe88a3cdc8bdca5a2a4` is byte-identical at
+  `184e5bfa7832e9bc7c7d4f594011b032382e11d3`;
+- desktop bookkeeping/evidence commit `619e9cabb4353a268f7b74cbfa58116c2e7bc907` records the same
+  `TDRP-R9-MTPROTO-BAD-MSG-NOTIFICATION-WIRE-001` row at
+  `implemented / validation_status=not-run / accepted=false`, with ledger blob
+  `0867d2348599d6dcd2542b6045babcbe466c877d` and unchanged coverage
+  `97 responsibilities / 16172 unknown / 16145 unread / 0 omitted`.
+
+For the isolated adjacent parser responsibility, constructor `0xa7eff811`, signed 8/4/4 decoding, truncation
+fail-closed behavior and strict EOF are source-level satisfied with **no production delta**. The existing
+telegram-network consumers prove shipping reachability but their bad-time/time-correction recovery,
+current-request correlation, retry/session reset, sent/container history and other application semantics remain
+outside the wire-only responsibility claimed in this round.
+
+The newly authored external contracts cover exact 20-byte layout, signed i64/i32/i32 extremes, wrong constructor,
+constructor/field truncation boundaries, trailing bytes and exact EOF. They remain intentionally not run.
+No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment,
+installation, GitHub Actions, checks, statuses, or runtime acceptance was executed or queried. Stage-B executable
+evidence and independent release ACCEPT remain open.
