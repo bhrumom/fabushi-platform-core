@@ -381,6 +381,26 @@ pub fn build_msgs_ack(message_ids: &[i64]) -> Result<Vec<u8>, ApiRequestError> {
     Ok(writer.into_bytes())
 }
 
+pub fn parse_msgs_ack(input: &[u8]) -> Result<Vec<i64>, ApiRequestError> {
+    let mut reader = TlReader::new(input);
+    let constructor = reader.read_u32()?;
+    if constructor != MSGS_ACK_CONSTRUCTOR {
+        return Err(ApiRequestError::Tl(TlError::UnexpectedConstructor {
+            expected: MSGS_ACK_CONSTRUCTOR,
+            actual: constructor,
+        }));
+    }
+    let count = reader.read_vector_length()?;
+    let mut message_ids = Vec::with_capacity(count);
+    for _ in 0..count {
+        message_ids.push(reader.read_i64()?);
+    }
+    if !reader.is_finished() {
+        return Err(ApiRequestError::TrailingBytes(reader.remaining()));
+    }
+    Ok(message_ids)
+}
+
 pub fn build_msg_resend_req(message_ids: &[i64]) -> Result<Vec<u8>, ApiRequestError> {
     let mut writer = TlWriter::new();
     writer.write_u32(MSG_RESEND_REQ_CONSTRUCTOR);
@@ -978,11 +998,28 @@ mod authorization_identity_contract_tests {
 #[cfg(test)]
 mod mtproto_service_builder_contract_tests {
     use super::{
-        build_msg_resend_req, build_msgs_state_req, parse_msgs_all_info, parse_msgs_state_info,
+        build_msg_resend_req, build_msgs_ack, build_msgs_state_req, parse_msgs_ack,
+        parse_msgs_all_info, parse_msgs_state_info, MSGS_ACK_CONSTRUCTOR,
         MSGS_ALL_INFO_CONSTRUCTOR, MSGS_STATE_INFO_CONSTRUCTOR, MSGS_STATE_REQ_CONSTRUCTOR,
         MSG_RESEND_REQ_CONSTRUCTOR,
     };
     use crate::tl::TlWriter;
+
+    #[test]
+    fn msgs_ack_parses_fixed_u_message_id_vector() {
+        let first = 0x0102_0304_0506_0708_i64;
+        let second = 0x1112_1314_1516_1718_i64;
+        let encoded = build_msgs_ack(&[first, second]).expect("encode ack");
+        assert_eq!(&encoded[0..4], &MSGS_ACK_CONSTRUCTOR.to_le_bytes());
+        assert_eq!(parse_msgs_ack(&encoded).expect("parse ack"), vec![first, second]);
+    }
+
+    #[test]
+    fn msgs_ack_rejects_trailing_bytes() {
+        let mut encoded = build_msgs_ack(&[0x2122_2324_2526_2728_i64]).expect("encode ack");
+        encoded.extend_from_slice(&0_i32.to_le_bytes());
+        assert!(parse_msgs_ack(&encoded).is_err());
+    }
 
     #[test]
     fn msg_resend_req_encodes_fixed_u_constructor_and_single_answer_id() {

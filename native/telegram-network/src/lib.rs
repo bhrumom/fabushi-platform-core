@@ -384,6 +384,17 @@ impl EstablishedSession {
                     body: body.to_vec(),
                 }))
             }
+            MSGS_ACK_CONSTRUCTOR => {
+                let message_ids = fabushi_telegram_protocol::parse_msgs_ack(body)
+                    .map_err(|_| NetworkError::InvalidServiceMessage)?;
+                // Fixed-U requestsAcked(..., byResponse=false) keeps callback RPCs
+                // outstanding after a transport ACK. The single-RPC owner can
+                // recognize the current id exactly, but only rpc_result or an
+                // existing bounded recovery path may settle this call.
+                let _acknowledges_current =
+                    acknowledgement_mentions_request(&message_ids, request_message_id);
+                Ok(RpcOutcome::Continue)
+            }
             NEW_SESSION_CREATED_CONSTRUCTOR => {
                 let first_message_id = read_i64_at(body, 4)?;
                 self.server_salt = read_i64_at(body, 20)?;
@@ -730,7 +741,13 @@ impl EstablishedSession {
                 }
                 Ok(outcome)
             }
-            MSGS_ACK_CONSTRUCTOR => Ok(ServiceOutcome::Continue),
+            MSGS_ACK_CONSTRUCTOR => {
+                let message_ids = fabushi_telegram_protocol::parse_msgs_ack(body)
+                    .map_err(|_| NetworkError::InvalidServiceMessage)?;
+                let _acknowledges_current =
+                    acknowledgement_mentions_request(&message_ids, request_message_id);
+                Ok(ServiceOutcome::Continue)
+            }
             _ => Ok(ServiceOutcome::Continue),
         }
     }
@@ -765,6 +782,13 @@ fn new_session_requires_replay(request_message_id: i64, first_message_id: i64) -
 
 fn detailed_info_matches_request(sent_message_id: i64, request_message_id: i64) -> bool {
     sent_message_id == request_message_id
+}
+
+fn acknowledgement_mentions_request(
+    message_ids: &[i64],
+    request_message_id: i64,
+) -> bool {
+    message_ids.contains(&request_message_id)
 }
 
 fn request_state_requires_resend(state: u8) -> bool {
@@ -989,8 +1013,9 @@ fn read_i64_at(input: &[u8], offset: usize) -> Result<i64, NetworkError> {
 #[cfg(test)]
 mod recovery_contract_tests {
     use super::{
-        bad_message_recovery_action, direct_bad_message_time_recovery,
-        detailed_info_matches_request, new_session_requires_replay, request_state_requires_resend,
+        acknowledgement_mentions_request, bad_message_recovery_action,
+        direct_bad_message_time_recovery, detailed_info_matches_request,
+        new_session_requires_replay, request_state_requires_resend,
         state_reconciliation_requires_resend, BadMessageRecoveryAction,
         BAD_MSG_NOTIFICATION_CONSTRUCTOR,
     };
@@ -1035,6 +1060,13 @@ mod recovery_contract_tests {
         assert!(new_session_requires_replay(100, 104));
         assert!(!new_session_requires_replay(104, 104));
         assert!(!new_session_requires_replay(108, 104));
+    }
+
+    #[test]
+    fn fixed_u_ack_recognizes_only_the_current_outstanding_rpc() {
+        assert!(acknowledgement_mentions_request(&[100, 200, 300], 200));
+        assert!(!acknowledgement_mentions_request(&[100, 200, 300], 400));
+        assert!(!acknowledgement_mentions_request(&[], 200));
     }
 
     #[test]
