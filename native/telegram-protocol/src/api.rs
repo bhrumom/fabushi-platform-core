@@ -31,6 +31,9 @@ pub const RPC_ANSWER_UNKNOWN_CONSTRUCTOR: u32 = 0x5e2a_d36e;
 pub const RPC_ANSWER_DROPPED_RUNNING_CONSTRUCTOR: u32 = 0xcd78_e586;
 pub const RPC_ANSWER_DROPPED_CONSTRUCTOR: u32 = 0xa43a_d8b7;
 pub const DESTROY_AUTH_KEY_CONSTRUCTOR: u32 = 0xd143_5160;
+pub const DESTROY_AUTH_KEY_OK_CONSTRUCTOR: u32 = 0xf660_e1d4;
+pub const DESTROY_AUTH_KEY_NONE_CONSTRUCTOR: u32 = 0x0a9f_2259;
+pub const DESTROY_AUTH_KEY_FAIL_CONSTRUCTOR: u32 = 0xea10_9b13;
 pub const DESTROY_SESSION_CONSTRUCTOR: u32 = 0xe751_2126;
 pub const DESTROY_SESSION_OK_CONSTRUCTOR: u32 = 0xe220_45fc;
 pub const DESTROY_SESSION_NONE_CONSTRUCTOR: u32 = 0x62d3_50c9;
@@ -275,6 +278,13 @@ pub enum RpcDropAnswer {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestroyAuthKeyResult {
+    Ok,
+    None,
+    Fail,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DestroySessionResult {
     Ok { session_id: i64 },
     None { session_id: i64 },
@@ -344,6 +354,8 @@ pub enum ApiRequestError {
     InvalidRpcResultBodyLength(usize),
     #[error("Telegram MTProto RpcDropAnswer has unexpected constructor {0:#010x}")]
     UnexpectedRpcDropAnswerConstructor(u32),
+    #[error("Telegram MTProto DestroyAuthKeyRes has unexpected constructor {0:#010x}")]
+    UnexpectedDestroyAuthKeyConstructor(u32),
     #[error("Telegram MTProto DestroySessionRes has unexpected constructor {0:#010x}")]
     UnexpectedDestroySessionConstructor(u32),
     #[error("Telegram MTProto IpPort has unexpected constructor {0:#010x}")]
@@ -673,6 +685,22 @@ pub fn parse_rpc_drop_answer(input: &[u8]) -> Result<RpcDropAnswer, ApiRequestEr
         return Err(ApiRequestError::TrailingBytes(reader.remaining()));
     }
     Ok(answer)
+}
+
+pub fn parse_destroy_auth_key_result(
+    input: &[u8],
+) -> Result<DestroyAuthKeyResult, ApiRequestError> {
+    let mut reader = TlReader::new(input);
+    let result = match reader.read_u32()? {
+        DESTROY_AUTH_KEY_OK_CONSTRUCTOR => DestroyAuthKeyResult::Ok,
+        DESTROY_AUTH_KEY_NONE_CONSTRUCTOR => DestroyAuthKeyResult::None,
+        DESTROY_AUTH_KEY_FAIL_CONSTRUCTOR => DestroyAuthKeyResult::Fail,
+        actual => return Err(ApiRequestError::UnexpectedDestroyAuthKeyConstructor(actual)),
+    };
+    if !reader.is_finished() {
+        return Err(ApiRequestError::TrailingBytes(reader.remaining()));
+    }
+    Ok(result)
 }
 
 pub fn parse_destroy_session_result(

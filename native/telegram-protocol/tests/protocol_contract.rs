@@ -27,12 +27,14 @@ use fabushi_telegram_protocol::{
     compute_password_srp_proof_with_random,
     parse_account_email_verified, parse_account_password_prefix, parse_account_sent_email_code,
     parse_auth_password_recovery, parse_auth_sent_code, parse_bool, parse_config_dc_directory_prefix,
-    try_parse_rpc_error, ApiRequestError, EmailVerifiedResult, InitConnection, NextCodeType,
+    parse_destroy_auth_key_result, try_parse_rpc_error, ApiRequestError, DestroyAuthKeyResult,
+    EmailVerifiedResult, InitConnection, NextCodeType,
     SentCode, SentCodeDelivery, SentCodeResult, ACCOUNT_EMAIL_VERIFIED_LOGIN_CONSTRUCTOR,
     ACCOUNT_GET_PASSWORD_CONSTRUCTOR, ACCOUNT_PASSWORD_CONSTRUCTOR,
     AUTH_CHECK_PASSWORD_CONSTRUCTOR, AUTH_SEND_CODE_CONSTRUCTOR, AUTH_SENT_CODE_CONSTRUCTOR,
     AUTH_SIGN_IN_CONSTRUCTOR, AUTH_SIGN_UP_CONSTRUCTOR, CODE_SETTINGS_CONSTRUCTOR,
-    CONFIG_CONSTRUCTOR, DC_OPTION_CONSTRUCTOR, HELP_GET_CONFIG_CONSTRUCTOR,
+    CONFIG_CONSTRUCTOR, DC_OPTION_CONSTRUCTOR, DESTROY_AUTH_KEY_FAIL_CONSTRUCTOR,
+    DESTROY_AUTH_KEY_NONE_CONSTRUCTOR, DESTROY_AUTH_KEY_OK_CONSTRUCTOR, HELP_GET_CONFIG_CONSTRUCTOR,
     INIT_CONNECTION_CONSTRUCTOR, INPUT_CHECK_PASSWORD_SRP_CONSTRUCTOR,
     INVOKE_WITH_LAYER_CONSTRUCTOR, MSGS_ACK_CONSTRUCTOR, MTPROTO_LAYER,
     PASSWORD_KDF_ALGO_CONSTRUCTOR,
@@ -1707,3 +1709,36 @@ fn fixed_u_auth_lifecycle_parsers_keep_recovery_email_and_login_code_state() {
         other => panic!("unexpected email verification result: {other:?}"),
     }
 }
+#[test]
+fn destroy_auth_key_result_parses_all_fixed_u_variants_exactly() {
+    for (constructor, expected) in [
+        (DESTROY_AUTH_KEY_OK_CONSTRUCTOR, DestroyAuthKeyResult::Ok),
+        (DESTROY_AUTH_KEY_NONE_CONSTRUCTOR, DestroyAuthKeyResult::None),
+        (DESTROY_AUTH_KEY_FAIL_CONSTRUCTOR, DestroyAuthKeyResult::Fail),
+    ] {
+        assert_eq!(
+            parse_destroy_auth_key_result(&constructor.to_le_bytes())
+                .expect("parse DestroyAuthKeyRes variant"),
+            expected
+        );
+    }
+}
+
+#[test]
+fn destroy_auth_key_result_rejects_unknown_truncation_and_trailing_bytes() {
+    let unknown = 0_u32.to_le_bytes();
+    assert_eq!(
+        parse_destroy_auth_key_result(&unknown).unwrap_err(),
+        ApiRequestError::UnexpectedDestroyAuthKeyConstructor(0)
+    );
+
+    let exact = DESTROY_AUTH_KEY_OK_CONSTRUCTOR.to_le_bytes();
+    for cut in 0..exact.len() {
+        assert!(parse_destroy_auth_key_result(&exact[..cut]).is_err());
+    }
+
+    let mut trailing = exact.to_vec();
+    trailing.extend_from_slice(&0_u32.to_le_bytes());
+    assert!(parse_destroy_auth_key_result(&trailing).is_err());
+}
+
