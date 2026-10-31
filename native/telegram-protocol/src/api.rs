@@ -24,6 +24,7 @@ pub const PONG_CONSTRUCTOR: u32 = 0x3477_73c5;
 pub const PING_CONSTRUCTOR: u32 = 0x7abe_77ec;
 pub const PING_DELAY_DISCONNECT_CONSTRUCTOR: u32 = 0xf342_7b8c;
 pub const RPC_RESULT_CONSTRUCTOR: u32 = 0xf35c_6d01;
+pub const RPC_DROP_ANSWER_CONSTRUCTOR: u32 = 0x58e4_a740;
 pub const RPC_ANSWER_UNKNOWN_CONSTRUCTOR: u32 = 0x5e2a_d36e;
 pub const RPC_ANSWER_DROPPED_RUNNING_CONSTRUCTOR: u32 = 0xcd78_e586;
 pub const RPC_ANSWER_DROPPED_CONSTRUCTOR: u32 = 0xa43a_d8b7;
@@ -524,6 +525,13 @@ pub fn build_auth_check_password(proof: &PasswordSrpProof) -> Result<Vec<u8>, Ap
     output.extend_from_slice(&AUTH_CHECK_PASSWORD_CONSTRUCTOR.to_le_bytes());
     output.extend_from_slice(&encoded_proof);
     Ok(output)
+}
+
+pub fn build_rpc_drop_answer(req_msg_id: i64) -> Vec<u8> {
+    let mut writer = TlWriter::new();
+    writer.write_u32(RPC_DROP_ANSWER_CONSTRUCTOR);
+    writer.write_i64(req_msg_id);
+    writer.into_bytes()
 }
 
 pub fn build_ping(ping_id: i64) -> Vec<u8> {
@@ -1542,7 +1550,7 @@ mod authorization_identity_contract_tests {
 mod mtproto_service_builder_contract_tests {
     use super::{
         build_destroy_session, build_get_future_salts, build_msg_resend_req, build_msgs_ack,
-        build_msgs_state_req, build_ping, build_ping_delay_disconnect,
+        build_msgs_state_req, build_ping, build_ping_delay_disconnect, build_rpc_drop_answer,
         parse_bad_msg_notification,
         parse_bad_server_salt,
         parse_future_salts, parse_msg_detailed_info, parse_msg_new_detailed_info, parse_msgs_ack,
@@ -1557,7 +1565,7 @@ mod mtproto_service_builder_contract_tests {
         HTTP_WAIT_CONSTRUCTOR, IP_PORT_CONSTRUCTOR, IP_PORT_SECRET_CONSTRUCTOR, RpcDropAnswer,
         RPC_ANSWER_DROPPED_CONSTRUCTOR,
         RPC_ANSWER_DROPPED_RUNNING_CONSTRUCTOR, RPC_ANSWER_UNKNOWN_CONSTRUCTOR,
-        FUTURE_SALT_CONSTRUCTOR, MESSAGE_CONTAINER_CONSTRUCTOR, MSG_DETAILED_INFO_CONSTRUCTOR,
+        RPC_DROP_ANSWER_CONSTRUCTOR, FUTURE_SALT_CONSTRUCTOR, MESSAGE_CONTAINER_CONSTRUCTOR, MSG_DETAILED_INFO_CONSTRUCTOR,
         MSG_NEW_DETAILED_INFO_CONSTRUCTOR, MSGS_ACK_CONSTRUCTOR,
         MSGS_ALL_INFO_CONSTRUCTOR,
         MSGS_STATE_INFO_CONSTRUCTOR, MSGS_STATE_REQ_CONSTRUCTOR, MSG_RESEND_REQ_CONSTRUCTOR,
@@ -1742,6 +1750,27 @@ mod mtproto_service_builder_contract_tests {
         assert_eq!(parsed.entries[0].body, 0x9972_75b5_u32.to_le_bytes());
         assert_eq!(parsed.entries[1].sequence_number, 2);
         assert_eq!(parsed.entries[1].body.len(), 8);
+    }
+
+    #[test]
+    fn rpc_drop_answer_request_serializes_fixed_u_request_exactly() {
+        let req_msg_id = 0x0102_0304_0506_0708_i64;
+        let encoded = build_rpc_drop_answer(req_msg_id);
+        assert_eq!(encoded.len(), 12);
+        assert_eq!(&encoded[0..4], &RPC_DROP_ANSWER_CONSTRUCTOR.to_le_bytes());
+        assert_eq!(&encoded[4..12], &req_msg_id.to_le_bytes());
+    }
+
+    #[test]
+    fn rpc_drop_answer_request_preserves_signed_boundaries_and_stays_separate_from_response_parser() {
+        for req_msg_id in [i64::MIN, i64::MAX] {
+            let encoded = build_rpc_drop_answer(req_msg_id);
+            let mut expected = Vec::new();
+            expected.extend_from_slice(&RPC_DROP_ANSWER_CONSTRUCTOR.to_le_bytes());
+            expected.extend_from_slice(&req_msg_id.to_le_bytes());
+            assert_eq!(encoded, expected);
+            assert!(parse_rpc_drop_answer(&encoded).is_err());
+        }
     }
 
     #[test]

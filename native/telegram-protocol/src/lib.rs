@@ -24,6 +24,7 @@ pub use api::{
     build_auth_request_password_recovery, build_auth_resend_code, build_auth_send_code,
     build_auth_sign_in, build_auth_sign_up, build_destroy_session, build_get_future_salts,
     build_init_connection_get_config, build_msg_resend_req, build_ping, build_ping_delay_disconnect,
+    build_rpc_drop_answer,
     build_msgs_ack, build_msgs_state_req, parse_bad_msg_notification, parse_bad_server_salt,
     parse_future_salts,
     parse_message_container, parse_msg_detailed_info, parse_msg_new_detailed_info,
@@ -67,7 +68,8 @@ pub use api::{
     MSGS_STATE_REQ_CONSTRUCTOR, MTPROTO_LAYER, PASSWORD_KDF_ALGO_CONSTRUCTOR,
     PING_CONSTRUCTOR, PING_DELAY_DISCONNECT_CONSTRUCTOR, PONG_CONSTRUCTOR,
     RPC_ANSWER_DROPPED_CONSTRUCTOR, RPC_ANSWER_DROPPED_RUNNING_CONSTRUCTOR,
-    RPC_ANSWER_UNKNOWN_CONSTRUCTOR, RPC_ERROR_CONSTRUCTOR, RPC_RESULT_CONSTRUCTOR,
+    RPC_ANSWER_UNKNOWN_CONSTRUCTOR, RPC_DROP_ANSWER_CONSTRUCTOR, RPC_ERROR_CONSTRUCTOR,
+    RPC_RESULT_CONSTRUCTOR,
     USER_CONSTRUCTOR, USER_EMPTY_CONSTRUCTOR,
 };
 pub use auth::{
