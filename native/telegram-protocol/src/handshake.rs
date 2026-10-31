@@ -12,6 +12,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 pub const RES_PQ_CONSTRUCTOR: u32 = 0x0516_2463;
 pub const P_Q_INNER_DATA_DC_CONSTRUCTOR: u32 = 0xa9f5_5f95;
+pub const P_Q_INNER_DATA_TEMP_DC_CONSTRUCTOR: u32 = 0x56fd_df88;
 pub const REQ_DH_PARAMS_CONSTRUCTOR: u32 = 0xd712_e4be;
 pub const SERVER_DH_PARAMS_OK_CONSTRUCTOR: u32 = 0xd0e8_075c;
 pub const SERVER_DH_PARAMS_FAIL_CONSTRUCTOR: u32 = 0x79cb_045d;
@@ -300,6 +301,65 @@ impl AuthKeyHandshake {
         message_id: i64,
         dc_id: i32,
         test_environment: bool,
+        fill_random: F,
+    ) -> Result<PlaintextEnvelope, HandshakeError>
+    where
+        F: FnMut(&mut [u8]) -> Result<(), HandshakeError>,
+    {
+        self.prepare_req_dh_params_with_lifetime(
+            message_id,
+            dc_id,
+            test_environment,
+            None,
+            fill_random,
+        )
+    }
+
+    pub fn prepare_temporary_req_dh_params(
+        &mut self,
+        message_id: i64,
+        dc_id: i32,
+        test_environment: bool,
+        expires_in: i32,
+    ) -> Result<PlaintextEnvelope, HandshakeError> {
+        self.prepare_temporary_req_dh_params_with_random(
+            message_id,
+            dc_id,
+            test_environment,
+            expires_in,
+            secure_random_fill,
+        )
+    }
+
+    pub fn prepare_temporary_req_dh_params_with_random<F>(
+        &mut self,
+        message_id: i64,
+        dc_id: i32,
+        test_environment: bool,
+        expires_in: i32,
+        fill_random: F,
+    ) -> Result<PlaintextEnvelope, HandshakeError>
+    where
+        F: FnMut(&mut [u8]) -> Result<(), HandshakeError>,
+    {
+        if expires_in <= 0 {
+            return Err(HandshakeError::InvalidTemporaryKeyLifetime(expires_in));
+        }
+        self.prepare_req_dh_params_with_lifetime(
+            message_id,
+            dc_id,
+            test_environment,
+            Some(expires_in),
+            fill_random,
+        )
+    }
+
+    fn prepare_req_dh_params_with_lifetime<F>(
+        &mut self,
+        message_id: i64,
+        dc_id: i32,
+        test_environment: bool,
+        expires_in: Option<i32>,
         mut fill_random: F,
     ) -> Result<PlaintextEnvelope, HandshakeError>
     where
@@ -320,9 +380,16 @@ impl AuthKeyHandshake {
         }
         let mut new_nonce = Zeroizing::new([0_u8; 32]);
         fill_random(&mut new_nonce[..])?;
-        let inner = Zeroizing::new(build_p_q_inner_data_dc(
-            &response, &factors, &new_nonce, dc_id,
-        )?);
+        let inner = Zeroizing::new(match expires_in {
+            Some(expires_in) => build_p_q_inner_data_temp_dc(
+                &response,
+                &factors,
+                &new_nonce,
+                dc_id,
+                expires_in,
+            )?,
+            None => build_p_q_inner_data_dc(&response, &factors, &new_nonce, dc_id)?,
+        });
         let encrypted = rsa_pad_with_random(&inner, &key, &mut fill_random)?;
         let body = build_req_dh_params(&response, &factors, fingerprint, &encrypted)?;
         self.new_nonce = Some(new_nonce);
@@ -537,6 +604,34 @@ pub fn build_p_q_inner_data_dc(
     writer.write_i128_bytes(&response.server_nonce);
     writer.write_i256_bytes(new_nonce);
     writer.write_i32(dc_id);
+    Ok(writer.into_bytes())
+}
+
+pub fn build_p_q_inner_data_temp_dc(
+    response: &ResPq,
+    factors: &FactoredPq,
+    new_nonce: &[u8; 32],
+    dc_id: i32,
+    expires_in: i32,
+) -> Result<Vec<u8>, HandshakeError> {
+    if expires_in <= 0 {
+        return Err(HandshakeError::InvalidTemporaryKeyLifetime(expires_in));
+    }
+    if decode_unsigned_be(&response.pq)? != factors.pq
+        || factors.p.saturating_mul(factors.q) != factors.pq
+    {
+        return Err(HandshakeError::PqFactorsDoNotMatch);
+    }
+    let mut writer = TlWriter::new();
+    writer.write_u32(P_Q_INNER_DATA_TEMP_DC_CONSTRUCTOR);
+    writer.write_bytes(&response.pq)?;
+    writer.write_bytes(&factors.p_bytes())?;
+    writer.write_bytes(&factors.q_bytes())?;
+    writer.write_i128_bytes(&response.nonce);
+    writer.write_i128_bytes(&response.server_nonce);
+    writer.write_i256_bytes(new_nonce);
+    writer.write_i32(dc_id);
+    writer.write_i32(expires_in);
     Ok(writer.into_bytes())
 }
 
@@ -1104,6 +1199,8 @@ pub enum HandshakeError {
     NoTrustedServerKey,
     #[error("RSA-encrypted p_q_inner_data must not be empty")]
     EmptyEncryptedInnerData,
+    #[error("temporary auth-key lifetime must be positive, found {0}")]
+    InvalidTemporaryKeyLifetime(i32),
     #[error("Telegram RSA modulus must contain 256 bytes, found {0}")]
     InvalidRsaModulusLength(usize),
     #[error("Telegram RSA exponent is empty or zero")]
