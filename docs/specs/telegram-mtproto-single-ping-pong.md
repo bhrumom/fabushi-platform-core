@@ -155,3 +155,17 @@ Round-63 authored-only external contracts SHALL pin the 20-byte object, offsets 
 The wire-only boundary remains intentionally separate from fixed-U `SessionPrivate::wasSent`, `requestsFixTimeSalt`, `requestsAcked`, arbitrary `haveSent/_resendingIds/toSend/_sentContainers` history, connection scheduling, auth-key binding/persistence, `gzip_packed`, and complete difference decoding/application. The existing single-current-ping correlation is retained; no wider historical request owner is inferred.
 
 The existing ledger responsibility `TDRP-R9-MTPROTO-SINGLE-PING-PONG-001` remains the sole row and stays `implemented / validation_status=not-run / accepted=false`. No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, or runtime acceptance is permitted or claimed for this Stage-A revalidation.
+
+
+## 21. Round 63 final source-level compliance
+
+Remote desktop readback closes this adjacent fixed-U `Pong` wire revalidation at source level with **no production delta**.
+
+- Canonical production protocol api/lib/network blobs remain `ebfb3670b5cd097b9ce288782c7954f5cfe9fc43` / `abab39e42f100972484191f0e52e9edd9b88c6cf` / `1fc1b1f69e3e37377400d078f916599e0c7b20bc`.
+- The authored-only canonical external contract is commit `a559782b390f43d5caa28d8eaba1f99a9292059b`, blob `7672b1908bdf8810592e86f8427fd85c49089d7f`.
+- Desktop mirrors that contract byte-identically and synchronizes evidence/ledger/P0/source-closure in commit `a05f05cacac7402762f91915adb5664b6178ec7d`.
+- Desktop remote readback reports contract / ledger / P0 / source-closure / round94 evidence blobs as `7672b1908bdf8810592e86f8427fd85c49089d7f` / `a341fa6afc1ec4cb8d2936f9cddc8d6e01fb256e` / `c76503ef4ce594af2429d7f773f6d3e0b75756f6` / `896210cbb58bdbec3cd1385dab2b73984b74e7fc` / `1e359f5b9cab728da6e1ab9b7c1f21e27817d80e`.
+- The existing `TDRP-R9-MTPROTO-SINGLE-PING-PONG-001` row remains `implemented / validation_status=not-run / accepted=false`; no duplicate responsibility is created.
+- Fixed-U historical `wasSent/requestsFixTimeSalt/requestsAcked`, arbitrary multi-request sent/resend/container state, connection scheduling, auth-key binding/persistence, gzip, complete difference decoding/application, broader source/legal closure, Stage-B executable evidence, and independent release ACCEPT remain open or outside this wire-only claim.
+
+No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, or runtime acceptance was performed.
