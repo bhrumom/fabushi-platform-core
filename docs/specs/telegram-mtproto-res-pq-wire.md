@@ -124,3 +124,34 @@ Checkpoint branches only. Rollback is the previous checkpoint ref. Evidence is l
 
 - Fixed-U `mtproto.tl` and `details/mtproto_dc_key_creator.cpp` identities above.
 - Existing `AuthKeyHandshake::receive_res_pq`, `parse_res_pq`, and bounded `TlReader`.
+
+
+## 16. Spec compliance record — source-level Stage A
+
+| Requirement / AC | Status | Evidence / reason |
+| --- | --- | --- |
+| R1-R8 | passed | Remote source readback confirms the unchanged canonical `handshake.rs@87616f4b96a1775455da42b0bbed77711fb3c9f6` already performs constructor-first exact resPQ decoding, bounded TL field parsing, active nonce binding, empty pq/fingerprint rejection and mutation only after validation; `tl.rs@89256ab35184b6dc06a095ab34abb9f44e95a264` enforces Vector constructor/non-negative/bounded length. |
+| R9 | passed / not-run | Canonical authored-only contracts are `protocol_contract.rs@44d2a5d141e7d7854529379aaaad660853c8cbe3` from commit `5e1ba90b32ac7c58b7be0d9630f1630a0a764061`; desktop sync `c72c7f85c926d05b21842c41a3b11c1313537793` mirrors the same blob. They were not executed. |
+| AC-1 | passed | Existing `AuthKeyHandshake::receive_res_pq / parse_res_pq` remains the only canonical owner; no production behavior change or second owner was added. |
+| AC-2 | passed / not-run | Authored source covers valid exact resPQ, all truncation cuts, unknown constructor, Vector magic/negative/bound/count failures, trailing bytes, nonce mismatch, empty pq/fingerprints and invalid receiver state. |
+| AC-3 | passed | Desktop mirrors only the contract surface; tracked facade remains `abab39e42f100972484191f0e52e9edd9b88c6cf` and no desktop handshake core was added. |
+| AC-4 | passed / not-run | Desktop bookkeeping commit `f02da19844bf045ffe4fbe396f2932d80c19f5cc` records `TDRP-R9-MTPROTO-RES-PQ-WIRE-001` as `implemented / validation_status=not-run / accepted=false`; ledger blob is `b640203599f1ea098a890fe0ff09bc6ff0701d30`, coverage 89 / 16172 unknown / 16145 unread / 0 omitted. |
+| AC-5 | passed | Stage A source work performed no GitHub Actions/status/check query or trigger and no build, typecheck, lint, schema validator, generator, test, packaging, deployment, installation or runtime acceptance. |
+
+Executable Stage-B verification remains intentionally absent. Temporary/permanent auth-key binding/expiry/renewal/persistence/teardown,
+connection scheduling/racing/plaintext send/retry/timeout, arbitrary multi-request history, gzip, complete updates difference decoding/application,
+broader fixed-U source/legal closure and independent release ACCEPT remain open/fail-closed.
+
+## 17. Round 48 / migration Round 79 evidence
+
+- spec-first commit: `03dc0f804a8c80d8d60500e6667cc9b091ccc3cf`
+- initial spec blob: `ab044dcb2b34d7def042e4dd2eb798f3b658c52a`
+- canonical production handshake: `native/telegram-protocol/src/handshake.rs@87616f4b96a1775455da42b0bbed77711fb3c9f6` (unchanged; no behavior delta required)
+- bounded TL reader: `native/telegram-protocol/src/tl.rs@89256ab35184b6dc06a095ab34abb9f44e95a264` (unchanged)
+- canonical authored-contract commit: `5e1ba90b32ac7c58b7be0d9630f1630a0a764061`
+- canonical/desktop contract blob: `44d2a5d141e7d7854529379aaaad660853c8cbe3`
+- desktop contract sync: `c72c7f85c926d05b21842c41a3b11c1313537793`
+- desktop ledger/P0/source-closure evidence: `f02da19844bf045ffe4fbe396f2932d80c19f5cc`
+- desktop ledger blob: `b640203599f1ea098a890fe0ff09bc6ff0701d30`
+
+All contracts remain authored-only and unexecuted.
