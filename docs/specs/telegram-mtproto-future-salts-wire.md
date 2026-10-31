@@ -125,3 +125,20 @@ Canonical and desktop protocol blobs: api `e8026c79b8b14261ef30d39bf6de8b0bc9230
 - R17: satisfied by ownership/source inspection — the builder has no socket, timer, session-salt, persistence, retry, response-settlement, or request-history side effect; live scheduling/install/rotation remains unclaimed/fail-closed.
 
 AC9–AC12 are satisfied at source/implementation/bookkeeping level. AC13 is satisfied for the fail-closed ownership boundary and remains **blocked/not-run** for executable validation: `validation_status=not-run`, `accepted=false`. No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried.
+
+
+## Round 59 future_salt element-boundary revalidation — 2026-11-01
+
+This round revalidates only the nested `future_salt#0949d9dc valid_since:int valid_until:int salt:long` element responsibility already covered by `future_salts#ae500895`. It does not create a second responsibility or change production behavior.
+
+Source-level findings at live checkpoint `3db5c55a946a466d157e37b95d2fce0eb5706595`:
+
+- canonical protocol api blob is `ebfb3670b5cd097b9ce288782c7954f5cfe9fc43`; `FutureSalt` remains exactly `{ valid_since: i32, valid_until: i32, salt: i64 }`;
+- `parse_future_salts` uses a fixed `FUTURE_SALT_WIRE_BYTES = 20`, i.e. 4 bytes for the nested constructor plus exact signed 4/4/8 field widths;
+- before `Vec::with_capacity(count)`, `count * 20` is checked against the remaining bytes, so a declared vector count cannot cross the fixed-size element boundary;
+- every element validates `FUTURE_SALT_CONSTRUCTOR` before reading `valid_since`, `valid_until`, and `salt`; the shared `TlReader::read_i32/read_i64` uses fixed-size little-endian array reads and fails closed on truncation;
+- after the vector is consumed, strict EOF rejects trailing bytes;
+- canonical network blob `1fc1b1f69e3e37377400d078f916599e0c7b20bc` invokes `parse_future_salts` before current-request matching/settlement. Future-salt installation/rotation, refresh scheduling, persistence, arbitrary request history, retry, and other application lifecycle remain outside this wire-only claim;
+- fixed-U `session_private.cpp@13cbc76ec723386027b5b4dcac79999b791c4614` has no dedicated `future_salts` application branch; its adjacent service-message branches act on generated/decoded TL objects. Therefore this nested wire responsibility remains independently owned by the existing source-neutral protocol parser rather than by salt-adoption state.
+
+Disposition: **no production delta**. Add authored-only external contracts for signed 4/4/8 field boundaries, multiple fixed-size vector elements, wrong nested constructor, per-field truncation, impossible count, and trailing bytes. Do not run them in Stage A. The existing ledger row `TDRP-R9-MTPROTO-FUTURE-SALTS-WIRE-001` remains `implemented / validation_status=not-run / accepted=false`.
