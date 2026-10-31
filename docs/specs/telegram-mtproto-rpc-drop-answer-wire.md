@@ -90,3 +90,15 @@ Additional acceptance criteria:
 - AC8: Exact serializer contracts preserve constructor + one signed `i64` only.
 - AC9: Request serialization stays distinct from `RpcDropAnswer` response parsing and does not claim request-history lifecycle semantics.
 - AC10: Executable validation remains `not-run` and acceptance remains false in Stage A; historical drop-answer lifecycle, gzip, and complete difference decoding/application remain explicitly out of scope/fail-closed.
+
+
+## Round 38 request-side source-level compliance readback
+
+Canonical request implementation commit: `37fff2cb24658b6e0f738bbbd23cecdf075f4bb1`. Desktop provider synchronization commit: `7c17952b90cc89d575345e192733c2e6c23deb03`. Desktop bookkeeping commit: `bd1b60a169d3a4fd812fdd1a302735010f2a98e1`. Canonical/desktop protocol blobs: api `3ec13cd2248e68f55296ed9bbaffa5c10ffce969`, lib `e4705eb4563a087e0bba811948f1244af8f9f5cb`.
+
+- R9-R12: satisfied by source inspection — `RPC_DROP_ANSWER_CONSTRUCTOR=0x58e4a740` and public `build_rpc_drop_answer(req_msg_id:i64)` emit exactly constructor + one little-endian signed `i64`, preserving the full value without lookup or policy transformation.
+- R13: satisfied — request serialization is a separate builder; existing `parse_rpc_drop_answer` and all three response variants are unchanged receive-side responsibilities.
+- R14: satisfied as authored-only Stage-A contracts — exact layout, signed-boundary, and request/response-parser separation tests exist but were not run.
+- R15-R16: satisfied as source-level ownership boundaries — the builder has no socket, scheduler, callback registry, request-history lookup/mutation, ACK/resend/container, timeout/reconnect, persistence, gzip, or updates-difference side effect. Historical outstanding-RPC selection/correlation/drop semantics and arbitrary `wasSent/haveSent/_resendingIds/toSend/_sentContainers` history remain fail-closed.
+
+AC7-AC9 are satisfied at source/implementation/bookkeeping level. AC10 remains intentionally **blocked/not-run** for executable validation with `accepted=false`. No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried.
