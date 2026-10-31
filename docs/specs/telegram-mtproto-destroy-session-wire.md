@@ -118,3 +118,17 @@ Round-61 authored-only external contracts SHALL pin both exact 12-byte variants,
 The existing ledger responsibility `TDRP-R9-MTPROTO-DESTROY-SESSION-WIRE-001` remains the sole row; no duplicate responsibility is created. Its state remains `implemented / validation_status=not-run / accepted=false`. Live session teardown/outbound destroy-session lifecycle, arbitrary multi-request history, connection scheduling, auth-key binding/persistence, gzip, complete difference decoding/application, broader source/legal closure, Stage-B executable evidence, and independent release ACCEPT remain open or outside this wire-only claim.
 
 No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, or runtime acceptance is permitted or claimed for this Stage-A revalidation.
+
+
+## Round 61 final source-level compliance
+
+Canonical source inspection and remote desktop readback close the fixed-U `DestroySessionRes` response wire responsibility at source level with **no production delta**.
+
+- Canonical production api/tl/lib blobs remain `ebfb3670b5cd097b9ce288782c7954f5cfe9fc43` / `89256ab35184b6dc06a095ab34abb9f44e95a264` / `abab39e42f100972484191f0e52e9edd9b88c6cf`.
+- The authored-only canonical external contract is commit `d3d8635c69186631396886b086133b7f455ce33b`, blob `e414104c28784a1735f7d8b5c1a5cfeb23fe2192`.
+- Desktop mirrored that contract byte-identically in commit `8e2f40effaa42630a209a22eb56e679786e39014`.
+- Desktop evidence/ledger/P0/source-closure were updated in the same CAS commit `8e2f40effaa42630a209a22eb56e679786e39014`.
+- The existing ledger row `TDRP-R9-MTPROTO-DESTROY-SESSION-WIRE-001` remains `implemented / validation_status=not-run / accepted=false`; no duplicate responsibility was created.
+- Live teardown/outbound destroy-session lifecycle, arbitrary multi-request history, connection scheduling, auth-key binding/persistence, gzip, complete difference decoding/application, broader source/legal closure, Stage-B executable evidence, and independent release ACCEPT remain open or outside this wire-only claim.
+
+No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, or runtime acceptance was performed.
