@@ -66,3 +66,23 @@ Do not run build, typecheck, lint, schema validation, generators, unit/contract/
 - AC6: Desktop provider copies are byte-identical to canonical protocol/network sources.
 - AC7: No gzip/difference/multi-request history scope is claimed.
 - AC8: Authored tests remain not-run and acceptance remains false until Stage B executable evidence exists.
+
+
+## Stage-A spec compliance review — 2026-11-01
+
+Implementation commit: `f631d7cc0c1a21db93ab647d3b6dcb29b42cb74e`  
+Desktop synchronization commit: `a3329a8c948cbffab1d6843c78abc8024afa87b4`  
+Canonical blobs: protocol api `bdac614fab9ca16ffeb36c7e98a012fe20231597`, protocol lib `6b6bde59a9f5e86ec33b0258e1e6a34f2b1622f9`, network `b2eb7022c6a8d38d7ac9f4a9fd13fe22913621de`.
+
+- R1: passed by source inspection — the protocol owner exports both fixed-U constructors, typed `FutureSalt` / `FutureSalts`, `parse_future_salts`, and the public crate re-exports.
+- R2: passed by source inspection — the parser consumes `req_msg_id`, `now`, the TL vector constructor/count, and every nested `future_salt` constructor plus all three fields.
+- R3: passed by source inspection — wrong top-level/vector/nested constructors, field truncation, impossible declared count, and trailing bytes all return parse failure.
+- R4: passed by source inspection — after reading the bounded vector count, `count * 20` is checked against remaining bytes before `Vec::with_capacity(count)`.
+- R5: passed by source inspection — `EstablishedSession::scan_rpc_body` invokes `parse_future_salts(body)` before request matching or settlement.
+- R6: passed by source inspection — `future_salts_matches_request` gates settlement to the one outstanding request id.
+- R7: passed by source inspection — a valid unrelated request id returns `Continue` without retry/session mutation.
+- R8: passed by source inspection — a matching object returns `body.to_vec()` only after successful typed validation.
+- R9: passed by ownership/scope inspection — changes stay in existing protocol/network owners and byte-identical desktop provider copies; no gzip, full difference decoder, or historical sent/resend/container owner was added.
+- R10: passed as an authored-only Stage-A artifact — exact/malformed/parser-correlation contracts were added but not run.
+
+Acceptance criteria AC1–AC7 are satisfied at source/implementation level. AC8 remains intentionally **blocked/not-run** until Stage B executable validation. No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E, package, deployment, installation, GitHub Actions, checks, or statuses were run or queried in this review.
