@@ -96,9 +96,9 @@ Evidence is fixed-U source identity, Git blob identity, authored contracts, cano
 
 | Requirement / AC | Status | Evidence / reason |
 | --- | --- | --- |
-| R1-R10 | blocked | Pending implementation in this round. |
-| AC-1 | blocked | Pending canonical implementation. |
-| AC-2 | blocked | Pending desktop synchronization. |
-| AC-3 | blocked | Pending ledger/P0/source-closure update. |
-| AC-4 | blocked | Must remain explicitly fail-closed. |
-| AC-5 | blocked | Will be reviewed after Stage-A source writes; no executable verification is permitted. |
+| R1-R10 | passed | Source review at platform-core implementation `144512ce2bb7366aef57ba76924b2d02852cbce3`: bounded `parse_rpc_result`, non-empty word-aligned opaque result preservation, explicit exact-current-request correlation, malformed-envelope fail-closed behavior, no multi-request sent/request owner, and contracts authored but not run. |
+| AC-1 | passed | Canonical blobs: protocol api `b8b9872ec8ce7548817ebbe92615d47aed470e89`, protocol lib `4b6695cac59dc507f76c85f93ff3678d0d5bcbd0`, network `8ec039d4a12040fcea87af883dba9cd02a2b3efb`. |
+| AC-2 | passed | Desktop implementation `7dc33be41568162c2cab398da67b3e6bc9c12dea`; remote readback confirmed the same three blob identities on the existing provider path chain. |
+| AC-3 | passed | Desktop ledger/P0/source-closure/evidence commit `b30c7374e3a926765a2238ed9045cf7647c71aa8`; row `TDRP-R9-MTPROTO-SINGLE-RPC-RESULT-001` is implemented with empty execution evidence and records `validation_status=not-run`, `accepted=false`. |
+| AC-4 | passed | Desktop ledger/evidence explicitly retain arbitrary `wasSent/haveSent/_resendingIds/toSend/_sentContainers`, multi-request callback routing and related history as open/fail-closed. |
+| AC-5 | passed | Round 22 performed Git/ref/blob/source reads and safe writes only; no Actions/status/check query or trigger and no build, lint, generator, test, package, deployment, installation, or runtime acceptance was performed. |
