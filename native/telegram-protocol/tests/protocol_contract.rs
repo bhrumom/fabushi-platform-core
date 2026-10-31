@@ -1,7 +1,8 @@
 use fabushi_telegram_protocol::{
     aes_ige_encrypt, build_auth_send_code, build_auth_sign_in, build_auth_sign_up,
     build_client_dh_inner_data, build_init_connection_get_config, build_msgs_ack,
-    build_p_q_inner_data_dc, build_req_dh_params, build_req_pq_multi, build_set_client_dh_params,
+    build_p_q_inner_data_dc, build_p_q_inner_data_temp_dc, build_req_dh_params, build_req_pq_multi,
+    build_set_client_dh_params,
     decrypt_message, decrypt_server_dh_inner_data, derive_aes_key_iv, derive_tmp_aes_key_iv,
     encrypt_message, factor_res_pq, parse_dh_gen_result, parse_schema_catalog,
     parse_server_dh_params, parse_td_api_schema, prepare_client_dh, quick_ack_token,
@@ -14,7 +15,8 @@ use fabushi_telegram_protocol::{
     SchemaStats, ServerDhInnerData, ServerDhParams, SessionSequence, TlError, TlReader, TlWriter,
     TransportError, TransportFrameCodec, TransportMode, WireSchema, DH_GEN_OK_CONSTRUCTOR,
     CLIENT_DH_INNER_DATA_CONSTRUCTOR, KNOWN_DH_PRIME_HEX, P_Q_INNER_DATA_DC_CONSTRUCTOR,
-    REQ_DH_PARAMS_CONSTRUCTOR, REQ_PQ_MULTI_CONSTRUCTOR, RES_PQ_CONSTRUCTOR,
+    P_Q_INNER_DATA_TEMP_DC_CONSTRUCTOR, REQ_DH_PARAMS_CONSTRUCTOR, REQ_PQ_MULTI_CONSTRUCTOR,
+    RES_PQ_CONSTRUCTOR,
     SERVER_DH_INNER_DATA_CONSTRUCTOR,
     SERVER_DH_PARAMS_OK_CONSTRUCTOR, SET_CLIENT_DH_PARAMS_CONSTRUCTOR, WIRE_CONSTRUCTORS,
 };
@@ -1070,6 +1072,30 @@ fn res_pq_factors_semiprime_and_builds_next_dh_request_contracts() {
     assert_eq!(inner_reader.read_i32().unwrap(), 2);
     assert!(inner_reader.is_finished());
 
+    let temporary =
+        build_p_q_inner_data_temp_dc(&response, &factors, &[0x30; 32], 2, 86_400).unwrap();
+    let mut temporary_reader = TlReader::new(&temporary);
+    assert_eq!(
+        temporary_reader.read_u32().unwrap(),
+        P_Q_INNER_DATA_TEMP_DC_CONSTRUCTOR
+    );
+    assert_eq!(temporary_reader.read_bytes().unwrap(), response.pq);
+    assert_eq!(temporary_reader.read_bytes().unwrap(), factors.p_bytes());
+    assert_eq!(temporary_reader.read_bytes().unwrap(), factors.q_bytes());
+    assert_eq!(temporary_reader.read_i128_bytes().unwrap(), response.nonce);
+    assert_eq!(
+        temporary_reader.read_i128_bytes().unwrap(),
+        response.server_nonce
+    );
+    assert_eq!(temporary_reader.read_i256_bytes().unwrap(), [0x30; 32]);
+    assert_eq!(temporary_reader.read_i32().unwrap(), 2);
+    assert_eq!(temporary_reader.read_i32().unwrap(), 86_400);
+    assert!(temporary_reader.is_finished());
+    assert_eq!(
+        build_p_q_inner_data_temp_dc(&response, &factors, &[0x30; 32], 2, 0).unwrap_err(),
+        HandshakeError::InvalidTemporaryKeyLifetime(0)
+    );
+
     let encrypted = vec![0x55; 256];
     let request = build_req_dh_params(&response, &factors, 0x2222, &encrypted).unwrap();
     let mut request_reader = TlReader::new(&request);
@@ -1087,6 +1113,57 @@ fn res_pq_factors_semiprime_and_builds_next_dh_request_contracts() {
     assert_eq!(request_reader.read_u64().unwrap(), 0x2222);
     assert_eq!(request_reader.read_bytes().unwrap(), encrypted);
     assert!(request_reader.is_finished());
+}
+
+#[test]
+fn temporary_req_dh_preparation_reuses_handshake_state_and_rejects_invalid_lifetime() {
+    let nonce = [0x11; 16];
+    let server_nonce = [0x22; 16];
+    let fingerprint = telegram_server_rsa_key(false)
+        .unwrap()
+        .fingerprint()
+        .unwrap();
+    let mut response = TlWriter::new();
+    response.write_u32(RES_PQ_CONSTRUCTOR);
+    response.write_i128_bytes(&nonce);
+    response.write_i128_bytes(&server_nonce);
+    response.write_bytes(&[0x04, 0x2a, 0x39]).unwrap();
+    response.write_vector_length(1).unwrap();
+    response.write_u64(fingerprint);
+
+    let mut handshake = AuthKeyHandshake::new(nonce);
+    handshake.begin(4).unwrap();
+    handshake
+        .receive_res_pq(PlaintextEnvelope {
+            message_id: 5,
+            body: response.into_bytes(),
+        })
+        .unwrap();
+
+    let error = handshake
+        .prepare_temporary_req_dh_params_with_random(8, 2, false, 0, |output| {
+            output.fill(0x56);
+            Ok(())
+        })
+        .unwrap_err();
+    assert_eq!(error, HandshakeError::InvalidTemporaryKeyLifetime(0));
+    assert!(matches!(
+        handshake.state(),
+        AuthKeyHandshakeState::ResPqReceived(_)
+    ));
+
+    let request = handshake
+        .prepare_temporary_req_dh_params_with_random(9, 2, false, 86_400, |output| {
+            output.fill(0x56);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(request.message_id, 9);
+    assert_eq!(
+        u32::from_le_bytes(request.body[0..4].try_into().unwrap()),
+        REQ_DH_PARAMS_CONSTRUCTOR
+    );
+    assert_eq!(handshake.state(), &AuthKeyHandshakeState::AwaitingServerDh);
 }
 
 #[test]
