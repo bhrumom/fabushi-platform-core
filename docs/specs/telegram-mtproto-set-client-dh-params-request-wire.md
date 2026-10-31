@@ -51,3 +51,23 @@ Executable verification is deferred to Stage B. No build, typecheck, lint, schem
 ## Fail-closed boundary
 
 Connection-probe scheduling/transport racing, MTProto message-id generation, plaintext/not-secure packet framing, network send/retry/timeout, server response correlation/application, broader auth-key creation/persistence/session lifecycle, arbitrary multi-request history, gzip, complete difference/differenceSlice decoding/application, broader fixed-U source/legal closure, and independent release ACCEPT remain outside this slice.
+
+
+## Round 73 source-level compliance readback
+
+Spec-first commit `f3d85c368ace17c864eebf2b4d97a44c9d3d964f` established this contract before production changes. Canonical implementation commit `a353cdf718a93f8e51f48e58c1be4a9889c3bc32` produces handshake `2e9acc80d10a87a8633173c88568aef706d4e123`, lib `3a05251d749f0df868e4ebd94fb7e28e31fad8f1`, and authored-contract blob `3cef7f7532cf98c46f9f9eb06f9b0ff2026dfcb4`.
+
+Desktop synchronization commit `85db8d62f8014614234ab2340560367d087ac4e0` mirrors lib/contracts byte-for-byte. Desktop bookkeeping commit `9507fbcc3d1c95a5ecfc4ba31b62a123c0d9fd3b` records `TDRP-R9-MTPROTO-SET-CLIENT-DH-PARAMS-REQUEST-WIRE-001` with `responsibilities_total=83`, `unknown=16172`, `unread=16145`, `omitted=0`, `implementation_status=implemented`, `validation_status=not-run`, and `accepted=false`.
+
+| Requirement | Status | Evidence / reason |
+| --- | --- | --- |
+| R1 | passed | Canonical `SET_CLIENT_DH_PARAMS_CONSTRUCTOR=0xf5045f1f` remains in `handshake.rs@2e9acc80d10a87a8633173c88568aef706d4e123`. |
+| R2 | passed | Public `build_set_client_dh_params` is present in canonical handshake source and re-exported by `lib.rs@3a05251d749f0df868e4ebd94fb7e28e31fad8f1`. |
+| R3 | passed | Source readback shows constructor, raw nonce, raw server_nonce and TL string/bytes framing only; exact-layout/padding contract is authored in `protocol_contract.rs@3cef7f7532cf98c46f9f9eb06f9b0ff2026dfcb4`. |
+| R4 | passed | `prepare_client_dh` delegates only final request-body framing to the pure builder; DH validation/randomness/auth-key derivation/AES encryption/salt derivation remain in the same existing function. |
+| R5 | passed | The builder is a synchronous TL writer over caller-owned fields and has no randomness, clock, network, persistence, scheduler, callback, request-history, gzip or updates interaction. |
+| R6 | passed | Existing `build_req_dh_params` and its complete field-order/trailing contract remain present and unchanged in ownership. |
+| R7 | passed | Remote readback confirms canonical and desktop tracked mirrors are byte-identical for lib `3a05251d749f0df868e4ebd94fb7e28e31fad8f1` and contracts `3cef7f7532cf98c46f9f9eb06f9b0ff2026dfcb4`; no desktop handshake owner was introduced. |
+| R8 | passed | Dedicated serializer/prepare-body contracts are authored and no build/test/validator/Actions/status/check execution or query was performed in Stage A. |
+
+R1-R8 are satisfied at source/ownership/bookkeeping level. This is not executable verification or release acceptance. Connection probing/racing, message-id generation, plaintext/not-secure framing, network send/retry/timeout, server response correlation/application, broader auth-key creation/persistence/session lifecycle, arbitrary sent/resend/container histories, gzip, complete difference/differenceSlice decoding/application, broader fixed-U source/legal closure, Stage-B evidence and independent release ACCEPT remain open/fail-closed.
