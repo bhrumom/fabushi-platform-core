@@ -335,20 +335,72 @@ fn schema_v2_database_migrates_to_secure_runtime_value_slot() {
 fn schema_v3_private_metadata_database_migrates_to_unified_v4() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("schema-v3-private.sqlite3");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE private_metadata (
+               key TEXT PRIMARY KEY,
+               payload BLOB NOT NULL,
+               updated_at_unix_ms INTEGER NOT NULL
+             ) WITHOUT ROWID;
+             PRAGMA user_version = 3;",
+        )
+        .unwrap();
+    drop(connection);
+
     let mut store = EncryptedSqliteStore::open(&path, key(13)).unwrap();
     store
-        .save_private_metadata("authorization.v1", b"identity-before-v4", 7)
+        .save_private_metadata("authorization.v1", b"identity-after-v3-migration", 7)
         .unwrap();
-    drop(store);
-
-    let store = EncryptedSqliteStore::open(&path, key(13)).unwrap();
+    store
+        .save_secure_value("authorization-runtime-v1", b"lifecycle-after-v3-migration")
+        .unwrap();
     assert_eq!(
         store.load_private_metadata("authorization.v1").unwrap().as_deref(),
-        Some(b"identity-before-v4".as_slice())
+        Some(b"identity-after-v3-migration".as_slice())
     );
     assert_eq!(
-        store.load_secure_value("authorization-runtime-v1").unwrap(),
-        None
+        store
+            .load_secure_value("authorization-runtime-v1")
+            .unwrap()
+            .as_deref(),
+        Some(b"lifecycle-after-v3-migration".as_slice())
+    );
+}
+
+#[test]
+fn schema_v3_secure_value_database_migrates_to_unified_v4() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("schema-v3-secure.sqlite3");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE secure_value (
+               key TEXT PRIMARY KEY,
+               payload BLOB NOT NULL
+             ) WITHOUT ROWID;
+             PRAGMA user_version = 3;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let mut store = EncryptedSqliteStore::open(&path, key(15)).unwrap();
+    store
+        .save_secure_value("authorization-runtime-v1", b"secure-after-v3-migration")
+        .unwrap();
+    store
+        .save_private_metadata("transport.v1", b"transport-after-v3-migration", 9)
+        .unwrap();
+    assert_eq!(
+        store
+            .load_secure_value("authorization-runtime-v1")
+            .unwrap()
+            .as_deref(),
+        Some(b"secure-after-v3-migration".as_slice())
+    );
+    assert_eq!(
+        store.load_private_metadata("transport.v1").unwrap().as_deref(),
+        Some(b"transport-after-v3-migration".as_slice())
     );
 }
 
