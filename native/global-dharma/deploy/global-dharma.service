@@ -1,0 +1,20 @@
+[Unit]
+Description=Global Dharma authorized delivery daemon
+After=network-online.target
+
+[Service]
+Type=simple
+User=global-dharma
+Group=global-dharma
+Environment=GLOBAL_DHARMA_CONFIG=/etc/global-dharma/global-dharma.toml
+ExecStart=/usr/local/bin/global-dharma-daemon
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/global-dharma
+
+[Install]
+WantedBy=multi-user.target

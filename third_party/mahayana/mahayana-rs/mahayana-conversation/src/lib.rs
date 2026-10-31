@@ -1,0 +1,209 @@
+//! Conversation provider routing shared by CLI, native app, Electron, and Web surfaces.
+
+use async_trait::async_trait;
+use mahayana_core::ApprovalDecision;
+use mahayana_core::ApprovalId;
+use mahayana_core::Conversation;
+use mahayana_core::ConversationId;
+use mahayana_core::Message;
+use mahayana_core::OperationId;
+use mahayana_core::PluginCommandDescriptor;
+use mahayana_core::RuntimeEvent;
+use serde_json::Value;
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+pub const MAHAYANA_AI_PROVIDER_KEY: &str = "mahayana-ai";
+pub const MAHAYANA_AI_CONVERSATION_PREFIX: &str = "mahayana-ai:";
+
+#[derive(Debug, Clone)]
+pub struct SendMessageRequest {
+    pub conversation_id: ConversationId,
+    pub operation_id: OperationId,
+    pub text: String,
+    pub client_message_id: Option<String>,
+    pub hidden: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolveApprovalRequest {
+    pub approval_id: ApprovalId,
+    pub decision: ApprovalDecision,
+    pub payload: Value,
+}
+
+/// Event sink used by provider implementations. Implementations must preserve
+/// ordering for events belonging to the same operation.
+pub trait ConversationEventSink: Send + Sync {
+    fn emit(&self, event: RuntimeEvent) -> Result<(), ConversationError>;
+}
+
+pub type SharedConversationEventSink = Arc<dyn ConversationEventSink>;
+
+/// One source of conversations. Implementations own provider-specific network,
+/// persistence, and approval behavior while exposing one product contract.
+#[async_trait]
+pub trait ConversationProvider: Send + Sync {
+    fn key(&self) -> &'static str;
+
+    async fn list_conversations(&self) -> Result<Vec<Conversation>, ConversationError>;
+
+    async fn list_plugin_commands(
+        &self,
+        _plugin_id: Option<&str>,
+    ) -> Result<Vec<PluginCommandDescriptor>, ConversationError> {
+        Ok(Vec::new())
+    }
+
+    async fn history(
+        &self,
+        conversation_id: &ConversationId,
+        limit: u32,
+    ) -> Result<Vec<Message>, ConversationError>;
+
+    /// Prepare provider-owned resources needed by the first user-visible turn
+    /// without sending model input or mutating the conversation transcript.
+    ///
+    /// Providers that have no cold session/setup cost may keep the default
+    /// no-op. Native agent providers should make this idempotent so product
+    /// startup can establish real readiness before the composer is usable.
+    async fn warmup(&self, _conversation_id: &ConversationId) -> Result<(), ConversationError> {
+        Ok(())
+    }
+
+    async fn send_message(
+        &self,
+        request: SendMessageRequest,
+        events: SharedConversationEventSink,
+    ) -> Result<(), ConversationError>;
+
+    async fn interrupt(&self, operation_id: &OperationId) -> Result<(), ConversationError>;
+
+    async fn resolve_approval(
+        &self,
+        request: ResolveApprovalRequest,
+    ) -> Result<(), ConversationError>;
+
+    /// Drops local transcript/session state when the authenticated product
+    /// account changes. Remote providers may keep the default no-op.
+    async fn reset_session(&self) -> Result<(), ConversationError> {
+        Ok(())
+    }
+
+    /// Switch the local transcript file used by a long-lived provider. The
+    /// default is a no-op for providers whose history is remote or owned by a
+    /// separate account boundary.
+    async fn set_history_path(&self, _path: Option<PathBuf>) -> Result<(), ConversationError> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct ProviderRegistry {
+    providers: BTreeMap<String, Arc<dyn ConversationProvider>>,
+}
+
+impl ProviderRegistry {
+    pub fn register(
+        &mut self,
+        provider: Arc<dyn ConversationProvider>,
+    ) -> Result<(), ConversationError> {
+        let key = provider.key().trim();
+        if key.is_empty() {
+            return Err(ConversationError::InvalidProviderKey);
+        }
+        if self.providers.insert(key.to_string(), provider).is_some() {
+            return Err(ConversationError::DuplicateProvider(key.to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn get(&self, key: &str) -> Option<Arc<dyn ConversationProvider>> {
+        self.providers.get(key).cloned()
+    }
+
+    pub fn for_conversation(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> Result<Arc<dyn ConversationProvider>, ConversationError> {
+        let key = provider_key_for_conversation_id(conversation_id)?;
+        self.get(key)
+            .ok_or_else(|| ConversationError::ProviderUnavailable(key.to_string()))
+    }
+
+    pub fn keys(&self) -> Vec<String> {
+        self.providers.keys().cloned().collect()
+    }
+
+    pub fn providers(&self) -> Vec<Arc<dyn ConversationProvider>> {
+        self.providers.values().cloned().collect()
+    }
+}
+
+pub fn provider_key_for_conversation_id(
+    conversation_id: &ConversationId,
+) -> Result<&'static str, ConversationError> {
+    let value = conversation_id.as_str();
+    if value.starts_with(MAHAYANA_AI_CONVERSATION_PREFIX) || value.starts_with("codex:") {
+        // `codex:` remains a read-compatible migration prefix only. New
+        // Mahayana surfaces emit `mahayana-ai:` identifiers and both route to
+        // the sovereign AI provider boundary.
+        Ok(MAHAYANA_AI_PROVIDER_KEY)
+    } else if value.starts_with("telegram:") {
+        Ok("telegram")
+    } else if value.starts_with("mahayana:") {
+        Ok("mahayana-social")
+    } else if value.starts_with("miniapp:") {
+        Ok("miniapp")
+    } else {
+        Err(ConversationError::UnsupportedConversation(
+            value.to_string(),
+        ))
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConversationError {
+    #[error("provider key must not be empty")]
+    InvalidProviderKey,
+    #[error("provider is already registered: {0}")]
+    DuplicateProvider(String),
+    #[error("provider is unavailable: {0}")]
+    ProviderUnavailable(String),
+    #[error("unsupported conversation id: {0}")]
+    UnsupportedConversation(String),
+    #[error("conversation was not found: {0}")]
+    ConversationNotFound(ConversationId),
+    #[error("operation was not found: {0}")]
+    OperationNotFound(OperationId),
+    #[error("approval was not found: {0}")]
+    ApprovalNotFound(ApprovalId),
+    #[error("model usage limit exceeded: {0}")]
+    UsageLimitExceeded(String),
+    #[error("provider failed: {0}")]
+    Provider(String),
+    #[error("event consumer is closed")]
+    EventConsumerClosed,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routes_all_supported_peer_prefixes() {
+        let cases = [
+            ("mahayana-ai:agent:assistant", MAHAYANA_AI_PROVIDER_KEY),
+            ("codex:agent:assistant", MAHAYANA_AI_PROVIDER_KEY),
+            ("telegram:user:42", "telegram"),
+            ("mahayana:contact:abc", "mahayana-social"),
+            ("miniapp:official.flashcards", "miniapp"),
+        ];
+        for (id, expected) in cases {
+            let actual = provider_key_for_conversation_id(&ConversationId(id.to_string()))
+                .expect("known conversation prefix");
+            assert_eq!(actual, expected);
+        }
+    }
+}

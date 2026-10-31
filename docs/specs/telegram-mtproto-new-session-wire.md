@@ -1,0 +1,141 @@
+# Telegram MTProto new-session exact wire validation — Specification
+
+Status: active  
+Owner: shared Telegram protocol/network runtime  
+Last updated: 2026-11-01  
+Related task: Fabushi migration task 7457eb1c-11a3-4626-8563-a3e495872536 round 25
+
+## 1. Context / problem
+
+The existing `telegram-network::EstablishedSession` already handles fixed-U `new_session_created#9ec20908` for the scoped single-RPC replay path, but it reads fields by raw byte offsets. That path currently consumes `first_msg_id` and `server_salt` without a shared typed parser that also validates `unique_id` and exact buffer consumption.
+
+## 2. Goal
+
+Move complete fixed-U `new_session_created` wire validation into the existing `telegram-protocol/src/updates.rs` owner and make both current RPC and ping/service receive paths use it before any salt/replay side effect.
+
+## 3. Non-goals / out of scope
+
+- Higher-level update/difference recovery after the service message.
+- Historical multi-request replay ownership.
+- `gzip_packed` decompression.
+- A second session/runtime/provider.
+
+## 4. Requirements
+
+- R1: `telegram-protocol/src/updates.rs` SHALL expose the fixed-U constructor `0x9ec20908`.
+- R2: It SHALL expose a typed value containing `first_message_id`, `unique_id`, and `server_salt`.
+- R3: The parser SHALL reject wrong constructors, truncation, and trailing bytes.
+- R4: `EstablishedSession::scan_rpc_body` SHALL parse the complete typed object before updating salt or deciding current-RPC replay.
+- R5: `EstablishedSession::process_service_body` SHALL parse the same typed object before updating salt on the ping/service path.
+- R6: Existing bounded replay semantics remain unchanged: only the current outstanding RPC may be retried, and only once.
+- R7: No historical `wasSent/haveSent/_resendingIds/toSend/_sentContainers` owner SHALL be inferred or introduced.
+- R8: Stage-A exact-field/malformed-payload contracts SHALL be authored but not executed.
+- R9: Desktop provider copies SHALL be synchronized byte-for-byte with canonical platform-core protocol/network blobs.
+- R10: This slice SHALL NOT claim the separate high-level update/difference recovery responsibility complete.
+
+## 5. Current state
+
+- `telegram-protocol/src/updates.rs` owns update-state/get-difference wire primitives but has no new-session parser.
+- `telegram-network/src/lib.rs` has a private duplicate `NEW_SESSION_CREATED_CONSTRUCTOR` and offset reads at byte 4/20.
+- Both `invoke_raw` and ping/service receive paths are already in the shipping account-bound transport chain.
+
+## 6. Target state
+
+Authenticated/decrypted service body -> shared typed `parse_new_session_created` -> exact constructor/three-field/trailing validation -> existing salt update -> existing bounded replay or continue.
+
+## 7. Architecture and ownership boundaries
+
+Wire structure belongs to `telegram-protocol`; transport side effects remain in `telegram-network::EstablishedSession`. Runtime/account ownership does not change.
+
+## 8. Interfaces / contracts / schemas / data flow
+
+Fixed-U authority: `new_session_created#9ec20908 first_msg_id:long unique_id:long server_salt:long = NewSession`.
+
+## 9. Constraints and non-functional requirements
+
+- Fail closed before side effects.
+- No new dependency.
+- No CI/build/test execution in Stage A.
+
+## 10. Failure modes and edge cases
+
+Wrong constructor, fewer than three longs, or any trailing bytes fail through the existing protocol/network invalid-service-message path. A valid object preserves the existing one-RPC replay comparison and ping salt adoption.
+
+## 11. Implementation strategy
+
+Add the typed parser and inline authored unit contracts to `updates.rs`; re-export it from protocol `lib.rs`; replace the network-local constructor/offset reads in both new-session branches with the typed parser.
+
+## 12. Verification / test strategy
+
+Author but do not run:
+- exact three-field parse;
+- wrong-constructor rejection;
+- truncation rejection;
+- trailing-byte rejection;
+- existing replay predicate contracts remain unchanged.
+
+## 13. Acceptance criteria / Definition of Done
+
+- AC-1: canonical protocol parser and network consumer are committed on the existing checkpoint;
+- AC-2: parsing precedes salt/replay side effects in both receive paths;
+- AC-3: desktop provider blobs match canonical blobs;
+- AC-4: ledger/P0/source-closure record implemented/not-run/accepted=false;
+- AC-5: high-level difference recovery remains explicitly blocked/open;
+- AC-6: no Stage-A executable validation is performed.
+
+## 14. Release / migration / rollback
+
+No release in Stage A. Revert the implementation commit if later Stage-B validation finds a defect.
+
+## 15. Observability / evidence
+
+Git blob identities, commit identities, manual source review, and authored contracts only.
+
+## 16. References / provenance
+
+- `telegramdesktop/tdesktop@f985723b552b30fe1c17d377d57f44e61a15a8c4:Telegram/SourceFiles/mtproto/session_private.cpp@13cbc76ec723386027b5b4dcac79999b791c4614`
+- `telegramdesktop/tdesktop@f985723b552b30fe1c17d377d57f44e61a15a8c4:Telegram/SourceFiles/mtproto/scheme/mtproto.tl@76225965bfc794388db241f3f760db8ab79e84f8`
+
+## 17. Spec compliance record
+
+| Requirement / AC | Status | Evidence / reason |
+| --- | --- | --- |
+| R1-R10 | passed | Canonical implementation `dc66cc7aae7644530fa03160438df5174809beb4` adds the exact typed parser in `updates.rs@23a09bb6e4e78ef526823cf01d0a207565fb2a3e`, re-export in `lib.rs@7b9c641eabccb7dba8c5a425904b6a676b12d866`, and uses it before salt/replay side effects in both network receive paths at `lib.rs@234c6c0070a1a92218fe5c974658d16d37fee46a`; contracts are authored but not run, no historical request owner is added, and the separate high-level difference responsibility remains blocked rather than claimed complete. |
+| AC-1 | passed | Platform-core implementation is committed at `dc66cc7aae7644530fa03160438df5174809beb4` on the existing checkpoint. |
+| AC-2 | passed | `parse_new_session_created` consumes constructor plus first_msg_id/unique_id/server_salt and rejects wrong/truncated/trailing objects before the existing network salt/replay side effects. |
+| AC-3 | passed | Desktop implementation `23b24ab2db29697071d21eb747f475b2196d891f` synchronizes provider updates/lib/network blobs byte-for-byte to `23a09bb6e4e78ef526823cf01d0a207565fb2a3e`, `7b9c641eabccb7dba8c5a425904b6a676b12d866`, and `234c6c0070a1a92218fe5c974658d16d37fee46a`. |
+| AC-4 | passed | Desktop bookkeeping `2a07441ec1deba938b706d5298ec0b21b98c2a7a` records `TDRP-R9-MTPROTO-NEW-SESSION-WIRE-001` as implemented with `test_execution_evidence=[]`, notes `validation_status=not-run` / `accepted=false`, and `responsibilities_total=67`. |
+| AC-5 | passed | High-level new-session difference recovery is explicitly fail-closed in `telegram-new-session-update-difference-recovery.md`: full/slice TL object decoding and canonical application are missing, so this wire slice does not claim that responsibility complete. |
+| AC-6 | passed | Round 25 performed source/ref/blob reads, authored contracts, and conditional Git writes only; no Actions/status/check query or trigger and no build, lint, validator, generator, test, package, deployment, installation, or runtime acceptance was performed. |
+
+
+## Round 62 adjacent source-level revalidation
+
+Fixed-U adjacency was re-read from `mtproto.tl@76225965bfc794388db241f3f760db8ab79e84f8` and `session_private.cpp@13cbc76ec723386027b5b4dcac79999b791c4614`. Immediately after `DestroySessionRes`, the service-message type is `new_session_created#9ec20908 first_msg_id:long unique_id:long server_salt:long = NewSession`.
+
+Current canonical production ownership remains exact with **no production delta**:
+
+- `native/telegram-protocol/src/updates.rs@23a09bb6e4e78ef526823cf01d0a207565fb2a3e` owns `NEW_SESSION_CREATED_CONSTRUCTOR`, typed `NewSessionCreated`, and `parse_new_session_created`.
+- The parser consumes exactly constructor 4 + first_msg_id 8 + unique_id 8 + server_salt 8 = 28 bytes through the bounded little-endian `TlReader`, preserves signed `i64` values, rejects any constructor mismatch or truncation, and requires strict EOF.
+- Current `native/telegram-network/src/lib.rs@1fc1b1f69e3e37377400d078f916599e0c7b20bc` calls that parser before either server-salt mutation or the existing one-current-RPC replay decision, and the ping/service path likewise parses before salt adoption.
+- Desktop provider copies of protocol updates and network remain byte-identical to the canonical blobs. Current protocol `lib.rs` re-exports the same parser/type/constructor; later unrelated service-wire additions do not change this responsibility.
+
+Round-62 authored-only external contracts SHALL pin the exact 28-byte object, field offsets `0..4 / 4..12 / 12..20 / 20..28`, signed `i64::MIN` / `i64::MAX` preservation, every truncation cut from 0 through 27 bytes, wrong-constructor rejection, and trailing-byte rejection. They SHALL NOT execute in Stage A.
+
+The existing ledger responsibility `TDRP-R9-MTPROTO-NEW-SESSION-WIRE-001` remains the sole row and stays `implemented / validation_status=not-run / accepted=false`. Arbitrary `wasSent/haveSent/_resendingIds/toSend/_sentContainers` history, broader connection scheduling, auth-key binding/persistence, `gzip_packed`, and complete `updates.difference/updates.differenceSlice` decoding/application remain outside this wire-only revalidation or open/fail-closed.
+
+No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, or runtime acceptance is permitted or claimed for this Stage-A revalidation.
+
+
+## Round 62 final source-level compliance
+
+Remote desktop readback closes this adjacent fixed-U `NewSession` wire revalidation at source level with **no production delta**.
+
+- Canonical production protocol updates/lib/network blobs remain `23a09bb6e4e78ef526823cf01d0a207565fb2a3e` / `abab39e42f100972484191f0e52e9edd9b88c6cf` / `1fc1b1f69e3e37377400d078f916599e0c7b20bc`.
+- The authored-only canonical external contract is commit `0db067351aef9365ada9e168f041599983dc1693`, blob `32a60800c34d53223fed2f1e4aa521e300b510d7`.
+- Desktop mirrors that contract byte-identically and synchronizes evidence/ledger/P0/source-closure in commit `f21b763c3ce954b49d7fc06afcb188a13f3160f3`.
+- Desktop remote readback reports contract / ledger / P0 / source-closure / round93 evidence blobs as `32a60800c34d53223fed2f1e4aa521e300b510d7` / `74c3320ab5cfcd62510b023dfd0d23adac120761` / `6b67537ecccf6b3ba0dee1285ac8a90b379c5610` / `ae80906f597a0421749e0e2be8c2791f6dce315c` / `99ed0083b64743b3b8fe4d79d2aa2013dbc1bdea`.
+- The existing `TDRP-R9-MTPROTO-NEW-SESSION-WIRE-001` row remains `implemented / validation_status=not-run / accepted=false`; no duplicate responsibility is created.
+- Arbitrary multi-request history, connection scheduling, auth-key binding/persistence, gzip, complete difference decoding/application, broader source/legal closure, Stage-B executable evidence, and independent release ACCEPT remain open or outside this wire-only claim.
+
+No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, or runtime acceptance was performed.

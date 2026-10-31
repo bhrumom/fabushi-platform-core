@@ -1,0 +1,4 @@
+# Deployment verification carries a single cohesive release identity across
+# source, manifest, and package checks. Keep the limit explicit for this
+# workspace while retaining the default strict warning policy for all lints.
+too-many-arguments-threshold = 10

@@ -1,0 +1,6 @@
+[env]
+# Keep Rust/C build-script outputs aligned with the native Xcode deployment
+# target. Apple toolchains otherwise stamp simulator objects with the runner SDK
+# default, which produces hundreds of newer-iOS-version linker warnings when the
+# app links at iOS 17.0.
+IPHONEOS_DEPLOYMENT_TARGET = { value = "17.0", force = false }

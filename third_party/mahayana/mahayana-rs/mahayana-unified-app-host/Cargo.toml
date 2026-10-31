@@ -1,0 +1,17 @@
+[package]
+name = "mahayana-unified-app-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Unified long-lived Fabushi AppHost plus Rust-native Mahayana Harness."
+publish = false
+
+[lib]
+doctest = false
+
+[dependencies]
+mahayana-app-host.workspace = true
+mahayana-core.workspace = true
+mahayana-harness-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true

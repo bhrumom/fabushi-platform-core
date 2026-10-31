@@ -1,0 +1,36 @@
+[package]
+name = "mahayana-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stable C/JSON compatibility ABI for the embedded Mahayana Host."
+publish = false
+
+[lib]
+name = "mahayana_runtime"
+path = "src/lib.rs"
+# iOS and desktop build scripts request `staticlib` or `cdylib` explicitly via
+# command line options when producing native runtime bundles. Keeping dynamic/static
+# libraries out of the default crate-type list avoids producing multi-gigabyte unused
+# archives during `cargo test` and prevents x86_64 ELF linker errors when linking V8 on Linux.
+crate-type = ["rlib"]
+doctest = false
+
+[features]
+default = ["desktop-full", "local-only"]
+desktop-full = ["mahayana-host/desktop-full"]
+mobile-embedded = ["mahayana-host/mobile-embedded"]
+linux-shared = ["mahayana-host/linux-shared"]
+web-wasm = ["mahayana-host/web-wasm"]
+local-only = ["mahayana-host/local-only"]
+remote-model-provider = ["mahayana-host/remote-model-provider"]
+telemetry = ["mahayana-host/telemetry"]
+
+[dependencies]
+fabushi-telegram-runtime = { path = "../providers/telegram-runtime" }
+mahayana-core.workspace = true
+mahayana-host = { workspace = true, default-features = false }
+mahayana-product = { package = "mahayana-platform-client", path = "../mahayana-product" }
+once_cell.workspace = true
+serde.workspace = true
+serde_json.workspace = true
