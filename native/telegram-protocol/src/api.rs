@@ -1875,6 +1875,22 @@ mod mtproto_service_builder_contract_tests {
         wrong_rule[..4].copy_from_slice(&0_u32.to_le_bytes());
         assert!(parse_access_point_rule(&wrong_rule).is_err());
 
+        let mut wrong_vector = TlWriter::new();
+        wrong_vector.write_u32(ACCESS_POINT_RULE_CONSTRUCTOR);
+        wrong_vector.write_string("+1").expect("write phone rules");
+        wrong_vector.write_i32(2);
+        wrong_vector.write_u32(0);
+        wrong_vector.write_i32(0);
+        assert!(parse_access_point_rule(wrong_vector.as_slice()).is_err());
+
+        let mut invalid_utf8 = Vec::new();
+        invalid_utf8.extend_from_slice(&ACCESS_POINT_RULE_CONSTRUCTOR.to_le_bytes());
+        invalid_utf8.extend_from_slice(&[1, 0xff, 0, 0]);
+        invalid_utf8.extend_from_slice(&2_i32.to_le_bytes());
+        invalid_utf8.extend_from_slice(&0x1cb5_c415_u32.to_le_bytes());
+        invalid_utf8.extend_from_slice(&0_i32.to_le_bytes());
+        assert!(parse_access_point_rule(&invalid_utf8).is_err());
+
         let mut wrong_ip = exact.clone();
         let first_ip_constructor = wrong_ip
             .windows(4)
@@ -1924,6 +1940,14 @@ mod mtproto_service_builder_contract_tests {
         let mut wrong_config = exact.clone();
         wrong_config[..4].copy_from_slice(&0_u32.to_le_bytes());
         assert!(parse_help_config_simple(&wrong_config).is_err());
+
+        let mut wrong_rules_vector = TlWriter::new();
+        wrong_rules_vector.write_u32(HELP_CONFIG_SIMPLE_CONSTRUCTOR);
+        wrong_rules_vector.write_i32(1);
+        wrong_rules_vector.write_i32(2);
+        wrong_rules_vector.write_u32(0);
+        wrong_rules_vector.write_i32(0);
+        assert!(parse_help_config_simple(wrong_rules_vector.as_slice()).is_err());
 
         let mut wrong_rule = exact.clone();
         let rule_constructor = wrong_rule
