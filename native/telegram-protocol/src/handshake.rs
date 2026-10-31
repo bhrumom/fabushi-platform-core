@@ -985,6 +985,12 @@ pub fn parse_dh_gen_result(
 ) -> Result<DhGenResult, HandshakeError> {
     let mut reader = TlReader::new(input);
     let constructor = reader.read_u32()?;
+    let (result, tag) = match constructor {
+        DH_GEN_OK_CONSTRUCTOR => (DhGenResult::Ok, 1_u8),
+        DH_GEN_RETRY_CONSTRUCTOR => (DhGenResult::Retry, 2_u8),
+        DH_GEN_FAIL_CONSTRUCTOR => (DhGenResult::Fail, 3_u8),
+        other => return Err(HandshakeError::UnexpectedDhGenConstructor(other)),
+    };
     let nonce = reader.read_i128_bytes()?;
     let server_nonce = reader.read_i128_bytes()?;
     validate_nonce_pair(&nonce, &server_nonce, expected_nonce, expected_server_nonce)?;
@@ -992,12 +998,6 @@ pub fn parse_dh_gen_result(
     if !reader.is_finished() {
         return Err(HandshakeError::TrailingBodyBytes(reader.remaining()));
     }
-    let (result, tag) = match constructor {
-        DH_GEN_OK_CONSTRUCTOR => (DhGenResult::Ok, 1_u8),
-        DH_GEN_RETRY_CONSTRUCTOR => (DhGenResult::Retry, 2_u8),
-        DH_GEN_FAIL_CONSTRUCTOR => (DhGenResult::Fail, 3_u8),
-        other => return Err(HandshakeError::UnexpectedDhGenConstructor(other)),
-    };
     let mut material = Zeroizing::new(Vec::with_capacity(41));
     material.extend_from_slice(new_nonce);
     material.push(tag);
