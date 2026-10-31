@@ -246,3 +246,86 @@ fn newer_database_schema_is_rejected() {
         Err(StorageError::UnsupportedSchemaVersion(99))
     ));
 }
+
+
+#[test]
+fn secure_runtime_value_round_trips_encrypted_and_can_be_cleared() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("secure-runtime.sqlite3");
+    let secret = br#"{"phoneNumber":"+15551234567","phoneCodeHash":"never-plaintext"}"#;
+    {
+        let mut store = EncryptedSqliteStore::open(&path, key(11)).unwrap();
+        store
+            .save_secure_value("authorization-runtime-v1", secret)
+            .unwrap();
+        assert_eq!(
+            store
+                .load_secure_value("authorization-runtime-v1")
+                .unwrap()
+                .as_deref(),
+            Some(secret.as_slice())
+        );
+    }
+    let bytes = std::fs::read(&path).unwrap();
+    let database_text = String::from_utf8_lossy(&bytes);
+    assert!(!database_text.contains("+15551234567"));
+    assert!(!database_text.contains("never-plaintext"));
+
+    let mut store = EncryptedSqliteStore::open(&path, key(11)).unwrap();
+    assert!(store
+        .delete_secure_value("authorization-runtime-v1")
+        .unwrap());
+    assert!(store
+        .load_secure_value("authorization-runtime-v1")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn schema_v2_database_migrates_to_secure_runtime_value_slot() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("schema-v2.sqlite3");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE state_snapshot (
+               id INTEGER PRIMARY KEY CHECK (id = 1),
+               revision INTEGER NOT NULL CHECK (revision > 0),
+               payload BLOB NOT NULL,
+               updated_at_unix_ms INTEGER NOT NULL
+             );
+             CREATE TABLE event_log (
+               sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+               payload BLOB NOT NULL,
+               created_at_unix_ms INTEGER NOT NULL
+             );
+             CREATE TABLE message_index (
+               chat_id INTEGER NOT NULL,
+               message_id INTEGER NOT NULL,
+               date_unix_ms INTEGER NOT NULL,
+               payload BLOB NOT NULL,
+               PRIMARY KEY (chat_id, message_id)
+             );
+             CREATE TABLE message_search_token (
+               token BLOB NOT NULL,
+               chat_id INTEGER NOT NULL,
+               message_id INTEGER NOT NULL,
+               PRIMARY KEY (token, chat_id, message_id)
+             ) WITHOUT ROWID;
+             PRAGMA user_version = 2;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let mut store = EncryptedSqliteStore::open(&path, key(12)).unwrap();
+    store
+        .save_secure_value("authorization-runtime-v1", b"pending-auth")
+        .unwrap();
+    assert_eq!(
+        store
+            .load_secure_value("authorization-runtime-v1")
+            .unwrap()
+            .as_deref(),
+        Some(b"pending-auth".as_slice())
+    );
+}

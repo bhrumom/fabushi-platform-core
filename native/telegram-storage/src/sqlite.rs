@@ -8,7 +8,7 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::Path};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const SNAPSHOT_ID: i64 = 1;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -60,6 +60,44 @@ impl EncryptedSqliteStore {
         };
         store.migrate()?;
         Ok(store)
+    }
+
+    pub fn load_secure_value(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        let payload = self
+            .connection
+            .query_row(
+                "SELECT payload FROM secure_value WHERE key = ?1",
+                [key],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        payload
+            .map(|payload| {
+                self.cipher.decrypt(
+                    &EncryptedPayload(payload),
+                    secure_value_associated_data(key).as_bytes(),
+                )
+            })
+            .transpose()
+    }
+
+    pub fn save_secure_value(&mut self, key: &str, value: &[u8]) -> Result<(), StorageError> {
+        let payload = self
+            .cipher
+            .encrypt(value, secure_value_associated_data(key).as_bytes())?;
+        self.connection.execute(
+            "INSERT INTO secure_value (key, payload) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET payload = excluded.payload",
+            params![key, payload.0],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_secure_value(&mut self, key: &str) -> Result<bool, StorageError> {
+        Ok(self
+            .connection
+            .execute("DELETE FROM secure_value WHERE key = ?1", [key])?
+            > 0)
     }
 
     pub fn load_snapshot(&self) -> Result<Option<StateSnapshot>, StorageError> {
@@ -489,7 +527,11 @@ impl EncryptedSqliteStore {
                    FOREIGN KEY (chat_id, message_id)
                      REFERENCES message_index(chat_id, message_id) ON DELETE CASCADE
                  ) WITHOUT ROWID;
-                 PRAGMA user_version = 2;",
+                 CREATE TABLE secure_value (
+                   key TEXT PRIMARY KEY,
+                   payload BLOB NOT NULL
+                 ) WITHOUT ROWID;
+                 PRAGMA user_version = 3;",
             )?;
             transaction.commit()?;
         } else if current == 1 {
@@ -512,7 +554,21 @@ impl EncryptedSqliteStore {
                    FOREIGN KEY (chat_id, message_id)
                      REFERENCES message_index(chat_id, message_id) ON DELETE CASCADE
                  ) WITHOUT ROWID;
-                 PRAGMA user_version = 2;",
+                 CREATE TABLE secure_value (
+                   key TEXT PRIMARY KEY,
+                   payload BLOB NOT NULL
+                 ) WITHOUT ROWID;
+                 PRAGMA user_version = 3;",
+            )?;
+            transaction.commit()?;
+        } else if current == 2 {
+            let transaction = self.connection.transaction()?;
+            transaction.execute_batch(
+                "CREATE TABLE secure_value (
+                   key TEXT PRIMARY KEY,
+                   payload BLOB NOT NULL
+                 ) WITHOUT ROWID;
+                 PRAGMA user_version = 3;",
             )?;
             transaction.commit()?;
         }
@@ -662,6 +718,10 @@ fn is_cjk(character: char) -> bool {
     )
 }
 
+fn secure_value_associated_data(key: &str) -> String {
+    format!("fabushi.telegram.secure-value.v1:{key}")
+}
+
 fn snapshot_associated_data(revision: u64) -> String {
     format!("fabushi.telegram.snapshot.v1:{revision}")
 }
@@ -694,6 +754,6 @@ mod tests {
             .connection()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
     }
 }
