@@ -77,3 +77,21 @@ Do not run build, typecheck, lint, schema validation, generators, unit/contract/
 - AC7: `validation_status=not-run` and `accepted=false` remain until Stage B executable evidence exists.
 
 No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, GitHub Actions, checks, statuses, or runtime acceptance is executed or queried in Stage A.
+
+
+## Round 89 final source-level compliance
+
+Final source-level readback after the durable Stage-A writes confirms:
+
+- live platform-core pre-contract HEAD: `bf4f241f9ceddc9b032b23d1f154a8883b636e92`;
+- no-production-delta spec commit/blob: `bf4f241f9ceddc9b032b23d1f154a8883b636e92@757e919f5328bd004fcf2e9a22b49a05e4a80f21`;
+- canonical authored-only contract commit/blob: `67e66a56a2ab2bf3c85b27a5d2bfac0d5682321f@b3e535525ffa97920816c9b8f316afddbf46f6ac`;
+- canonical production api/tl/lib/network blobs remain unchanged at `ebfb3670b5cd097b9ce288782c7954f5cfe9fc43` / `89256ab35184b6dc06a095ab34abb9f44e95a264` / `abab39e42f100972484191f0e52e9edd9b88c6cf` / `1fc1b1f69e3e37377400d078f916599e0c7b20bc`;
+- desktop contract mirror commit `8caa269f72d98f79624ef73bd3ea901d0d0a6f86` is byte-identical at `b3e535525ffa97920816c9b8f316afddbf46f6ac`;
+- desktop bookkeeping/evidence commit `b51f94db767e622becfe3b9cf0af917e7eaec5b8` reuses the existing `TDRP-R9-MTPROTO-BAD-SERVER-SALT-WIRE-001` row at `implemented / validation_status=not-run / accepted=false`, with ledger blob `65b80f8d4b5517ddee84aa78157d99e4dbc05e36` and unchanged coverage `97 responsibilities / 16172 unknown / 16145 unread / 0 omitted`.
+
+For this isolated adjacent parser responsibility, constructor `0xedab447b`, signed 8/4/4/8 decoding, truncation fail-closed behavior and strict EOF are source-level satisfied with **no production delta**. Existing telegram-network consumers prove shipping reachability, but salt adoption/persistence, bad-time/time correction, request-history lookup, binding/reconnect, resend/application and broader session semantics remain outside this wire-only claim.
+
+The newly authored external contracts cover exact 28-byte layout, signed i64/i32/i32/i64 extremes, wrong constructor, constructor/field truncation boundaries, trailing bytes and exact EOF. They remain intentionally not run.
+
+No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, GitHub Actions, checks, statuses, or runtime acceptance was executed or queried. Stage-B executable evidence and independent release ACCEPT remain open.
