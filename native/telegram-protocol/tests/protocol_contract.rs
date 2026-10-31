@@ -28,7 +28,7 @@ use fabushi_telegram_protocol::{
     compute_password_srp_proof_with_random,
     parse_account_email_verified, parse_account_password_prefix, parse_account_sent_email_code,
     parse_auth_password_recovery, parse_auth_sent_code, parse_bool, parse_config_dc_directory_prefix,
-    parse_destroy_auth_key_result, try_parse_rpc_error, ApiRequestError, DestroyAuthKeyResult,
+    parse_destroy_auth_key_result, parse_msgs_state_info, try_parse_rpc_error, ApiRequestError, DestroyAuthKeyResult,
     EmailVerifiedResult, InitConnection, NextCodeType,
     SentCode, SentCodeDelivery, SentCodeResult, ACCOUNT_EMAIL_VERIFIED_LOGIN_CONSTRUCTOR,
     ACCOUNT_GET_PASSWORD_CONSTRUCTOR, ACCOUNT_PASSWORD_CONSTRUCTOR,
@@ -37,7 +37,7 @@ use fabushi_telegram_protocol::{
     CONFIG_CONSTRUCTOR, DC_OPTION_CONSTRUCTOR, DESTROY_AUTH_KEY_FAIL_CONSTRUCTOR,
     DESTROY_AUTH_KEY_NONE_CONSTRUCTOR, DESTROY_AUTH_KEY_OK_CONSTRUCTOR, HELP_GET_CONFIG_CONSTRUCTOR,
     INIT_CONNECTION_CONSTRUCTOR, INPUT_CHECK_PASSWORD_SRP_CONSTRUCTOR,
-    INVOKE_WITH_LAYER_CONSTRUCTOR, MSG_RESEND_REQ_CONSTRUCTOR, MSGS_ACK_CONSTRUCTOR, MSGS_STATE_REQ_CONSTRUCTOR, MTPROTO_LAYER,
+    INVOKE_WITH_LAYER_CONSTRUCTOR, MSG_RESEND_REQ_CONSTRUCTOR, MSGS_ACK_CONSTRUCTOR, MSGS_STATE_INFO_CONSTRUCTOR, MSGS_STATE_REQ_CONSTRUCTOR, MTPROTO_LAYER,
     PASSWORD_KDF_ALGO_CONSTRUCTOR,
 };
 use fabushi_telegram_protocol::{
@@ -296,6 +296,110 @@ fn msgs_state_req_request_wire_is_exact_and_vector_bounded() {
         TlError::LengthOutOfRange
     );
     assert!(overflow.as_slice().is_empty());
+}
+
+#[test]
+fn msgs_state_info_parser_preserves_signed_request_id_and_binary_tl_state() {
+    let states = [0x00, 0x01, 0x7f, 0x80, 0xff];
+
+    let mut writer = TlWriter::new();
+    writer.write_u32(MSGS_STATE_INFO_CONSTRUCTOR);
+    writer.write_i64(i64::MIN);
+    writer.write_bytes(&states).unwrap();
+    let encoded = writer.into_bytes();
+
+    let parsed = parse_msgs_state_info(&encoded).unwrap();
+    assert_eq!(parsed.request_message_id, i64::MIN);
+    assert_eq!(parsed.states, states);
+
+    let mut reader = TlReader::new(&encoded);
+    assert_eq!(reader.read_u32().unwrap(), MSGS_STATE_INFO_CONSTRUCTOR);
+    assert_eq!(reader.read_i64().unwrap(), i64::MIN);
+    assert_eq!(reader.read_bytes().unwrap(), states);
+    assert!(reader.is_finished());
+}
+
+#[test]
+fn msgs_state_info_parser_accepts_empty_and_long_form_tl_state() {
+    let mut empty = TlWriter::new();
+    empty.write_u32(MSGS_STATE_INFO_CONSTRUCTOR);
+    empty.write_i64(0);
+    empty.write_bytes(&[]).unwrap();
+    let empty = parse_msgs_state_info(&empty.into_bytes()).unwrap();
+    assert_eq!(empty.request_message_id, 0);
+    assert!(empty.states.is_empty());
+
+    let states = vec![0xa5; 254];
+    let mut long = TlWriter::new();
+    long.write_u32(MSGS_STATE_INFO_CONSTRUCTOR);
+    long.write_i64(i64::MAX);
+    long.write_bytes(&states).unwrap();
+    let encoded = long.into_bytes();
+
+    assert_eq!(&encoded[12..16], &[254, 254, 0, 0]);
+    let parsed = parse_msgs_state_info(&encoded).unwrap();
+    assert_eq!(parsed.request_message_id, i64::MAX);
+    assert_eq!(parsed.states, states);
+
+    let mut reader = TlReader::new(&encoded);
+    assert_eq!(reader.read_u32().unwrap(), MSGS_STATE_INFO_CONSTRUCTOR);
+    assert_eq!(reader.read_i64().unwrap(), i64::MAX);
+    assert_eq!(reader.read_bytes().unwrap(), states.as_slice());
+    assert!(reader.is_finished());
+}
+
+#[test]
+fn msgs_state_info_parser_rejects_wrong_constructor_truncation_padding_and_trailing_bytes() {
+    assert_eq!(
+        parse_msgs_state_info(&0x8cc0_d131_u32.to_le_bytes()).unwrap_err(),
+        ApiRequestError::Tl(TlError::UnexpectedConstructor {
+            expected: MSGS_STATE_INFO_CONSTRUCTOR,
+            actual: 0x8cc0_d131,
+        })
+    );
+
+    assert!(matches!(
+        parse_msgs_state_info(&MSGS_STATE_INFO_CONSTRUCTOR.to_le_bytes()),
+        Err(ApiRequestError::Tl(TlError::UnexpectedEof { .. }))
+    ));
+
+    let mut truncated_long = Vec::new();
+    truncated_long.extend_from_slice(&MSGS_STATE_INFO_CONSTRUCTOR.to_le_bytes());
+    truncated_long.extend_from_slice(&0x0102_0304_i32.to_le_bytes());
+    assert!(matches!(
+        parse_msgs_state_info(&truncated_long),
+        Err(ApiRequestError::Tl(TlError::UnexpectedEof { .. }))
+    ));
+
+    let mut truncated_length_header = Vec::new();
+    truncated_length_header.extend_from_slice(&MSGS_STATE_INFO_CONSTRUCTOR.to_le_bytes());
+    truncated_length_header.extend_from_slice(&7_i64.to_le_bytes());
+    truncated_length_header.extend_from_slice(&[254, 1, 0]);
+    assert!(matches!(
+        parse_msgs_state_info(&truncated_length_header),
+        Err(ApiRequestError::Tl(TlError::UnexpectedEof { .. }))
+    ));
+
+    let mut missing_padding = TlWriter::new();
+    missing_padding.write_u32(MSGS_STATE_INFO_CONSTRUCTOR);
+    missing_padding.write_i64(8);
+    missing_padding.write_bytes(&[0x11, 0x22]).unwrap();
+    let mut missing_padding = missing_padding.into_bytes();
+    missing_padding.pop();
+    assert!(matches!(
+        parse_msgs_state_info(&missing_padding),
+        Err(ApiRequestError::Tl(TlError::UnexpectedEof { .. }))
+    ));
+
+    let mut trailing = TlWriter::new();
+    trailing.write_u32(MSGS_STATE_INFO_CONSTRUCTOR);
+    trailing.write_i64(9);
+    trailing.write_bytes(&[0x04]).unwrap();
+    trailing.write_u32(0xfeed_beef);
+    assert_eq!(
+        parse_msgs_state_info(&trailing.into_bytes()).unwrap_err(),
+        ApiRequestError::InvalidMessageState
+    );
 }
 
 #[test]
