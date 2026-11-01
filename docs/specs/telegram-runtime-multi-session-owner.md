@@ -172,3 +172,20 @@ No synchronous read-timeout surrogate or special-config-only public command is i
 - R91-AC-6: focused contracts are authored but not run.
 - R91-AC-7: HTTP carrier, request cancellation/6000 ms, help.getConfig orchestration, and dc_options-only application remain explicitly pending.
 - R91-AC-8: no Actions/status/check query, build, typecheck, lint, validator, generator, dependency resolution, lock regeneration, test execution, package, deploy, install, or runtime acceptance is performed.
+
+
+## 12. Round 91 source-compliance record
+
+| Requirement / AC | Source-level status | Evidence |
+| --- | --- | --- |
+| R91-AC-1 / Dcenter key lifecycle | passed for source review | fixed-U Dcenter blobs 651dcf171544745efc0b5d53afd8af4a57fa5a88 / ef0df612db798338d166f47087bb35c1d29ff72b plus Session blobs d6f197d233fa4dcc6d2b19745e6d2787c5227911 / 40d7048c3057c7c5523b786048670524c8bebe4c show temporary 1000+d resolves to the same real Dcenter and Session delegates key reuse/creation to that owner. |
+| R91-AC-2 / sole auth-material owner | implemented, validation not run | platform runtime blob 4983b262346b73c3dc7270bf5feac31780c28496 adds SessionOwner.auth_materials keyed by real/auth DC; no second runtime, account, provider, directory, or persistence namespace was added. |
+| R91-AC-3 / actual secondary open path | implemented, validation not run | open_logical_session is the generic production path used by primary restore and supports any logical DC. It first takes an existing logical EstablishedSession, otherwise reuses per-real-DC AuthMaterial via existing resume_auth_key, and falls back to existing establish_auth_key when absent. Generic SessionOwner::put can retain a returned secondary EstablishedSession. |
+| R91-AC-4 / persisted primary seeds temporary | implemented, validation not run | unchanged PersistedTransportState seeds SessionOwner lazily; logical 2 and 1002 resolve to one auth-material slot while retaining distinct logical session keys. No storage-schema/key change was made. |
+| R91-AC-5 / teardown and environment fencing | implemented, validation not run | SessionOwner::remove/take do not delete auth_materials; auth material carries test_mode and mismatched production/test reuse returns an error. |
+| R91-AC-6 / contracts authored only | passed for Stage A | three focused internal contracts were added for persisted 2 -> temporary 1002 sharing, temporary removal retaining real-DC material, and environment mismatch fail-closed. They were not executed. |
+| R91-AC-7 / remaining special-config lifecycle | pending by design | independently cancellable request ownership, 6000 ms total-attempt termination, help.getConfig orchestration, dc_options-only replacement/change publication, and direct HTTP carrier remain open. No special-config public command or timeout surrogate was added. |
+| R91-AC-8 / deferred validation | passed | No GitHub Actions/status/check query or trigger, build, typecheck, lint, validator, generator, dependency resolution, lock regeneration, unit/contract/integration/E2E execution, package, deploy, installation, or runtime acceptance was performed. |
+| Desktop mirror | source-identical | bhrumom/fabushi-desktop commit 8cebdbe5634d092773cfda8b4a0b059bd552ccbb carries the same runtime blob 4983b262346b73c3dc7270bf5feac31780c28496. |
+
+Implementation commits are 87fb77a6b7220e88f3d376b7543934ddd0644fc5 and 292f41096e554872ee6b85d43e519a9237dcb26f. The secondary-session/auth-material prerequisite is source-implemented only; executable validation remains deferred and special-config carrier/application remains pending.
