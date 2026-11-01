@@ -1234,15 +1234,11 @@ fn replace_server_dc_options(
         .map(|state| state.dc_id)
         .or_else(|| client.sessions.primary().map(|session| session.endpoint.dc_id))
         .ok_or(RuntimeError::TransportNotConnected)?;
-    let directory = DcDirectory::new(this_dc, test_mode, endpoints)
+    let mut directory = DcDirectory::telegram_defaults(test_mode, this_dc)
         .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
     let changed = directory
-        .endpoints()
-        .iter()
-        .map(|endpoint| endpoint.dc_id)
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
+        .replace_endpoints(endpoints)
+        .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
     client.server_directory = Some(directory);
     Ok(changed)
 }

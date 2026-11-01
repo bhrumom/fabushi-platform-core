@@ -288,10 +288,28 @@ impl DcDirectory {
         &self.endpoints
     }
 
-    pub fn replace_endpoints(&mut self, endpoints: Vec<DcEndpoint>) -> Result<Vec<i32>, DcError> {
-        let replacement = Self::new(self.this_dc, self.test_mode, endpoints)?;
+    pub fn replace_endpoints(&mut self, mut endpoints: Vec<DcEndpoint>) -> Result<Vec<i32>, DcError> {
+        if endpoints.is_empty() {
+            return Err(DcError::EmptyDirectory);
+        }
+        let mut unique = BTreeSet::new();
+        for endpoint in &endpoints {
+            if !unique.insert(endpoint.clone()) {
+                return Err(DcError::DuplicateEndpoint);
+            }
+        }
+        endpoints.sort_by_key(|endpoint| {
+            (
+                endpoint.dc_id,
+                endpoint.cdn,
+                endpoint.media_only,
+                endpoint.ip_address.is_ipv6(),
+                endpoint.port,
+            )
+        });
+
         let mut ids = BTreeSet::new();
-        for endpoint in self.endpoints.iter().chain(replacement.endpoints.iter()) {
+        for endpoint in self.endpoints.iter().chain(endpoints.iter()) {
             ids.insert(endpoint.dc_id);
         }
         let changed: Vec<i32> = ids
@@ -302,8 +320,7 @@ impl DcDirectory {
                     .iter()
                     .filter(|endpoint| endpoint.dc_id == *dc_id)
                     .collect();
-                let next: Vec<_> = replacement
-                    .endpoints
+                let next: Vec<_> = endpoints
                     .iter()
                     .filter(|endpoint| endpoint.dc_id == *dc_id)
                     .collect();
@@ -311,7 +328,7 @@ impl DcDirectory {
             })
             .collect();
         if !changed.is_empty() {
-            self.endpoints = replacement.endpoints;
+            self.endpoints = endpoints;
         }
         Ok(changed)
     }
