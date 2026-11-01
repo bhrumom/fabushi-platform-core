@@ -4198,7 +4198,7 @@ fn obfuscated_connection_start_prefix_partition_and_ctr_continuity_match_fixed_u
     assert_eq!(whole, split);
 
     let mut v1 = ObfuscatedConnectionStart::from_nonce(&[0x42; 16], 2, nonce).unwrap();
-    assert_ne!(&v1.prefix()[56..64], &dc_three.prefix()[56..64]);
+    assert_ne!(&v1.prefix()[56..64], &one_shot.prefix()[56..64]);
     let mut v1_payload = [0x5a_u8; 32];
     v1.encrypt_outbound(&mut v1_payload);
     assert_ne!(v1_payload, [0x5a_u8; 32]);
