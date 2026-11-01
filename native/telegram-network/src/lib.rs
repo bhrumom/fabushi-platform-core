@@ -4,8 +4,12 @@
 //! cryptography, and authorization state remain in `telegram-protocol` so the
 //! same protocol implementation can be reused by native and Web transports.
 
+mod network_time;
 pub mod request_normalization;
 
+pub use network_time::{
+    http_time_now, http_time_valid, invalidate_http_time, update_http_time, NetworkTimeError,
+};
 pub use request_normalization::{
     generate_dns_random_padding, generate_dns_random_padding_with_entropy,
     normalize_domain_resolver_request, normalize_special_config_doh_request,
@@ -27,7 +31,7 @@ use fabushi_telegram_protocol::{
     MessageIdError, MessageIdGuard, ObfuscatedConnectionStart, PlainMessage, PlaintextEnvelope,
     SequenceError, SessionSequence, TransportError, TransportFrameCodec, TransportMode,
     TlsCamouflageError, DecodedTlsRecord, decode_tls_server_record, encode_tls_client_records,
-    inspect_tls_server_hello, prepare_tls_client_hello,
+    inspect_tls_server_hello, prepare_tls_client_hello_with_entropy,
 };
 use thiserror::Error;
 use zeroize::Zeroizing;
@@ -304,7 +308,11 @@ fn perform_tls_camouflage_handshake(
     stream: &mut TcpStream,
     secret: &[u8],
 ) -> Result<Vec<u8>, NetworkError> {
-    let hello = prepare_tls_client_hello(secret)?;
+    let timestamp = i32::try_from(http_time_now().map_err(|_| NetworkError::InvalidSystemClock)?)
+        .map_err(|_| NetworkError::InvalidSystemClock)?;
+    let hello = prepare_tls_client_hello_with_entropy(secret, timestamp, &mut |output| {
+        getrandom::getrandom(output).map_err(|_| TlsCamouflageError::RandomnessUnavailable)
+    })?;
     stream.write_all(&hello.bytes)?;
     stream.flush()?;
 
@@ -672,6 +680,8 @@ impl EstablishedSession {
             .ok_or(NetworkError::InvalidSystemClock)?;
         self.server_time =
             i32::try_from(server_seconds).map_err(|_| NetworkError::InvalidSystemClock)?;
+        network_time::update_mtproto_time(server_seconds)
+            .map_err(|_| NetworkError::InvalidSystemClock)?;
         self.message_ids.reset_client_message_id_floor();
         Ok(())
     }
@@ -956,9 +966,12 @@ fn direct_bad_message_time_recovery(body: &[u8]) -> bool {
 
 fn clock_offset_seconds(server_time: i32) -> Result<i64, NetworkError> {
     let (local_seconds, _) = unix_time()?;
-    i64::from(server_time)
+    let offset = i64::from(server_time)
         .checked_sub(local_seconds)
-        .ok_or(NetworkError::InvalidSystemClock)
+        .ok_or(NetworkError::InvalidSystemClock)?;
+    network_time::update_mtproto_time(i64::from(server_time))
+        .map_err(|_| NetworkError::InvalidSystemClock)?;
+    Ok(offset)
 }
 
 pub fn connect_directory(
