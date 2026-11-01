@@ -18,6 +18,7 @@ use fabushi_telegram_protocol::build_auth_sign_up;
 use fabushi_telegram_protocol::build_init_connection_get_config;
 use fabushi_telegram_protocol::build_updates_get_state;
 use fabushi_telegram_protocol::compute_password_srp_proof;
+use fabushi_telegram_protocol::derive_protocol_dc_identity;
 use fabushi_telegram_protocol::parse_account_email_verified;
 use fabushi_telegram_protocol::parse_account_password_prefix;
 use fabushi_telegram_protocol::parse_account_sent_email_code;
@@ -39,6 +40,7 @@ use fabushi_telegram_protocol::DcDirectory;
 use fabushi_telegram_protocol::EmailVerifiedResult;
 use fabushi_telegram_protocol::InitConnection;
 use fabushi_telegram_protocol::PasswordSrpParameters;
+use fabushi_telegram_protocol::ProtocolDcRole;
 use fabushi_telegram_protocol::SentCodeDelivery;
 use fabushi_telegram_protocol::SentCodeResult;
 use fabushi_telegram_protocol::UpdateState;
@@ -106,12 +108,76 @@ impl Drop for PersistedTransportState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SessionRoute {
+    logical_dc_id: i32,
+    auth_dc_id: i32,
+}
+
+impl SessionRoute {
+    fn new(logical_dc_id: i32) -> Result<Self, RuntimeError> {
+        let identity = derive_protocol_dc_identity(logical_dc_id, false, ProtocolDcRole::Regular)
+            .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
+        Ok(Self {
+            logical_dc_id,
+            auth_dc_id: i32::from(identity.wire_id),
+        })
+    }
+}
+
+struct OwnedSession {
+    route: SessionRoute,
+    session: EstablishedSession,
+}
+
+#[derive(Default)]
+struct SessionOwner {
+    primary_logical_dc_id: Option<i32>,
+    sessions: BTreeMap<i32, OwnedSession>,
+}
+
+impl SessionOwner {
+    fn primary(&self) -> Option<&EstablishedSession> {
+        let logical_dc_id = self.primary_logical_dc_id?;
+        self.sessions.get(&logical_dc_id).map(|owned| &owned.session)
+    }
+
+    fn take_primary(&mut self) -> Option<EstablishedSession> {
+        let logical_dc_id = self.primary_logical_dc_id?;
+        self.sessions.remove(&logical_dc_id).map(|owned| owned.session)
+    }
+
+    fn put_primary(&mut self, session: EstablishedSession) -> Result<(), RuntimeError> {
+        let route = SessionRoute::new(session.endpoint.dc_id)?;
+        self.primary_logical_dc_id = Some(route.logical_dc_id);
+        self.sessions.insert(
+            route.logical_dc_id,
+            OwnedSession {
+                route,
+                session,
+            },
+        );
+        Ok(())
+    }
+
+    fn remove(&mut self, logical_dc_id: i32) -> Option<EstablishedSession> {
+        if self.primary_logical_dc_id == Some(logical_dc_id) {
+            self.primary_logical_dc_id = None;
+        }
+        self.sessions.remove(&logical_dc_id).map(|owned| owned.session)
+    }
+
+    fn route(&self, logical_dc_id: i32) -> Option<SessionRoute> {
+        self.sessions.get(&logical_dc_id).map(|owned| owned.route)
+    }
+}
+
 struct RuntimeClient {
     core: TelegramEngine,
     authorization: AuthorizationMachine,
     self_user_id: Option<i64>,
     persistence: Option<PersistentClientStorage>,
-    transport: Option<EstablishedSession>,
+    sessions: SessionOwner,
     persisted_transport: Option<PersistedTransportState>,
     server_directory: Option<DcDirectory>,
     auth_context: Option<AuthContext>,
@@ -136,7 +202,7 @@ impl Default for RuntimeClient {
             authorization: AuthorizationMachine::new(),
             self_user_id: None,
             persistence: None,
-            transport: None,
+            sessions: SessionOwner::default(),
             persisted_transport: None,
             server_directory: None,
             auth_context: None,
@@ -276,7 +342,7 @@ pub fn create_persistent_client(
         authorization: AuthorizationMachine::from_state(authorization_state),
         self_user_id,
         persistence: Some(PersistentClientStorage { store, revision }),
-        transport: None,
+        sessions: SessionOwner::default(),
         persisted_transport,
         server_directory: None,
         auth_context,
@@ -400,7 +466,7 @@ fn execute_value(client_id: u64, request: Value) -> Result<Value, RuntimeError> 
 
     match request_type {
         "telegram.getStatus" => {
-            let transport = client.transport.as_ref();
+            let transport = client.sessions.primary();
             Ok(json!({
                 "@type": "telegram.status",
                 "clientId": client_id,
@@ -701,7 +767,7 @@ fn take_transport(client_id: u64) -> Result<EstablishedSession, RuntimeError> {
         let client = clients
             .get_mut(&client_id)
             .ok_or(RuntimeError::ClientNotFound(client_id))?;
-        if let Some(session) = client.transport.take() {
+        if let Some(session) = client.sessions.take_primary() {
             return Ok(session);
         }
         client.persisted_transport.clone()
@@ -1505,7 +1571,7 @@ fn put_transport(
         auth_key: session.auth_key.as_bytes().to_vec(),
     });
     persist_transport_state(client)?;
-    client.transport = Some(session);
+    client.sessions.put_primary(session)?;
     Ok(())
 }
 
@@ -1549,6 +1615,27 @@ fn now_unix_ms() -> i64 {
 #[cfg(test)]
 mod authorization_restore_contract_tests {
     use super::*;
+
+    #[test]
+    fn session_route_shares_auth_dc_between_real_and_temporary_logical_ids() {
+        let regular = SessionRoute::new(2).unwrap();
+        let temporary = SessionRoute::new(1002).unwrap();
+
+        assert_eq!(regular.logical_dc_id, 2);
+        assert_eq!(temporary.logical_dc_id, 1002);
+        assert_eq!(regular.auth_dc_id, 2);
+        assert_eq!(temporary.auth_dc_id, 2);
+        assert_ne!(regular.logical_dc_id, temporary.logical_dc_id);
+    }
+
+    #[test]
+    fn empty_session_owner_has_no_primary_or_route() {
+        let owner = SessionOwner::default();
+
+        assert!(owner.primary().is_none());
+        assert!(owner.route(2).is_none());
+        assert!(owner.route(1002).is_none());
+    }
 
     #[test]
     fn persistent_ready_authorization_restores_identity_without_opening_second_runtime() {
