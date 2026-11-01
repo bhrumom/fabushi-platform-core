@@ -59,3 +59,23 @@ Source-level closure requires:
 - no GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E execution, package, deployment, installation or runtime acceptance is performed.
 
 This slice is source-level wire responsibility closure only. It is not executable verification, candidate readiness, release acceptance, or closure of the broader migration.
+
+
+## Round 102 source-level compliance readback
+
+Desktop bookkeeping checkpoint is `a6541989393bb6d1e44e76c542192af0cef2c3c0`. Unique responsibility `TDRP-R9-MTPROTO-ENCRYPTED-ENVELOPE-WIRE-001` is recorded as `implemented / coverage_disposition=no-production-delta / validation_status=not-run / accepted=false`.
+
+| Requirement | Source-level status | Evidence / reason |
+| --- | --- | --- |
+| R1 | passed | Existing canonical `EncryptedEnvelope::to_bytes` in `crypto.rs@7882db6b9f3f5e9643fb963526ccc21dd0862d73` emits exactly LE64 auth_key_id, 16 message-key bytes, then encrypted data. |
+| R2 | passed | Existing `EncryptedEnvelope::from_bytes` requires the 24-byte external header and AES-block alignment for all bytes following it. |
+| R3 | passed | Structural decoding preserves all 16 message-key bytes and decodes only auth_key_id as little-endian integer data. |
+| R4 | passed at source level | Existing `decrypt_message` rejects active-key mismatch, empty/non-block-aligned ciphertext, authenticated message-key mismatch and invalid decrypted plaintext before returning a body. |
+| R5 | passed | Shipping `EstablishedSession` remains `telegram-network/src/lib.rs@54f509474391bb5118ba4678ba5c566ab3e74ec8`; no connection scheduler, request-history, binding/persistence, gzip or difference owner was added. |
+| R6 | authored / not run | Focused contracts are `protocol_contract.rs@b82069d5b7f42919e087efe053549ebddbe6e278` in canonical and desktop provider test paths. They pin exact offsets/endianness, round-trip structural parsing, short/non-aligned rejection and empty-ciphertext cryptographic rejection. |
+
+Desktop provider bookkeeping preserves network blob `54f509474391bb5118ba4678ba5c566ab3e74ec8` and mirrors the authored contract at commit `e940ec506ea2909dc0f550d533c04f3af7b70d40`. The sparse desktop overlay has no duplicate `crypto.rs`; canonical crypto ownership remains here.
+
+Coverage at desktop checkpoint is `responsibilities_total=103, unknown=16172, unread=16145, omitted=0, unmapped_responsibilities=0`.
+
+Source-level compliance is complete for this isolated encrypted-envelope wire slice. This is not executable verification, candidate readiness, release acceptance, or closure of the broader migration. Auth-key binding/persistence/expiry/renewal, broader connection scheduling/racing/send retry, arbitrary request histories, gzip, complete difference/differenceSlice decoding/application, broader source/legal closure, Stage-B evidence and independent release ACCEPT remain open. No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E execution, package, deployment, installation or runtime acceptance was performed.
