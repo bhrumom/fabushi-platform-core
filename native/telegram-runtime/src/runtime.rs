@@ -7,6 +7,10 @@ use fabushi_telegram_network::resume_auth_key_controlled;
 use fabushi_telegram_network::EstablishedSession;
 use fabushi_telegram_network::NetworkAttemptControl;
 use fabushi_telegram_network::NetworkConfig;
+use fabushi_telegram_network::{
+    http_time_now, seed_special_config_attempts, secure_random_index, update_http_time,
+    DirectHttpsRace, SpecialConfigAttempt, StaggerSettlementPolicy,
+};
 use fabushi_telegram_protocol::build_account_get_password;
 use fabushi_telegram_protocol::build_account_send_verify_email_code;
 use fabushi_telegram_protocol::build_account_verify_email;
@@ -33,6 +37,10 @@ use fabushi_telegram_protocol::parse_auth_authorization_user_id;
 use fabushi_telegram_protocol::parse_config_dc_directory_prefix;
 use fabushi_telegram_protocol::parse_config_dc_options_prefix;
 use fabushi_telegram_protocol::parse_update_state;
+use fabushi_telegram_protocol::{
+    decode_and_select_special_config, normalize_special_config_response,
+    parse_http_date_unix_seconds, SpecialConfigResponseKind,
+};
 use fabushi_telegram_protocol::try_parse_rpc_error;
 use fabushi_telegram_protocol::AccountPasswordState;
 use fabushi_telegram_protocol::AuthCommand;
@@ -352,6 +360,59 @@ impl Drop for SessionOwner {
     }
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SpecialConfigRefreshReport {
+    pub seeded_attempts: usize,
+    pub finished_attempts: usize,
+    pub decoded_responses: usize,
+    pub selected_endpoints: usize,
+    pub applied_endpoints: usize,
+    pub changed_dc_ids: Vec<i32>,
+    pub failures: Vec<String>,
+}
+
+#[derive(Default)]
+struct SpecialConfigEndpointQueue {
+    pending: Vec<SpecialConfigEndpoint>,
+    tried: Vec<SpecialConfigEndpoint>,
+}
+
+impl SpecialConfigEndpointQueue {
+    fn enqueue(&mut self, endpoint: SpecialConfigEndpoint) -> bool {
+        if self.pending.contains(&endpoint) || self.tried.contains(&endpoint) {
+            return false;
+        }
+        self.pending.push(endpoint);
+        true
+    }
+
+    fn enqueue_all(&mut self, endpoints: Vec<SpecialConfigEndpoint>) -> usize {
+        endpoints
+            .into_iter()
+            .filter(|endpoint| self.enqueue(endpoint.clone()))
+            .count()
+    }
+
+    fn take_at(&mut self, index: usize) -> Option<SpecialConfigEndpoint> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        let index = index % self.pending.len();
+        let endpoint = self.pending.remove(index);
+        self.tried.push(endpoint.clone());
+        Some(endpoint)
+    }
+
+    fn len(&self) -> usize {
+        self.pending.len()
+    }
+
+    fn tried_len(&self) -> usize {
+        self.tried.len()
+    }
+}
+
 struct RuntimeClient {
     core: TelegramEngine,
     authorization: AuthorizationMachine,
@@ -636,6 +697,9 @@ fn execute_value(client_id: u64, request: Value) -> Result<Value, RuntimeError> 
     }
     if request_type == "telegram.beginUpdateSync" {
         return begin_update_sync(client_id);
+    }
+    if request_type == "telegram.refreshSpecialConfig" {
+        return refresh_special_config_command(client_id, &request);
     }
     let mut clients = CLIENTS
         .lock()
@@ -1283,6 +1347,172 @@ pub fn apply_resolved_special_config_endpoint(
         .get_mut(&client_id)
         .ok_or(RuntimeError::ClientNotFound(client_id))?;
     replace_server_dc_options(client, endpoints, test_mode)
+}
+
+pub fn refresh_special_config(
+    client_id: u64,
+    phone: &str,
+) -> Result<SpecialConfigRefreshReport, RuntimeError> {
+    let test_mode = {
+        let clients = CLIENTS
+            .lock()
+            .map_err(|_| RuntimeError::RegistryUnavailable)?;
+        let client = clients
+            .get(&client_id)
+            .ok_or(RuntimeError::ClientNotFound(client_id))?;
+        client
+            .server_directory
+            .as_ref()
+            .map(DcDirectory::test_mode)
+            .or_else(|| client.persisted_transport.as_ref().map(|state| state.test_mode))
+            .unwrap_or(false)
+    };
+    let domain = if test_mode {
+        "tapv3.stel.com"
+    } else {
+        "apv3.stel.com"
+    };
+    let attempts = seed_special_config_attempts(test_mode)
+        .map_err(|error| RuntimeError::Network(error.to_string()))?;
+    let mut requests = Vec::with_capacity(attempts.len());
+    for attempt in &attempts {
+        requests.push(
+            attempt
+                .normalized_request(domain)
+                .map_err(|error| RuntimeError::Network(error.to_string()))?,
+        );
+    }
+
+    let seeded_attempts = attempts.len();
+    let mut race = DirectHttpsRace::start(
+        StaggerSettlementPolicy::SpecialConfig,
+        requests,
+        Duration::from_secs(30),
+    );
+    let mut queue = SpecialConfigEndpointQueue::default();
+    let mut report = SpecialConfigRefreshReport {
+        seeded_attempts,
+        finished_attempts: 0,
+        decoded_responses: 0,
+        selected_endpoints: 0,
+        applied_endpoints: 0,
+        changed_dc_ids: Vec::new(),
+        failures: Vec::new(),
+    };
+
+    while let Ok(reply) = race.recv() {
+        report.finished_attempts += 1;
+        let attempt = attempts.get(reply.attempt_index).cloned();
+        match reply.result {
+            Ok(response) => {
+                if response.status < 400 {
+                    if let Some(date) = response.header("Date") {
+                        if let Some(unix_seconds) = parse_http_date_unix_seconds(date) {
+                            if let Err(error) = update_http_time(unix_seconds) {
+                                report.failures.push(format!(
+                                    "attempt {} HTTP Date update failed: {}",
+                                    reply.attempt_index, error
+                                ));
+                            }
+                        }
+                    }
+                }
+                race.finalize_reply(reply.attempt_index);
+                let Some(attempt) = attempt else {
+                    report.failures.push(format!(
+                        "attempt {} completed without matching seed metadata",
+                        reply.attempt_index
+                    ));
+                    continue;
+                };
+                let kind = if attempt.is_dns_txt() {
+                    SpecialConfigResponseKind::DnsTxt
+                } else {
+                    SpecialConfigResponseKind::Firestore
+                };
+                let normalized = normalize_special_config_response(kind, &response.body);
+                if normalized.is_empty() {
+                    continue;
+                }
+                let now = http_time_now()
+                    .map_err(|error| RuntimeError::Network(error.to_string()))?;
+                match decode_and_select_special_config(&normalized, phone, now) {
+                    Ok(endpoints) => {
+                        report.decoded_responses += 1;
+                        report.selected_endpoints += queue.enqueue_all(endpoints);
+                    }
+                    Err(error) => report.failures.push(format!(
+                        "attempt {} special-config decode/select failed: {}",
+                        reply.attempt_index, error
+                    )),
+                }
+            }
+            Err(error) => {
+                race.finalize_reply(reply.attempt_index);
+                report.failures.push(format!(
+                    "attempt {} direct HTTPS failed: {}",
+                    reply.attempt_index, error
+                ));
+            }
+        }
+    }
+
+    while queue.len() != 0 {
+        let index = secure_random_index(queue.len())
+            .map_err(|error| RuntimeError::Network(error.to_string()))?;
+        let Some(endpoint) = queue.take_at(index) else {
+            break;
+        };
+        match apply_resolved_special_config_endpoint(client_id, &endpoint) {
+            Ok(changed) => {
+                report.applied_endpoints += 1;
+                for dc_id in changed {
+                    if !report.changed_dc_ids.contains(&dc_id) {
+                        report.changed_dc_ids.push(dc_id);
+                    }
+                }
+            }
+            Err(error) => report.failures.push(format!(
+                "special endpoint dc {} {}:{} failed: {}",
+                endpoint.dc_id, endpoint.ip_address, endpoint.port, error
+            )),
+        }
+    }
+    debug_assert_eq!(queue.tried_len(), report.selected_endpoints);
+    report.changed_dc_ids.sort_unstable();
+    Ok(report)
+}
+
+fn refresh_special_config_command(
+    client_id: u64,
+    request: &Value,
+) -> Result<Value, RuntimeError> {
+    let phone = if let Some(phone) = request
+        .get("phoneNumber")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        Zeroizing::new(phone.to_string())
+    } else {
+        let clients = CLIENTS
+            .lock()
+            .map_err(|_| RuntimeError::RegistryUnavailable)?;
+        let client = clients
+            .get(&client_id)
+            .ok_or(RuntimeError::ClientNotFound(client_id))?;
+        Zeroizing::new(
+            client
+                .auth_context
+                .as_ref()
+                .map(|context| context.phone_number.to_string())
+                .ok_or(RuntimeError::InvalidParameter("phoneNumber"))?,
+        )
+    };
+    let report = refresh_special_config(client_id, &phone)?;
+    Ok(json!({
+        "@type": "telegram.specialConfigRefresh",
+        "report": report,
+    }))
 }
 
 fn delivery_state(delivery: &SentCodeDelivery) -> (CodeDeliveryType, u8) {
@@ -2321,6 +2551,45 @@ mod authorization_restore_contract_tests {
         assert_eq!(client.persisted_transport.as_ref().unwrap().server_time, 73);
     }
 
+
+    #[test]
+    fn special_config_endpoint_queue_deduplicates_pending_and_tried_entries() {
+        let endpoint = SpecialConfigEndpoint {
+            dc_id: 2,
+            ip_address: "149.154.167.50".parse().unwrap(),
+            port: 443,
+            secret: vec![1, 2, 3],
+        };
+        let mut queue = SpecialConfigEndpointQueue::default();
+        assert!(queue.enqueue(endpoint.clone()));
+        assert!(!queue.enqueue(endpoint.clone()));
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.take_at(0), Some(endpoint.clone()));
+        assert_eq!(queue.tried_len(), 1);
+        assert!(!queue.enqueue(endpoint));
+        assert_eq!(queue.len(), 0);
+    }
+
+    #[test]
+    fn special_config_endpoint_queue_selection_marks_endpoint_tried_before_application() {
+        let endpoint = |dc_id, last| SpecialConfigEndpoint {
+            dc_id,
+            ip_address: format!("149.154.167.{last}").parse().unwrap(),
+            port: 443,
+            secret: Vec::new(),
+        };
+        let first = endpoint(2, 50);
+        let second = endpoint(3, 51);
+        let mut queue = SpecialConfigEndpointQueue::default();
+        assert_eq!(queue.enqueue_all(vec![first.clone(), second.clone()]), 2);
+
+        assert_eq!(queue.take_at(1), Some(second));
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.tried_len(), 1);
+        assert_eq!(queue.take_at(0), Some(first));
+        assert_eq!(queue.len(), 0);
+        assert_eq!(queue.tried_len(), 2);
+    }
 
     #[test]
     fn persistent_ready_authorization_restores_identity_without_opening_second_runtime() {
