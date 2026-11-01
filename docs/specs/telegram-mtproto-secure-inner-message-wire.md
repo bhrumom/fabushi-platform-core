@@ -34,7 +34,7 @@ R3. Padding is the remaining authenticated plaintext after `msg_len` bytes, must
 
 R4. Shipping inbound decoding must preserve all fixed-width fields exactly, reject truncated/overflowing body boundaries, reject session mismatch, and accept only odd server message ids (the fixed-U `msg_id & 3 == 1 || 3` rule).
 
-R5. Shipping outbound encoding must continue to require client-to-server message ids divisible by four when cryptographic direction validation applies and must fail closed on invalid body/padding structure before encryption.
+R5. Shipping outbound encoding must fail closed on invalid body/padding structure before encryption. Outbound client message-id generation/parity remains owned by `MessageIdGuard` / `EstablishedSession` and is not moved into this isolated crypto framing slice.
 
 R6. Server-salt adoption, replay-window/history registration, ACK scheduling, request correlation, retry/backoff and connection lifecycle are separate responsibilities and are not moved into `telegram-protocol`.
 
