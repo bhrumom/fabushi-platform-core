@@ -9,7 +9,7 @@ use fabushi_telegram_network::NetworkAttemptControl;
 use fabushi_telegram_network::NetworkConfig;
 use fabushi_telegram_network::{
     http_time_now, seed_special_config_attempts, secure_random_index, update_http_time,
-    DirectHttpsRace, SpecialConfigAttempt, StaggerSettlementPolicy,
+    DirectHttpsRace, StaggerSettlementPolicy,
 };
 use fabushi_telegram_protocol::build_account_get_password;
 use fabushi_telegram_protocol::build_account_send_verify_email_code;
@@ -388,10 +388,13 @@ impl SpecialConfigEndpointQueue {
     }
 
     fn enqueue_all(&mut self, endpoints: Vec<SpecialConfigEndpoint>) -> usize {
-        endpoints
-            .into_iter()
-            .filter(|endpoint| self.enqueue(endpoint.clone()))
-            .count()
+        let mut added = 0;
+        for endpoint in endpoints {
+            if self.enqueue(endpoint) {
+                added += 1;
+            }
+        }
+        added
     }
 
     fn take_at(&mut self, index: usize) -> Option<SpecialConfigEndpoint> {
@@ -1440,6 +1443,7 @@ pub fn refresh_special_config(
                     Ok(endpoints) => {
                         report.decoded_responses += 1;
                         report.selected_endpoints += queue.enqueue_all(endpoints);
+                        drain_special_config_endpoint_queue(client_id, &mut queue, &mut report)?;
                     }
                     Err(error) => report.failures.push(format!(
                         "attempt {} special-config decode/select failed: {}",
@@ -1457,6 +1461,17 @@ pub fn refresh_special_config(
         }
     }
 
+    drain_special_config_endpoint_queue(client_id, &mut queue, &mut report)?;
+    debug_assert_eq!(queue.tried_len(), report.selected_endpoints);
+    report.changed_dc_ids.sort_unstable();
+    Ok(report)
+}
+
+fn drain_special_config_endpoint_queue(
+    client_id: u64,
+    queue: &mut SpecialConfigEndpointQueue,
+    report: &mut SpecialConfigRefreshReport,
+) -> Result<(), RuntimeError> {
     while queue.len() != 0 {
         let index = secure_random_index(queue.len())
             .map_err(|error| RuntimeError::Network(error.to_string()))?;
@@ -1478,9 +1493,7 @@ pub fn refresh_special_config(
             )),
         }
     }
-    debug_assert_eq!(queue.tried_len(), report.selected_endpoints);
-    report.changed_dc_ids.sort_unstable();
-    Ok(report)
+    Ok(())
 }
 
 fn refresh_special_config_command(
