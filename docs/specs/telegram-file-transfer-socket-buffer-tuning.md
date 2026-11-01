@@ -113,7 +113,7 @@ Source-level implementation is present in canonical telegram-network blob `6dece
 | R6 / AC5 | passed | Only telegram-network is changed; telegram-media and RuntimeClient owners are unchanged. |
 | R7 | passed (source-level) | Linux/Android, Apple/BSD-family, and Windows adapters are explicit; other Unix/native targets fail closed. Compile/runtime evidence is deferred. |
 | R8 | passed | Two source contracts are authored in the existing test module and were not executed. |
-| AC6 | pending desktop checkpoint | Desktop mirror plus ledger/P0/source-closure/evidence are published in the following desktop checkpoint. |
+| AC6 | passed | Desktop production/spec mirror is `23d73b32e301408f9c8aed151cb1f9e442516e13`; unique ledger/P0/source-closure/round136 evidence checkpoint is `77e9dc1a45e9486ea8cf0ebe912b1a15c83c17a7`, with `implemented / validation_status=not-run / accepted=false` and responsibilities_total=124. |
 | AC7 | passed | No executable validation was run in Stage A. |
 
-The responsibility remains `implemented / validation_status=not-run / accepted=false` until Stage-B executable evidence exists.
+The responsibility remains `implemented / validation_status=not-run / accepted=false` until Stage-B executable evidence exists. Source-level R1-R8 / AC1-AC7 compliance is complete; this does not constitute executable verification.
