@@ -21,7 +21,11 @@ pub use request_normalization::{
 use std::{
     io::{self, Read, Write},
     net::{Shutdown, SocketAddr, TcpStream},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use fabushi_telegram_protocol::{
@@ -64,6 +68,81 @@ impl Default for NetworkConfig {
             write_timeout: Duration::from_secs(15),
             transport_mode: TransportMode::Abridged,
             prefer_ipv6: false,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct NetworkAttemptControl {
+    inner: Arc<NetworkAttemptInner>,
+}
+
+struct NetworkAttemptInner {
+    deadline: Instant,
+    cancelled: AtomicBool,
+    active_stream: Mutex<Option<TcpStream>>,
+}
+
+impl NetworkAttemptControl {
+    pub fn new(total_timeout: Duration) -> Self {
+        Self {
+            inner: Arc::new(NetworkAttemptInner {
+                deadline: Instant::now() + total_timeout,
+                cancelled: AtomicBool::new(false),
+                active_stream: Mutex::new(None),
+            }),
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.inner.cancelled.store(true, Ordering::SeqCst);
+        if let Ok(active) = self.inner.active_stream.lock() {
+            if let Some(stream) = active.as_ref() {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.inner.cancelled.load(Ordering::SeqCst)
+    }
+
+    pub fn remaining(&self) -> Result<Duration, NetworkError> {
+        if self.is_cancelled() {
+            return Err(NetworkError::AttemptCancelled);
+        }
+        self.inner
+            .deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or(NetworkError::AttemptDeadlineExceeded)
+    }
+
+    fn bounded_timeout(&self, configured: Duration) -> Result<Duration, NetworkError> {
+        Ok(configured.min(self.remaining()?))
+    }
+
+    fn register_stream(&self, stream: &TcpStream) -> Result<(), NetworkError> {
+        if self.is_cancelled() {
+            return Err(NetworkError::AttemptCancelled);
+        }
+        let clone = stream.try_clone()?;
+        let mut active = self
+            .inner
+            .active_stream
+            .lock()
+            .map_err(|_| NetworkError::AttemptCancelled)?;
+        if self.is_cancelled() {
+            let _ = clone.shutdown(Shutdown::Both);
+            return Err(NetworkError::AttemptCancelled);
+        }
+        *active = Some(clone);
+        Ok(())
+    }
+
+    fn clear_stream(&self) {
+        if let Ok(mut active) = self.inner.active_stream.lock() {
+            *active = None;
         }
     }
 }
@@ -147,6 +226,10 @@ pub enum NetworkError {
     StateReconciliationLimit { request_message_id: i64 },
     #[error("Telegram did not return an RPC result before the message limit")]
     RpcTimeout,
+    #[error("Telegram network attempt was cancelled")]
+    AttemptCancelled,
+    #[error("Telegram network attempt exceeded its total deadline")]
+    AttemptDeadlineExceeded,
     #[error("Telegram protocol data center id {0} cannot be represented on the wire")]
     InvalidProtocolDcId(i32),
 }
@@ -159,6 +242,7 @@ pub struct TcpTransport {
     obfuscated: Option<ObfuscatedConnectionStart>,
     tls_camouflage: bool,
     tls_read_buffer: Vec<u8>,
+    attempt_control: Option<NetworkAttemptControl>,
 }
 
 impl TcpTransport {
@@ -200,6 +284,7 @@ impl TcpTransport {
             obfuscated: Some(obfuscated),
             tls_camouflage,
             tls_read_buffer,
+            attempt_control: None,
         })
     }
 
@@ -212,7 +297,49 @@ impl TcpTransport {
             obfuscated: None,
             tls_camouflage: false,
             tls_read_buffer: Vec::new(),
+            attempt_control: None,
         }
+    }
+
+    fn attach_attempt_control(
+        &mut self,
+        control: NetworkAttemptControl,
+    ) -> Result<(), NetworkError> {
+        control.register_stream(&self.stream)?;
+        self.attempt_control = Some(control);
+        Ok(())
+    }
+
+    fn clear_attempt_control(&mut self) {
+        if let Some(control) = self.attempt_control.take() {
+            control.clear_stream();
+        }
+    }
+
+    fn apply_read_bound(&self) -> Result<(), NetworkError> {
+        if let Some(control) = self.attempt_control.as_ref() {
+            self.stream.set_read_timeout(Some(control.remaining()?))?;
+        }
+        Ok(())
+    }
+
+    fn apply_write_bound(&self) -> Result<(), NetworkError> {
+        if let Some(control) = self.attempt_control.as_ref() {
+            self.stream.set_write_timeout(Some(control.remaining()?))?;
+        }
+        Ok(())
+    }
+
+    fn write_all_bounded(&mut self, bytes: &[u8]) -> Result<(), NetworkError> {
+        self.apply_write_bound()?;
+        self.stream.write_all(bytes)?;
+        Ok(())
+    }
+
+    fn flush_bounded(&mut self) -> Result<(), NetworkError> {
+        self.apply_write_bound()?;
+        self.flush_bounded()?;
+        Ok(())
     }
 
     pub fn send_payload(&mut self, payload: &[u8]) -> Result<(), NetworkError> {
@@ -221,7 +348,7 @@ impl TcpTransport {
             if let Some(obfuscated) = self.obfuscated.as_ref() {
                 connection_prefix.extend_from_slice(obfuscated.prefix());
             } else {
-                self.stream.write_all(self.codec.initial_header())?;
+                self.write_all_bounded(self.codec.initial_header())?;
             }
         }
 
@@ -231,12 +358,12 @@ impl TcpTransport {
         }
         if self.tls_camouflage {
             let records = encode_tls_client_records(&connection_prefix, &frame)?;
-            self.stream.write_all(&records)?;
+            self.write_all_bounded(&records)?;
         } else {
             if !connection_prefix.is_empty() {
-                self.stream.write_all(&connection_prefix)?;
+                self.write_all_bounded(&connection_prefix)?;
             }
-            self.stream.write_all(&frame)?;
+            self.write_all_bounded(&frame)?;
         }
         self.initialized = true;
         self.stream.flush()?;
@@ -275,6 +402,7 @@ impl TcpTransport {
             }
 
             let mut chunk = [0_u8; DEFAULT_READ_CHUNK_BYTES];
+            self.apply_read_bound()?;
             let count = self.stream.read(&mut chunk)?;
             if count == 0 {
                 return Err(NetworkError::ConnectionClosed);
@@ -420,6 +548,17 @@ impl EstablishedSession {
             }
         }
         Err(NetworkError::RpcTimeout)
+    }
+
+    pub fn invoke_raw_controlled(
+        &mut self,
+        body: &[u8],
+        control: &NetworkAttemptControl,
+    ) -> Result<RpcResult, NetworkError> {
+        self.transport.attach_attempt_control(control.clone())?;
+        let result = self.invoke_raw(body);
+        self.transport.clear_attempt_control();
+        result
     }
 
     fn send_encrypted_message(
@@ -980,6 +1119,26 @@ pub fn connect_directory(
     purpose: DcPurpose,
     config: &NetworkConfig,
 ) -> Result<(ConnectedEndpoint, TcpTransport), NetworkError> {
+    connect_directory_with_attempt(directory, dc_id, purpose, config, None)
+}
+
+pub fn connect_directory_controlled(
+    directory: &DcDirectory,
+    dc_id: i32,
+    purpose: DcPurpose,
+    config: &NetworkConfig,
+    control: &NetworkAttemptControl,
+) -> Result<(ConnectedEndpoint, TcpTransport), NetworkError> {
+    connect_directory_with_attempt(directory, dc_id, purpose, config, Some(control))
+}
+
+fn connect_directory_with_attempt(
+    directory: &DcDirectory,
+    dc_id: i32,
+    purpose: DcPurpose,
+    config: &NetworkConfig,
+    control: Option<&NetworkAttemptControl>,
+) -> Result<(ConnectedEndpoint, TcpTransport), NetworkError> {
     let protocol_role = match purpose {
         DcPurpose::Media => ProtocolDcRole::MediaCluster,
         DcPurpose::Main | DcPurpose::Cdn => ProtocolDcRole::Regular,
@@ -994,8 +1153,21 @@ pub fn connect_directory(
     for candidate in candidates {
         let address = SocketAddr::new(candidate.ip_address, candidate.port);
         let secret = candidate.secret.as_deref().unwrap_or(&[]);
-        match TcpTransport::connect_obfuscated(address, secret, protocol_dc.wire_id, config) {
-            Ok(transport) => {
+        let effective = if let Some(control) = control {
+            NetworkConfig {
+                connect_timeout: control.bounded_timeout(config.connect_timeout)?,
+                read_timeout: control.bounded_timeout(config.read_timeout)?,
+                write_timeout: control.bounded_timeout(config.write_timeout)?,
+                ..*config
+            }
+        } else {
+            *config
+        };
+        match TcpTransport::connect_obfuscated(address, secret, protocol_dc.wire_id, &effective) {
+            Ok(mut transport) => {
+                if let Some(control) = control {
+                    transport.attach_attempt_control(control.clone())?;
+                }
                 return Ok((
                     ConnectedEndpoint {
                         dc_id: protocol_dc.directory_dc_id,
@@ -1006,6 +1178,9 @@ pub fn connect_directory(
             }
             Err(error) => attempts.push(format!("{address}: {error}")),
         }
+    }
+    if let Some(control) = control {
+        control.remaining()?;
     }
     Err(NetworkError::ConnectFailed { attempts })
 }
@@ -1018,7 +1193,42 @@ pub fn resume_auth_key(
     server_time: i32,
     config: &NetworkConfig,
 ) -> Result<EstablishedSession, NetworkError> {
-    let (endpoint, transport) = connect_directory(directory, dc_id, DcPurpose::Main, config)?;
+    resume_auth_key_with_attempt(
+        directory, dc_id, auth_key, server_salt, server_time, config, None,
+    )
+}
+
+pub fn resume_auth_key_controlled(
+    directory: &DcDirectory,
+    dc_id: i32,
+    auth_key: AuthKey,
+    server_salt: i64,
+    server_time: i32,
+    config: &NetworkConfig,
+    control: &NetworkAttemptControl,
+) -> Result<EstablishedSession, NetworkError> {
+    resume_auth_key_with_attempt(
+        directory,
+        dc_id,
+        auth_key,
+        server_salt,
+        server_time,
+        config,
+        Some(control),
+    )
+}
+
+fn resume_auth_key_with_attempt(
+    directory: &DcDirectory,
+    dc_id: i32,
+    auth_key: AuthKey,
+    server_salt: i64,
+    server_time: i32,
+    config: &NetworkConfig,
+    control: Option<&NetworkAttemptControl>,
+) -> Result<EstablishedSession, NetworkError> {
+    let (endpoint, transport) =
+        connect_directory_with_attempt(directory, dc_id, DcPurpose::Main, config, control)?;
     Ok(EstablishedSession {
         endpoint,
         transport,
@@ -1046,8 +1256,27 @@ pub fn establish_auth_key(
     dc_id: i32,
     config: &NetworkConfig,
 ) -> Result<EstablishedSession, NetworkError> {
+    establish_auth_key_with_attempt(directory, dc_id, config, None)
+}
+
+pub fn establish_auth_key_controlled(
+    directory: &DcDirectory,
+    dc_id: i32,
+    config: &NetworkConfig,
+    control: &NetworkAttemptControl,
+) -> Result<EstablishedSession, NetworkError> {
+    establish_auth_key_with_attempt(directory, dc_id, config, Some(control))
+}
+
+fn establish_auth_key_with_attempt(
+    directory: &DcDirectory,
+    dc_id: i32,
+    config: &NetworkConfig,
+    control: Option<&NetworkAttemptControl>,
+) -> Result<EstablishedSession, NetworkError> {
     let protocol_dc_id = auth_handshake_protocol_dc_id(directory, dc_id)?;
-    let (endpoint, mut transport) = connect_directory(directory, dc_id, DcPurpose::Main, config)?;
+    let (endpoint, mut transport) =
+        connect_directory_with_attempt(directory, dc_id, DcPurpose::Main, config, control)?;
     let mut nonce = Zeroizing::new([0_u8; 16]);
     getrandom::getrandom(&mut nonce[..]).map_err(|_| NetworkError::RandomnessUnavailable)?;
     let mut handshake = AuthKeyHandshake::new(*nonce);
@@ -1377,5 +1606,29 @@ mod recovery_contract_tests {
         let mut truncated = bad_message(16);
         truncated.truncate(truncated.len() - 1);
         assert!(!direct_bad_message_time_recovery(&truncated));
+    }
+}
+
+
+#[cfg(test)]
+mod network_attempt_control_contract_tests {
+    use super::*;
+
+    #[test]
+    fn cancelled_attempt_is_terminal_and_independently_observable() {
+        let control = NetworkAttemptControl::new(Duration::from_secs(60));
+        assert!(!control.is_cancelled());
+        control.cancel();
+        assert!(control.is_cancelled());
+        assert!(matches!(control.remaining(), Err(NetworkError::AttemptCancelled)));
+    }
+
+    #[test]
+    fn total_attempt_deadline_is_absolute_not_per_read() {
+        let control = NetworkAttemptControl::new(Duration::ZERO);
+        assert!(matches!(
+            control.remaining(),
+            Err(NetworkError::AttemptDeadlineExceeded)
+        ));
     }
 }
