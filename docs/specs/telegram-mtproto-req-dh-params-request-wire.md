@@ -39,3 +39,25 @@ Source-level acceptance requires remote readback of the canonical production cha
 ## Fail-closed boundary
 
 Any factor mismatch, fingerprint mismatch, or empty encrypted inner payload is rejected before a request body is returned. Broader auth-key lifecycle, transport scheduling and arbitrary request-history semantics remain outside this responsibility.
+
+
+## Round 100 source-level compliance readback
+
+Desktop bookkeeping checkpoint is `cb082b48228fbb2ee43021f41592b605d072bfb9`. Unique responsibility `TDRP-R9-MTPROTO-REQ-DH-PARAMS-REQUEST-WIRE-001` is recorded as `implemented / coverage_disposition=rewritten / validation_status=not-run / accepted=false`.
+
+| Requirement | Source-level status | Evidence / reason |
+| --- | --- | --- |
+| R1 | passed | Canonical `REQ_DH_PARAMS_CONSTRUCTOR=0xd712e4be` remains in `handshake.rs@b6572c91a450a240c56c15ca80585afb97c19839`. |
+| R2 | passed | Existing public `build_req_dh_params` remains the unique pure serializer and writes constructor, nonce, server_nonce, p, q, fingerprint and encrypted_data in fixed-U order. |
+| R3 | passed | Existing builder emits `FactoredPq::p_bytes/q_bytes` through canonical TL bytes framing; exact reader/EOF contract is authored in `protocol_contract.rs@071b72be6772117fb174daf86d5c9a19ce372b73`. |
+| R4 | passed at source level | `build_req_dh_params` now re-decodes active `response.pq`, checks `factors.pq`, and checks `p*q==pq`; mismatch returns existing `PqFactorsDoNotMatch`. |
+| R5 | passed | Existing active resPQ fingerprint membership check remains and authored contract records `NoTrustedServerKey`. |
+| R6 | passed | Existing non-empty encrypted payload guard remains and authored contract records `EmptyEncryptedInnerData`. |
+| R7 | passed | `AuthKeyHandshake::prepare_req_dh_params*` still factors active resPQ, selects trusted RSA key, builds/encrypts the existing *_dc inner variant, calls `build_req_dh_params`, then advances to `AwaitingServerDh`. |
+| R8 | passed | No second handshake owner or duplicate serializer was introduced. |
+| R9 | authored / not run | Focused exact-layout/EOF plus factor/fingerprint/empty-payload negative contracts are in canonical `071b72be6772117fb174daf86d5c9a19ce372b73`; no executable validation was run. |
+| R10 | passed | Desktop has no tracked handshake.rs duplicate; existing contract mirror was synchronized byte-identically at `0e0188f5d1ebf96d2ee21444e1f7b65994c88ee2` / `071b72be6772117fb174daf86d5c9a19ce372b73`. |
+| R11 | passed | Desktop bookkeeping `cb082b48228fbb2ee43021f41592b605d072bfb9` synchronizes unique ledger/P0/source-closure/round100 evidence with coverage `responsibilities_total=101, unknown=16172, unread=16145, omitted=0, unmapped_responsibilities=0`. |
+| R12 | passed | No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E execution, package, deployment, installation or runtime acceptance was performed. |
+
+Source-level compliance is complete for this isolated request-wire slice. This is not executable verification, candidate readiness, release acceptance, or closure of the broader migration. Auth-key binding/persistence/expiry/renewal, connection scheduling/racing/send retry, arbitrary request histories, gzip, complete difference/differenceSlice decoding/application, broader source/legal closure, Stage-B evidence and independent release ACCEPT remain open.
