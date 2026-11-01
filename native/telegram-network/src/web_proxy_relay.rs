@@ -91,20 +91,22 @@ fn serialize_frame(kind: FrameType, stream_id: u32, payload: &[u8]) -> io::Resul
     Ok(out)
 }
 
-fn parse_frames(mut input: &[u8]) -> io::Result<Vec<RelayFrame>> {
+fn parse_available_frames(input: &mut Vec<u8>) -> io::Result<Vec<RelayFrame>> {
     let mut result = Vec::new();
-    while !input.is_empty() {
-        if input.len() < 8 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "partial relay frame batch"));
-        }
-        let kind = FrameType::parse(input[0])
+    let mut consumed = 0_usize;
+    while input.len().saturating_sub(consumed) >= 8 {
+        let header = &input[consumed..];
+        let kind = FrameType::parse(header[0])
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "unknown WebProxy relay frame"))?;
-        let stream_id = (u32::from(input[1]) << 16)
-            | (u32::from(input[2]) << 8)
-            | u32::from(input[3]);
-        let payload_len = u32::from_be_bytes(input[4..8].try_into().expect("relay header")) as usize;
-        if payload_len > MAX_FRAME_PAYLOAD || input.len() < 8 + payload_len {
+        let stream_id = (u32::from(header[1]) << 16)
+            | (u32::from(header[2]) << 8)
+            | u32::from(header[3]);
+        let payload_len = u32::from_be_bytes(header[4..8].try_into().expect("relay header")) as usize;
+        if payload_len > MAX_FRAME_PAYLOAD {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid WebProxy relay payload length"));
+        }
+        if header.len() < 8 + payload_len {
+            break;
         }
         if result.len() >= MAX_FRAMES_PER_BATCH {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "too many WebProxy relay frames"));
@@ -112,12 +114,15 @@ fn parse_frames(mut input: &[u8]) -> io::Result<Vec<RelayFrame>> {
         result.push(RelayFrame {
             kind,
             stream_id,
-            payload: input[8..8 + payload_len].to_vec(),
+            payload: header[8..8 + payload_len].to_vec(),
         });
-        input = &input[8 + payload_len..];
+        consumed += 8 + payload_len;
     }
-    if result.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "empty WebProxy relay frame batch"));
+    if consumed != 0 {
+        input.drain(..consumed);
+    }
+    if input.len() > 8 + MAX_FRAME_PAYLOAD {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "WebProxy relay input buffer exceeded"));
     }
     Ok(result)
 }
@@ -140,6 +145,7 @@ fn read_window(payload: &[u8]) -> io::Result<u32> {
 #[derive(Default)]
 struct CarrierState {
     writer: Option<TcpStream>,
+    input: Vec<u8>,
     welcomed: bool,
     failed: bool,
     generation: u64,
@@ -582,22 +588,18 @@ impl WebProxyRelay {
 
     fn send_frame(&self, kind: FrameType, stream_id: u32, payload: &[u8]) -> io::Result<()> {
         let frame = serialize_frame(kind, stream_id, payload)?;
-        let mut writer = {
-            let guard = self.inner.lock().map_err(|_| io::Error::other("WebProxy relay state poisoned"))?;
-            guard.carrier.writer.as_ref()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "WebProxy browser carrier unavailable"))?
-                .try_clone()?
-        };
-        write_websocket_frame(&mut writer, 0x02, &frame)
+        let mut guard = self.inner.lock()
+            .map_err(|_| io::Error::other("WebProxy relay state poisoned"))?;
+        let writer = guard.carrier.writer.as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "WebProxy browser carrier unavailable"))?;
+        write_websocket_frame(writer, 0x02, &frame)
     }
 
     fn flush_carrier(&self) -> io::Result<()> {
-        let mut writer = {
-            let guard = self.inner.lock().map_err(|_| io::Error::other("WebProxy relay state poisoned"))?;
-            guard.carrier.writer.as_ref()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "WebProxy browser carrier unavailable"))?
-                .try_clone()?
-        };
+        let mut guard = self.inner.lock()
+            .map_err(|_| io::Error::other("WebProxy relay state poisoned"))?;
+        let writer = guard.carrier.writer.as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "WebProxy browser carrier unavailable"))?;
         writer.flush()
     }
 
@@ -614,6 +616,7 @@ impl WebProxyRelay {
             if let Some(writer) = guard.carrier.writer.take() {
                 let _ = writer.shutdown(Shutdown::Both);
             }
+            guard.carrier.input.clear();
             guard.carrier.welcomed = false;
             guard.carrier.failed = true;
             guard.carrier.generation = guard.carrier.generation.wrapping_add(1);
@@ -684,12 +687,14 @@ impl WebProxyRelay {
             Err(_) => return,
         };
         let token = auth.get("token").and_then(Value::as_str).unwrap_or("");
+        let valid_type = auth.get("t").and_then(Value::as_str) == Some("auth");
         let valid = {
             let mut guard = match self.inner.lock() {
                 Ok(value) => value,
                 Err(_) => return,
             };
-            if Instant::now() >= guard.bootstrap_expires
+            if !valid_type
+                || Instant::now() >= guard.bootstrap_expires
                 || token.is_empty()
                 || token != guard.bootstrap_token
             {
@@ -716,6 +721,7 @@ impl WebProxyRelay {
             if let Some(old) = guard.carrier.writer.replace(writer) {
                 let _ = old.shutdown(Shutdown::Both);
             }
+            guard.carrier.input.clear();
             guard.carrier.failed = false;
             guard.carrier.welcomed = false;
             guard.carrier.generation = guard.carrier.generation.wrapping_add(1);
@@ -737,9 +743,23 @@ impl WebProxyRelay {
         while let Ok(Some(message)) = read_websocket_message(&mut socket) {
             match message.opcode {
                 0x02 => {
-                    let Ok(frames) = parse_frames(&message.payload) else {
-                        self.fail_generation(generation);
-                        return;
+                    let frames = {
+                        let mut guard = match self.inner.lock() {
+                            Ok(value) => value,
+                            Err(_) => return,
+                        };
+                        if guard.carrier.generation != generation {
+                            return;
+                        }
+                        guard.carrier.input.extend_from_slice(&message.payload);
+                        match parse_available_frames(&mut guard.carrier.input) {
+                            Ok(frames) => frames,
+                            Err(_) => {
+                                drop(guard);
+                                self.fail_generation(generation);
+                                return;
+                            }
+                        }
                     };
                     for frame in frames {
                         if self.process_frame(generation, frame).is_err() {
@@ -1114,7 +1134,11 @@ mod contracts {
     fn malformed_window_and_unknown_frame_fail_closed() {
         assert!(read_window(&[0, 0, 0, 0]).is_err());
         assert!(read_window(&[1, 2, 3]).is_err());
-        assert!(parse_frames(&[0x7f, 0, 0, 1, 0, 0, 0, 0]).is_err());
+        let mut unknown = vec![0x7f, 0, 0, 1, 0, 0, 0, 0];
+        assert!(parse_available_frames(&mut unknown).is_err());
+        let mut partial = vec![0x01, 0, 0, 1, 0, 0];
+        assert!(parse_available_frames(&mut partial).unwrap().is_empty());
+        assert_eq!(partial.len(), 6);
     }
 
     #[test]
