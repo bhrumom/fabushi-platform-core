@@ -1,8 +1,11 @@
 use fabushi_telegram_core::Command;
 use fabushi_telegram_core::TelegramEngine;
 use fabushi_telegram_network::establish_auth_key;
+use fabushi_telegram_network::establish_auth_key_controlled;
 use fabushi_telegram_network::resume_auth_key;
+use fabushi_telegram_network::resume_auth_key_controlled;
 use fabushi_telegram_network::EstablishedSession;
+use fabushi_telegram_network::NetworkAttemptControl;
 use fabushi_telegram_network::NetworkConfig;
 use fabushi_telegram_protocol::build_account_get_password;
 use fabushi_telegram_protocol::build_account_send_verify_email_code;
@@ -57,6 +60,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
+use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use thiserror::Error;
@@ -69,6 +73,7 @@ static CLIENTS: Lazy<Mutex<BTreeMap<u64, RuntimeClient>>> =
 
 const AUTHORIZATION_METADATA_KEY: &str = "authorization.v1";
 const TRANSPORT_METADATA_KEY: &str = "transport.v1";
+const SPECIAL_CONFIG_TOTAL_ATTEMPT: Duration = Duration::from_millis(6000);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorizationSnapshot {
@@ -138,11 +143,19 @@ struct AuthMaterial {
     auth_key: AuthKey,
 }
 
+struct OwnedRequest {
+    logical_dc_id: i32,
+    control: NetworkAttemptControl,
+    remove_session_on_finish: bool,
+}
+
 #[derive(Default)]
 struct SessionOwner {
     primary_logical_dc_id: Option<i32>,
     sessions: BTreeMap<i32, OwnedSession>,
     auth_materials: BTreeMap<i32, AuthMaterial>,
+    next_request_id: u64,
+    requests: BTreeMap<u64, OwnedRequest>,
 }
 
 impl SessionOwner {
@@ -270,6 +283,62 @@ impl SessionOwner {
 
     fn route(&self, logical_dc_id: i32) -> Option<SessionRoute> {
         self.sessions.get(&logical_dc_id).map(|owned| owned.route)
+    }
+
+    fn begin_request(
+        &mut self,
+        logical_dc_id: i32,
+        total_timeout: Duration,
+        remove_session_on_finish: bool,
+    ) -> (u64, NetworkAttemptControl) {
+        self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
+        while self.requests.contains_key(&self.next_request_id) {
+            self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
+        }
+        let request_id = self.next_request_id;
+        let control = NetworkAttemptControl::new(total_timeout);
+        self.requests.insert(
+            request_id,
+            OwnedRequest {
+                logical_dc_id,
+                control: control.clone(),
+                remove_session_on_finish,
+            },
+        );
+        (request_id, control)
+    }
+
+    fn request_control(&self, request_id: u64) -> Option<NetworkAttemptControl> {
+        self.requests.get(&request_id).map(|request| request.control.clone())
+    }
+
+    fn cancel_request(&mut self, request_id: u64) -> bool {
+        let Some(request) = self.requests.remove(&request_id) else {
+            return false;
+        };
+        request.control.cancel();
+        if request.remove_session_on_finish {
+            self.remove(request.logical_dc_id);
+        }
+        true
+    }
+
+    fn finish_request(&mut self, request_id: u64) -> bool {
+        let Some(request) = self.requests.remove(&request_id) else {
+            return false;
+        };
+        if request.remove_session_on_finish {
+            self.remove(request.logical_dc_id);
+        }
+        true
+    }
+}
+
+impl Drop for SessionOwner {
+    fn drop(&mut self) {
+        for (_, request) in std::mem::take(&mut self.requests) {
+            request.control.cancel();
+        }
     }
 }
 
@@ -941,6 +1010,157 @@ fn open_logical_session(
         .sessions
         .remember_auth_material(logical_dc_id, directory.test_mode(), &session)?;
     Ok(session)
+}
+
+fn open_logical_session_controlled(
+    client_id: u64,
+    logical_dc_id: i32,
+    directory: &DcDirectory,
+    config: &NetworkConfig,
+    control: &NetworkAttemptControl,
+) -> Result<EstablishedSession, RuntimeError> {
+    let material = {
+        let mut clients = CLIENTS
+            .lock()
+            .map_err(|_| RuntimeError::RegistryUnavailable)?;
+        let client = clients
+            .get_mut(&client_id)
+            .ok_or(RuntimeError::ClientNotFound(client_id))?;
+        if let Some(session) = client.sessions.take(logical_dc_id) {
+            return Ok(session);
+        }
+        if let Some(persisted) = client.persisted_transport.clone() {
+            let persisted_route = SessionRoute::new(persisted.dc_id)?;
+            let requested_route = SessionRoute::new(logical_dc_id)?;
+            if persisted_route.auth_dc_id == requested_route.auth_dc_id {
+                client.sessions.seed_persisted(&persisted)?;
+            }
+        }
+        client
+            .sessions
+            .auth_material(logical_dc_id, directory.test_mode())?
+    };
+
+    let session = if let Some(material) = material {
+        resume_auth_key_controlled(
+            directory,
+            logical_dc_id,
+            material.auth_key,
+            material.server_salt,
+            material.server_time,
+            config,
+            control,
+        )
+        .map_err(|error| RuntimeError::Network(error.to_string()))?
+    } else {
+        establish_auth_key_controlled(directory, logical_dc_id, config, control)
+            .map_err(|error| RuntimeError::Network(error.to_string()))?
+    };
+
+    let mut clients = CLIENTS
+        .lock()
+        .map_err(|_| RuntimeError::RegistryUnavailable)?;
+    let client = clients
+        .get_mut(&client_id)
+        .ok_or(RuntimeError::ClientNotFound(client_id))?;
+    client
+        .sessions
+        .remember_auth_material(logical_dc_id, directory.test_mode(), &session)?;
+    Ok(session)
+}
+
+fn begin_logical_request(
+    client_id: u64,
+    logical_dc_id: i32,
+    total_timeout: Duration,
+    remove_session_on_finish: bool,
+) -> Result<(u64, NetworkAttemptControl), RuntimeError> {
+    let mut clients = CLIENTS
+        .lock()
+        .map_err(|_| RuntimeError::RegistryUnavailable)?;
+    let client = clients
+        .get_mut(&client_id)
+        .ok_or(RuntimeError::ClientNotFound(client_id))?;
+    Ok(client
+        .sessions
+        .begin_request(logical_dc_id, total_timeout, remove_session_on_finish))
+}
+
+fn cancel_logical_request(client_id: u64, request_id: u64) -> Result<bool, RuntimeError> {
+    let mut clients = CLIENTS
+        .lock()
+        .map_err(|_| RuntimeError::RegistryUnavailable)?;
+    let client = clients
+        .get_mut(&client_id)
+        .ok_or(RuntimeError::ClientNotFound(client_id))?;
+    Ok(client.sessions.cancel_request(request_id))
+}
+
+fn finish_logical_request(client_id: u64, request_id: u64) -> Result<bool, RuntimeError> {
+    let mut clients = CLIENTS
+        .lock()
+        .map_err(|_| RuntimeError::RegistryUnavailable)?;
+    let client = clients
+        .get_mut(&client_id)
+        .ok_or(RuntimeError::ClientNotFound(client_id))?;
+    Ok(client.sessions.finish_request(request_id))
+}
+
+fn invoke_owned_logical_request(
+    client_id: u64,
+    request_id: u64,
+    logical_dc_id: i32,
+    directory: &DcDirectory,
+    body: &[u8],
+) -> Result<Vec<u8>, RuntimeError> {
+    let control = {
+        let clients = CLIENTS
+            .lock()
+            .map_err(|_| RuntimeError::RegistryUnavailable)?;
+        let client = clients
+            .get(&client_id)
+            .ok_or(RuntimeError::ClientNotFound(client_id))?;
+        client
+            .sessions
+            .request_control(request_id)
+            .ok_or(RuntimeError::InvalidParameter("requestId"))?
+    };
+    let mut session = open_logical_session_controlled(
+        client_id,
+        logical_dc_id,
+        directory,
+        &NetworkConfig::default(),
+        &control,
+    )?;
+    let result = session
+        .invoke_raw_controlled(body, &control)
+        .map(|response| response.body)
+        .map_err(|error| RuntimeError::Network(error.to_string()));
+    {
+        let mut clients = CLIENTS
+            .lock()
+            .map_err(|_| RuntimeError::RegistryUnavailable)?;
+        let client = clients
+            .get_mut(&client_id)
+            .ok_or(RuntimeError::ClientNotFound(client_id))?;
+        client
+            .sessions
+            .remember_auth_material(logical_dc_id, directory.test_mode(), &session)?;
+        client.sessions.put(logical_dc_id, session, directory.test_mode())?;
+    }
+    result
+}
+
+fn begin_special_config_attempt(
+    client_id: u64,
+    logical_dc_id: i32,
+) -> Result<(u64, NetworkAttemptControl), RuntimeError> {
+    begin_logical_request(
+        client_id,
+        logical_dc_id,
+        SPECIAL_CONFIG_TOTAL_ATTEMPT,
+        true,
+    )
 }
 
 fn delivery_state(delivery: &SentCodeDelivery) -> (CodeDeliveryType, u8) {
@@ -1851,6 +2071,52 @@ mod authorization_restore_contract_tests {
         assert!(error
             .to_string()
             .contains("auth material environment mismatch for data center 2"));
+    }
+
+    #[test]
+    fn request_ids_are_unique_and_independently_addressable() {
+        let mut owner = SessionOwner::default();
+        let (first_id, first) =
+            owner.begin_request(1002, SPECIAL_CONFIG_TOTAL_ATTEMPT, true);
+        let (second_id, second) =
+            owner.begin_request(1003, SPECIAL_CONFIG_TOTAL_ATTEMPT, true);
+
+        assert_ne!(first_id, second_id);
+        assert!(!first.is_cancelled());
+        assert!(!second.is_cancelled());
+        assert!(owner.request_control(first_id).is_some());
+        assert!(owner.request_control(second_id).is_some());
+
+        assert!(owner.cancel_request(first_id));
+        assert!(first.is_cancelled());
+        assert!(!second.is_cancelled());
+        assert!(owner.request_control(first_id).is_none());
+        assert!(owner.request_control(second_id).is_some());
+    }
+
+    #[test]
+    fn cancelling_temporary_request_retains_real_dc_auth_material() {
+        let mut owner = SessionOwner::default();
+        let persisted = PersistedTransportState {
+            dc_id: 2,
+            test_mode: false,
+            server_salt: 53,
+            server_time: 59,
+            auth_key: vec![11_u8; 256],
+        };
+        owner.seed_persisted(&persisted).unwrap();
+        let (request_id, control) =
+            owner.begin_request(1002, SPECIAL_CONFIG_TOTAL_ATTEMPT, true);
+
+        assert!(owner.cancel_request(request_id));
+        assert!(control.is_cancelled());
+        assert!(owner.auth_material(1002, false).unwrap().is_some());
+        assert_eq!(owner.auth_materials.len(), 1);
+    }
+
+    #[test]
+    fn special_config_attempt_budget_is_exactly_6000_ms() {
+        assert_eq!(SPECIAL_CONFIG_TOTAL_ATTEMPT, Duration::from_millis(6000));
     }
 
     #[test]
