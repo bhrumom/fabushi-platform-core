@@ -55,7 +55,201 @@ use thiserror::Error;
 use zeroize::Zeroizing;
 
 const DEFAULT_READ_CHUNK_BYTES: usize = 16 * 1024;
+const FILES_SEND_BUFFER_BYTES: i32 = 2 * 1024 * 1024;
+const FILES_RECEIVE_BUFFER_BYTES: i32 = 2 * 1024 * 1024;
 const DEFAULT_MAX_DH_RETRIES: usize = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeSocketBufferProfile {
+    Default,
+    Files,
+}
+
+fn socket_buffer_profile_for_purpose(purpose: DcPurpose) -> NativeSocketBufferProfile {
+    match purpose {
+        DcPurpose::Media | DcPurpose::Cdn => NativeSocketBufferProfile::Files,
+        DcPurpose::Main => NativeSocketBufferProfile::Default,
+    }
+}
+
+fn apply_native_socket_buffer_profile(
+    stream: &TcpStream,
+    profile: NativeSocketBufferProfile,
+) -> io::Result<()> {
+    if profile == NativeSocketBufferProfile::Files {
+        native_socket_options::set_send_buffer(stream, FILES_SEND_BUFFER_BYTES)?;
+        native_socket_options::set_receive_buffer(stream, FILES_RECEIVE_BUFFER_BYTES)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+mod native_socket_options {
+    use std::{ffi::c_void, io, mem::size_of_val, net::TcpStream, os::fd::AsRawFd};
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const SOL_SOCKET: i32 = 1;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const SO_SNDBUF: i32 = 7;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const SO_RCVBUF: i32 = 8;
+
+    #[cfg(any(
+        target_os = "macos", target_os = "ios", target_os = "tvos",
+        target_os = "watchos", target_os = "visionos",
+        target_os = "freebsd", target_os = "openbsd",
+        target_os = "netbsd", target_os = "dragonfly"
+    ))]
+    const SOL_SOCKET: i32 = 0xffff;
+    #[cfg(any(
+        target_os = "macos", target_os = "ios", target_os = "tvos",
+        target_os = "watchos", target_os = "visionos",
+        target_os = "freebsd", target_os = "openbsd",
+        target_os = "netbsd", target_os = "dragonfly"
+    ))]
+    const SO_SNDBUF: i32 = 0x1001;
+    #[cfg(any(
+        target_os = "macos", target_os = "ios", target_os = "tvos",
+        target_os = "watchos", target_os = "visionos",
+        target_os = "freebsd", target_os = "openbsd",
+        target_os = "netbsd", target_os = "dragonfly"
+    ))]
+    const SO_RCVBUF: i32 = 0x1002;
+
+    #[cfg(not(any(
+        target_os = "linux", target_os = "android",
+        target_os = "macos", target_os = "ios", target_os = "tvos",
+        target_os = "watchos", target_os = "visionos",
+        target_os = "freebsd", target_os = "openbsd",
+        target_os = "netbsd", target_os = "dragonfly"
+    )))]
+    const SO_SNDBUF: i32 = 0;
+    #[cfg(not(any(
+        target_os = "linux", target_os = "android",
+        target_os = "macos", target_os = "ios", target_os = "tvos",
+        target_os = "watchos", target_os = "visionos",
+        target_os = "freebsd", target_os = "openbsd",
+        target_os = "netbsd", target_os = "dragonfly"
+    )))]
+    const SO_RCVBUF: i32 = 0;
+
+    #[cfg(any(
+        target_os = "linux", target_os = "android",
+        target_os = "macos", target_os = "ios", target_os = "tvos",
+        target_os = "watchos", target_os = "visionos",
+        target_os = "freebsd", target_os = "openbsd",
+        target_os = "netbsd", target_os = "dragonfly"
+    ))]
+    extern "C" {
+        fn setsockopt(
+            socket: i32,
+            level: i32,
+            option_name: i32,
+            option_value: *const c_void,
+            option_len: u32,
+        ) -> i32;
+    }
+
+    pub(super) fn set_send_buffer(stream: &TcpStream, bytes: i32) -> io::Result<()> {
+        set_buffer(stream, SO_SNDBUF, bytes)
+    }
+
+    pub(super) fn set_receive_buffer(stream: &TcpStream, bytes: i32) -> io::Result<()> {
+        set_buffer(stream, SO_RCVBUF, bytes)
+    }
+
+    #[cfg(any(
+        target_os = "linux", target_os = "android",
+        target_os = "macos", target_os = "ios", target_os = "tvos",
+        target_os = "watchos", target_os = "visionos",
+        target_os = "freebsd", target_os = "openbsd",
+        target_os = "netbsd", target_os = "dragonfly"
+    ))]
+    fn set_buffer(stream: &TcpStream, option: i32, bytes: i32) -> io::Result<()> {
+        let result = unsafe {
+            setsockopt(
+                stream.as_raw_fd(),
+                SOL_SOCKET,
+                option,
+                (&bytes as *const i32).cast(),
+                size_of_val(&bytes) as u32,
+            )
+        };
+        if result == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+    }
+
+    #[cfg(not(any(
+        target_os = "linux", target_os = "android",
+        target_os = "macos", target_os = "ios", target_os = "tvos",
+        target_os = "watchos", target_os = "visionos",
+        target_os = "freebsd", target_os = "openbsd",
+        target_os = "netbsd", target_os = "dragonfly"
+    )))]
+    fn set_buffer(_stream: &TcpStream, _option: i32, _bytes: i32) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "native file-transfer socket buffers are unsupported on this Unix target",
+        ))
+    }
+}
+
+#[cfg(windows)]
+mod native_socket_options {
+    use std::{io, net::TcpStream, os::windows::io::AsRawSocket};
+
+    const SOL_SOCKET: i32 = 0xffff;
+    const SO_SNDBUF: i32 = 0x1001;
+    const SO_RCVBUF: i32 = 0x1002;
+    const SOCKET_ERROR: i32 = -1;
+
+    #[link(name = "ws2_32")]
+    extern "system" {
+        fn setsockopt(
+            socket: usize,
+            level: i32,
+            option_name: i32,
+            option_value: *const i8,
+            option_len: i32,
+        ) -> i32;
+        fn WSAGetLastError() -> i32;
+    }
+
+    pub(super) fn set_send_buffer(stream: &TcpStream, bytes: i32) -> io::Result<()> {
+        set_buffer(stream, SO_SNDBUF, bytes)
+    }
+
+    pub(super) fn set_receive_buffer(stream: &TcpStream, bytes: i32) -> io::Result<()> {
+        set_buffer(stream, SO_RCVBUF, bytes)
+    }
+
+    fn set_buffer(stream: &TcpStream, option: i32, bytes: i32) -> io::Result<()> {
+        let result = unsafe {
+            setsockopt(
+                stream.as_raw_socket() as usize,
+                SOL_SOCKET,
+                option,
+                (&bytes as *const i32).cast(),
+                std::mem::size_of_val(&bytes) as i32,
+            )
+        };
+        if result != SOCKET_ERROR {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(unsafe { WSAGetLastError() }))
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+mod native_socket_options {
+    use std::{io, net::TcpStream};
+    pub(super) fn set_send_buffer(_stream: &TcpStream, _bytes: i32) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "native socket buffers unsupported"))
+    }
+    pub(super) fn set_receive_buffer(_stream: &TcpStream, _bytes: i32) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "native socket buffers unsupported"))
+    }
+}
 const DEFAULT_MAX_SERVICE_MESSAGES: usize = 8;
 const PING_CONSTRUCTOR: u32 = 0x7abe_77ec;
 const PONG_CONSTRUCTOR: u32 = 0x3477_73c5;
@@ -439,7 +633,14 @@ impl TcpTransport {
         protocol_dc_id: i16,
         config: &NetworkConfig,
     ) -> Result<Self, NetworkError> {
-        Self::connect_obfuscated_with_attempt(address, secret, protocol_dc_id, config, None)
+        Self::connect_obfuscated_with_attempt(
+            address,
+            secret,
+            protocol_dc_id,
+            config,
+            None,
+            NativeSocketBufferProfile::Default,
+        )
     }
 
     fn connect_obfuscated_with_attempt(
@@ -448,6 +649,7 @@ impl TcpTransport {
         protocol_dc_id: i16,
         config: &NetworkConfig,
         control: Option<&NetworkAttemptControl>,
+        socket_buffer_profile: NativeSocketBufferProfile,
     ) -> Result<Self, NetworkError> {
         let connect_timeout = if let Some(control) = control {
             control.bounded_timeout(config.connect_timeout)?
@@ -455,6 +657,7 @@ impl TcpTransport {
             config.connect_timeout
         };
         let mut stream = TcpStream::connect_timeout(&address, connect_timeout)?;
+        apply_native_socket_buffer_profile(&stream, socket_buffer_profile)?;
         stream.set_nodelay(true)?;
         if let Some(control) = control {
             control.register_stream(&stream)?;
@@ -505,6 +708,7 @@ impl TcpTransport {
         protocol_dc_id: i16,
         config: &NetworkConfig,
         control: Option<&NetworkAttemptControl>,
+        socket_buffer_profile: NativeSocketBufferProfile,
     ) -> Result<Self, NetworkError> {
         let connect_timeout = if let Some(control) = control {
             control.bounded_timeout(config.connect_timeout)?
@@ -512,6 +716,7 @@ impl TcpTransport {
             config.connect_timeout
         };
         let mut stream = TcpStream::connect_timeout(&proxy_address, connect_timeout)?;
+        apply_native_socket_buffer_profile(&stream, socket_buffer_profile)?;
         stream.set_nodelay(true)?;
         if let Some(control) = control {
             control.register_stream(&stream)?;
@@ -1668,6 +1873,7 @@ fn connect_directory_with_projection(
         DcPurpose::Media => ProtocolDcRole::MediaCluster,
         DcPurpose::Main | DcPurpose::Cdn => ProtocolDcRole::Regular,
     };
+    let socket_buffer_profile = socket_buffer_profile_for_purpose(purpose);
     let protocol_dc = derive_protocol_dc_identity(dc_id, directory.test_mode(), protocol_role)?;
     if projection.enabled {
         let proxy = projection
@@ -1722,6 +1928,7 @@ fn connect_directory_with_projection(
                         protocol_dc.wire_id,
                         &effective,
                         control,
+                        socket_buffer_profile,
                     ) {
                         Ok(transport) => {
                             if proxy.kind == NetworkProxyKind::Socks5 {
@@ -1763,6 +1970,7 @@ fn connect_directory_with_projection(
                 protocol_dc.wire_id,
                 &effective,
                 control,
+                socket_buffer_profile,
             ) {
                 Ok(transport) => {
                     resolution.promote(&proxy.host, ip);
@@ -1799,6 +2007,7 @@ fn connect_directory_with_projection(
             protocol_dc.wire_id,
             &effective,
             control,
+            socket_buffer_profile,
         ) {
             Ok(transport) => {
                 return Ok((
@@ -2417,6 +2626,24 @@ mod recovery_contract_tests {
     }
 }
 
+
+#[cfg(test)]
+mod file_transfer_socket_buffer_contract_tests {
+    use super::*;
+
+    #[test]
+    fn fixed_u_file_socket_buffer_requests_are_two_mebibytes_each() {
+        assert_eq!(FILES_SEND_BUFFER_BYTES, 2 * 1024 * 1024);
+        assert_eq!(FILES_RECEIVE_BUFFER_BYTES, 2 * 1024 * 1024);
+    }
+
+    #[test]
+    fn only_media_and_cdn_directory_purposes_select_file_socket_buffers() {
+        assert_eq!(socket_buffer_profile_for_purpose(DcPurpose::Main), NativeSocketBufferProfile::Default);
+        assert_eq!(socket_buffer_profile_for_purpose(DcPurpose::Media), NativeSocketBufferProfile::Files);
+        assert_eq!(socket_buffer_profile_for_purpose(DcPurpose::Cdn), NativeSocketBufferProfile::Files);
+    }
+}
 
 #[cfg(test)]
 mod network_attempt_control_contract_tests {

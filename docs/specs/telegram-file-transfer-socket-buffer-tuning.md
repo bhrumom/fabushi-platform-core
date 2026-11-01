@@ -101,4 +101,19 @@ Stage B after full implementation closure: compile supported targets, execute co
 
 ## 11. Spec compliance record
 
-Implementation is pending at spec creation. Executable verification is intentionally not run in Stage A.
+Source-level implementation is present in canonical telegram-network blob `6dece8da8f9a1512dcd17bc76fd1cc9ce43c1ef6`. This record is Stage-A source review only; executable verification remains intentionally not run.
+
+| Requirement / AC | Status | Source evidence |
+| --- | --- | --- |
+| R1 / AC1 | passed | Distinct `FILES_SEND_BUFFER_BYTES` and `FILES_RECEIVE_BUFFER_BYTES` are both exactly `2 * 1024 * 1024`. |
+| R2 / AC2 | passed | `socket_buffer_profile_for_purpose` maps Main->Default and Media/Cdn->Files; two contracts are authored. |
+| R3 / AC3 | passed | Direct directory connection passes the derived profile into the native obfuscated TCP constructor, which applies it immediately after connect. |
+| R4 / AC3 | passed | SOCKS5/HTTP forward-proxy and MTProto-proxy native constructors receive the same derived profile before proxy/TLS/protocol bytes. |
+| R5 / AC4 | passed | Native option adapters return `io::Result`; `?` promotes failures through existing `NetworkError::Io`. |
+| R6 / AC5 | passed | Only telegram-network is changed; telegram-media and RuntimeClient owners are unchanged. |
+| R7 | passed (source-level) | Linux/Android, Apple/BSD-family, and Windows adapters are explicit; other Unix/native targets fail closed. Compile/runtime evidence is deferred. |
+| R8 | passed | Two source contracts are authored in the existing test module and were not executed. |
+| AC6 | pending desktop checkpoint | Desktop mirror plus ledger/P0/source-closure/evidence are published in the following desktop checkpoint. |
+| AC7 | passed | No executable validation was run in Stage A. |
+
+The responsibility remains `implemented / validation_status=not-run / accepted=false` until Stage-B executable evidence exists.
