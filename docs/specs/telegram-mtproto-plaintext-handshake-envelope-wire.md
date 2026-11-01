@@ -53,3 +53,26 @@ Source-level acceptance for this slice requires remote readback of the durable s
 ## Fail-closed boundary
 
 Malformed envelope lengths, misaligned/empty bodies, invalid padding boundaries, non-zero auth key ids, truncation and trailing/missing bytes are rejected before any handshake body parser is invoked. Broader lifecycle and transport scheduling remain outside this responsibility.
+
+
+## Round 101 source-level compliance readback
+
+Desktop bookkeeping checkpoint is `0d8b5b19d9bab4b509db550f8b6ce57441b80ed5`. Unique responsibility `TDRP-R9-MTPROTO-PLAINTEXT-HANDSHAKE-ENVELOPE-WIRE-001` is recorded as `implemented / coverage_disposition=rewritten / validation_status=not-run / accepted=false`.
+
+| Requirement | Source-level status | Evidence / reason |
+| --- | --- | --- |
+| R1 | passed | Existing canonical `PlaintextEnvelope` remains the unique unencrypted auth-key handshake envelope owner in `handshake.rs@301554c60fe318a621726cacdd37f0d5d1de2a3e`. |
+| R2 | passed | `encode_with_padding` emits little-endian zero `auth_key_id`, caller `message_id`, inclusive i32 `message_data_length`, then message data. |
+| R3 | passed | Canonical padding guard permits only 0..252 bytes divisible by four, matching fixed-U 0..63 32-bit words. |
+| R4 | passed | Existing `encode()` is the empty-padding compatibility path; padded encoding includes TL body plus padding in the declared length. |
+| R5 | passed at source level | Outbound empty/misaligned bodies, invalid padding, overflow and configured maximum violations fail closed before bytes are returned. |
+| R6 | passed at source level | Decoder rejects non-zero auth key id, zero/negative/misaligned/oversized length and declared/actual mismatch before returning message data. |
+| R7 | passed | Existing shipping `TcpTransport::exchange_plaintext` in `telegram-network/src/lib.rs@54f509474391bb5118ba4678ba5c566ab3e74ec8` now uses secure random fixed-U-equivalent padding without changing connection selection/retry. |
+| R8 | passed | Existing `exchange_and_validate -> MessageIdGuard::validate_server_message_id` remains the server message-id semantic/time owner. |
+| R9 | passed | Existing req_pq_multi / req_DH_params / set_client_DH_params body serializers/parsers and AuthKeyHandshake phase state remain otherwise unchanged. |
+| R10 | authored / not run | Focused contracts are in `protocol_contract.rs@a7c10e88172ccd664bad0370acea8fac7a3e2f3d`; no executable validation was run. |
+| R11 | passed | Desktop existing telegram-network and contract mirrors are byte-identical to canonical at bookkeeping checkpoint `0d8b5b19d9bab4b509db550f8b6ce57441b80ed5`; no duplicate desktop handshake.rs was created. |
+| R12 | passed | Unique desktop ledger/P0/source-closure/evidence record coverage `responsibilities_total=102, unknown=16172, unread=16145, omitted=0, unmapped_responsibilities=0` with validation not-run and accepted false. |
+| R13 | passed | No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E execution, package, deployment, installation or runtime acceptance was performed. |
+
+Source-level compliance is complete for this isolated plaintext-handshake-envelope wire slice. This is not executable verification, candidate readiness, release acceptance, or closure of the broader migration. Auth-key binding/persistence/expiry/renewal, broader connection scheduling/racing/send retry, arbitrary request histories, gzip, complete difference/differenceSlice decoding/application, broader source/legal closure, Stage-B evidence and independent release ACCEPT remain open.
