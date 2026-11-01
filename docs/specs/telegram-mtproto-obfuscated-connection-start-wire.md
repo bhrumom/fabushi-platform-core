@@ -80,3 +80,19 @@ Contracts must be written but not executed in Stage A and cover:
 - raw/non-obfuscated `TcpTransport::from_stream` behavior remaining available for focused transport fixtures, while the shipping Main-DC connection path uses obfuscated connection start.
 
 No build, typecheck, lint, generator, schema validator, test, package, deployment, installation, runtime acceptance, Actions/status/check query, or CI trigger is permitted in this Stage-A slice.
+
+
+## Round 106 implementation record
+
+Source-level production implementation is `0f93e212d5151c598f19a67b0a65ad19774dc1c3`.
+
+- Canonical `native/telegram-protocol/src/transport.rs@74189488dc3ec1015edc59989f7aced8ad65f5c3` adds the exact fixed-U obfuscated-secret classifier, reserved direct-TCP nonce filter, Version0 direct key / Version1+VersionD SHA-256 key derivation, 64-byte plain56+cipher8 prefix construction, and persistent AES-256-CTR send/receive streams.
+- Canonical `native/telegram-protocol/src/lib.rs@d5727367035cef2adbba0a6a6a2f6b95e2716450` exports the source-neutral connection-start wire API through the existing protocol owner.
+- Canonical shipping `native/telegram-network/src/lib.rs@54245116969f53ee53ccc3f979bbd9fb7382cc97` retains TcpTransport as the only socket carrier and wires Main/test direct connections through `connect_obfuscated`, selecting abridged versus padded-intermediate framing from the secret shape, writing the prefix once, continuing outbound CTR across framed bytes, and decrypting inbound bytes before existing frame parsing.
+- Initial authored-only contract commit was `8b04666c4e1d0c8c986432bcf272a6679f96566d`; source review then tightened the Version0/Version1 divergence assertion to hold nonce and DC id constant. The superseding canonical protocol contract is `ecf143c6edec0c859e2c19a0f94aa1c9dca215ae` / `native/telegram-protocol/tests/protocol_contract.rs@307c973117a96fa901662d021ac79f5ec76b28cf`. Canonical network contract remains `native/telegram-network/tests/tcp_transport.rs@1a94aaa3f79e8108e04bc5418657fd4e641d0a4a`.
+- Desktop provider synchronization checkpoint is `76e467b5a1b3aecceffc4cdb6d34dc12461f12d3`; desktop bookkeeping checkpoint is `3b59512feb6794c235f03a3e83006abb94f11bdb`, with ledger blob `a8ca1db169b85353f7bcaf71ad56d5fe4adf998a`, P0 blob `c4200741fffaa1dc35d71e9b7026053a6a0c69ed`, source-closure blob `6d98d39d2c4c2d4c8580247259a5d81a44b1a42f`, and round-106 evidence blob `fa5482d8c72c42b45e7beb989697bc34307e8576`.
+- Unique responsibility status is `implemented / coverage_disposition=rewritten / validation_status=not-run / accepted=false`. Coverage is `responsibilities_total=107, unknown=16172, unread=16145, omitted=0, unmapped_responsibilities=0`.
+
+No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, runtime acceptance, GitHub Actions/status/check query or CI trigger was performed.
+
+Proxy/Web/TLS camouflage, media-cluster negative/temporary protocol-DC-id semantics, quick-ACK lifecycle, broader connection scheduling/racing/reconnect/send retry, auth-key binding/persistence/expiry/renewal, arbitrary request histories, gzip, complete difference/differenceSlice decoding/application, broader fixed-U source/legal closure, Stage-B executable evidence and independent release ACCEPT remain open.
