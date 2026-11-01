@@ -66,7 +66,9 @@ pub fn validate_canonical_web_proxy_host(host: &str) -> Result<(), WebProxyConfi
         || host.trim() != host
         || !host.is_ascii()
         || host.bytes().any(|byte| byte.is_ascii_uppercase())
-        || host.contains([':', '/', '?', '#', '@'])
+        || host
+            .bytes()
+            .any(|byte| matches!(byte, b':' | b'/' | b'?' | b'#' | b'@'))
         || host.ends_with('.')
         || !host.contains('.')
     {
@@ -260,9 +262,14 @@ fn decode_base64url(value: &str) -> Result<Vec<u8>, WebProxyConfigError> {
         if bits >= 8 {
             bits -= 8;
             output.push(((accumulator >> bits) & 0xff) as u8);
+            accumulator = if bits == 0 {
+                0
+            } else {
+                accumulator & ((1_u32 << bits) - 1)
+            };
         }
     }
-    if bits != 0 && (accumulator & ((1_u32 << bits) - 1)) != 0 {
+    if bits != 0 && accumulator != 0 {
         return Err(WebProxyConfigError::InvalidSecret);
     }
     Ok(output)
