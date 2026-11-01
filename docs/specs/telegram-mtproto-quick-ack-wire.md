@@ -127,14 +127,32 @@ Source-level evidence consists of fixed-U blob identities, canonical protocol/ne
 
 | Requirement / AC | Status | Evidence / reason |
 | --- | --- | --- |
-| R1-R8 | pending | Stage-A implementation not yet recorded. |
-| AC-1 | passed | This spec is committed before the behavior change. |
-| AC-2 | pending | |
-| AC-3 | pending | |
-| AC-4 | pending | |
-| AC-5 | pending | |
-| AC-6 | pending | |
-| AC-7 | pending | |
-| AC-8 | pending | |
+| R1-R8 | passed | Source-level Stage-A implementation is recorded below. R8 is satisfied by deferring all executable validation; no executable gate is claimed. |
+| AC-1 | passed | Durable spec checkpoint `1a09a5674ec16af4228bbf0aed0fb302cb52fba0` preceded the behavior change. |
+| AC-2 | passed | Existing `telegram-protocol` quick-ACK token/marker primitives remain the sole protocol wire owner and are unchanged. |
+| AC-3 | passed | Existing shipping `TcpTransport::send_payload` still calls ordinary `TransportFrameCodec::encode`; no quick-ACK request marker is enabled. |
+| AC-4 | passed | Production commit `605b8928de5fb64bf235196093ef804e350994f2` makes decoded uncorrelated tokens return `NetworkError::UnexpectedQuickAck(token)`; network blob `7c442299aedd4aa7444ba53c7ab8212542dfc2d1`. |
+| AC-5 | passed | No request-history/correlation state, callback settlement, resend mutation or scheduling owner was introduced; correlation remains explicitly open. |
+| AC-6 | passed | Authored-only network contracts are `d1cec8b3952a4be1b02c6f1dae1ab008991a0342` / blob `9dfb554bae0dac9ea68ebd6b2fe7cab664cc1240`, mirrored byte-identically to desktop; not run. |
+| AC-7 | passed | Desktop bookkeeping `da6bbfcafabb66681ba8614cf2d97c9e9e43ca5f` adds the unique responsibility as `implemented / rewritten / not-run / accepted=false`; ledger blob `f8c27fcbbd782fae1c30a8d9aa313f5917869183`. |
+| AC-8 | passed | Desktop provider sync `f24b51ec5ba2d959f8c08fe44c6af706f38d7224`, P0 blob `8d105d05edffa4518c9d086624004e5f5cb6c393`, source-closure blob `a9feff9e8d6646dbc5fb60483bbe3dbc4d4e9c59`, evidence blob `0f692837f19ca4ea30c893a0c73c61b5525bb8b7`; all branch writes used non-force expected-SHA CAS. |
 
 Allowed final statuses: `passed`, `blocked`, `not-applicable`.
+
+
+## Round 108 implementation record
+
+The isolated quick-ACK wire boundary is source-level closed for Stage A only.
+
+- Fixed-U source: `connection_tcp.cpp@d721a9058e1885d2964ded55bd4e4c7c2ce9e381`, `connection_abstract.cpp@3baabf3f72c7c7edba3151814681fbf167a5ca0a`, `session_private.cpp@13cbc76ec723386027b5b4dcac79999b791c4614`.
+- Durable spec-first checkpoint: `1a09a5674ec16af4228bbf0aed0fb302cb52fba0`.
+- Canonical production: `605b8928de5fb64bf235196093ef804e350994f2`, network blob `7c442299aedd4aa7444ba53c7ab8212542dfc2d1`.
+- Canonical authored-only contracts: `d1cec8b3952a4be1b02c6f1dae1ab008991a0342`, network contract blob `9dfb554bae0dac9ea68ebd6b2fe7cab664cc1240`.
+- Desktop provider synchronization: `f24b51ec5ba2d959f8c08fe44c6af706f38d7224`.
+- Desktop bookkeeping: `da6bbfcafabb66681ba8614cf2d97c9e9e43ca5f`.
+- Unique ledger status: `implemented / coverage_disposition=rewritten / validation_status=not-run / accepted=false`.
+- Coverage: `responsibilities_total=109, unknown=16172, unread=16145, omitted=0, unmapped_responsibilities=0`.
+
+Fixed-U shipping never requests quick-ACK, so this responsibility intentionally does not synthesize token-to-request correlation. Existing generic protocol marker/token primitives remain available but non-shipping. An unexpected decoded token now fails closed at the shipping network boundary instead of being silently discarded.
+
+No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E execution, GitHub Actions/status/check query, package, deployment, installation or runtime acceptance was performed. Executable validation remains `not-run`; acceptance remains false.
