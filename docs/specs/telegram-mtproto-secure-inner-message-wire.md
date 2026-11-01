@@ -54,3 +54,16 @@ Source-level closure requires:
 - no GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E execution, package, deployment, installation or runtime acceptance is performed.
 
 This slice is source-level wire responsibility closure only. It is not executable verification, candidate readiness, release acceptance, or broader migration closure.
+
+
+## Round 103 implementation record
+
+Source-level implementation is committed at `7ffc264ab3a2f7a2997c82a03e6f8f45ce4b5745`.
+
+- Canonical production `native/telegram-protocol/src/crypto.rs@32d69573acc6ef4ce7bcc80073f5cdd7e2bea7ad` adds only `MAX_MESSAGE_BODY_LENGTH = 16 * 1024 * 1024`, rejects larger authenticated inbound `msg_len` before body slicing/copying, and applies the same ceiling to outbound `PlainMessage` validation.
+- Canonical shipping `native/telegram-network/src/lib.rs@54f509474391bb5118ba4678ba5c566ab3e74ec8` is unchanged and still routes send/receive through `encrypt_message` / `decrypt_message`.
+- Canonical authored-only focused contract is `native/telegram-protocol/tests/protocol_contract.rs@f8e109c74a82ebe860b15c22766f403998e85b81`; the desktop tracked mirror is byte-identical at commit `125891339237613d9f9813c32c55684f3b5b2ecd`.
+- Desktop unique-ledger/P0/source-closure/evidence bookkeeping is committed at `fa7a222978ce3760ddb78cf5bd4c9a381434fca8`, recording `implemented / coverage_disposition=rewritten / validation_status=not-run / accepted=false` and coverage `responsibilities_total=104, unknown=16172, unread=16145, omitted=0, unmapped_responsibilities=0`.
+- No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E execution, GitHub Actions/status/check query, package, deployment, installation, or runtime acceptance was performed.
+
+Auth-key binding/persistence/expiry/renewal, broader connection scheduling/racing/send retry, arbitrary request histories, gzip, complete difference/differenceSlice decoding/application, broader fixed-U source/legal closure, Stage-B executable evidence, and independent release ACCEPT remain outside this source-level closure.
