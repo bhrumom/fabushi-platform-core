@@ -189,3 +189,62 @@ No synchronous read-timeout surrogate or special-config-only public command is i
 | Desktop mirror | source-identical | bhrumom/fabushi-desktop commit 8cebdbe5634d092773cfda8b4a0b059bd552ccbb carries the same runtime blob 4983b262346b73c3dc7270bf5feac31780c28496. |
 
 Implementation commits are 87fb77a6b7220e88f3d376b7543934ddd0644fc5 and 292f41096e554872ee6b85d43e519a9237dcb26f. The secondary-session/auth-material prerequisite is source-implemented only; executable validation remains deferred and special-config carrier/application remains pending.
+
+
+## 13. Round 92 independently addressable request ownership and 6000 ms total-attempt boundary
+
+This addendum implements the next carrier-independent prerequisite for the existing RuntimeClient / SessionOwner. It does not add endpoint acquisition, a special-config public command, or dc_options application.
+
+### 13.1 Additional fixed-U source
+
+- Telegram/SourceFiles/mtproto/config_loader.cpp@5d07404ba07223016c6728b986dcba10628d7194
+- Telegram/SourceFiles/mtproto/config_loader.h@13a80b1b049f28866c3db110df5c662e8e74dede
+- Telegram/SourceFiles/mtproto/session.cpp@40d7048c3057c7c5523b786048670524c8bebe4c
+
+Fixed-U ConfigLoader keeps the request handle and temporary shifted-session identity as separate, independently addressable lifecycle state. sendSpecialRequest() first terminates the prior attempt, stores the returned request id and temporary logical DC, then starts a fixed 6000 ms timer. terminateSpecialRequest() cancels the stored request id and kills the same temporary shifted session; destruction performs the same teardown. Session::cancel removes the request from queued/sent ownership independently of session destruction.
+
+The current Fabushi EstablishedSession::invoke_raw path is synchronous: RuntimeClient takes the EstablishedSession out of SessionOwner, invoke_raw blocks on transport receive, and the owner has no request handle while the call is in flight. A per-read timeout is not equivalent to the fixed-U total-attempt boundary because connect/auth/RPC and multiple reads can each consume independent timeout windows.
+
+### 13.2 Existing-owner-first design
+
+SessionOwner remains the sole account-bound lifecycle owner. Add a source-neutral in-memory request table keyed by an owner-local request id. Each owned request records:
+- logical/routing DC id;
+- a cloneable network-attempt cancellation/deadline control;
+- whether completion/cancellation removes the logical session.
+
+No second RuntimeClient, request registry, timer runtime, provider, account, persistence namespace, or special-config-only owner is permitted.
+
+The lower telegram-network crate may expose only the minimum transport primitive required by this owner: an absolute-deadline/cancellation control that can be passed through controlled connect/auth and invoke_raw. It is not a lifecycle owner and does not choose the 6000 ms policy.
+
+### 13.3 Required behavior
+
+1. RuntimeClient SHALL allocate and register the request owner before opening/resuming the logical session, so the total-attempt budget covers connect, auth-key establish/resume, and the RPC.
+2. The special-config-derived policy constant SHALL remain exactly 6000 ms. The generic SessionOwner API accepts a duration; only the orchestration boundary chooses 6000 ms.
+3. A controlled network attempt SHALL use one absolute deadline. Every blocking connect/read/write is bounded by the remaining budget rather than resetting a full timeout for each operation.
+4. A cloned cancellation control SHALL be independently addressable while synchronous invoke_raw is running. Cancellation marks the attempt cancelled and shuts down any registered connected socket so blocking transport I/O is interrupted.
+5. Controlled establish_auth_key / resume_auth_key / invoke_raw SHALL use the same attempt control. Existing uncontrolled public paths retain current behavior.
+6. Request termination SHALL remove the request owner and, when its teardown policy requests it, remove the logical temporary session. The real/auth-DC AuthMaterial remains owned for reuse.
+7. Successful completion of a transient request SHALL also clear request ownership and tear down the transient logical session; no temporary session or request state is persisted.
+8. Closing RuntimeClient SHALL drop/cancel any still-owned request controls through SessionOwner destruction semantics.
+9. This round SHALL NOT dispatch help.getConfig, apply dc_options, acquire endpoints over HTTP/DoH/Firestore, add proxy behavior, or expose a public special-config command.
+
+### 13.4 Authored-only contracts
+
+Author but do not execute contracts proving:
+- request ids are owner-local, unique, and independently addressable;
+- cancelling a request flips its control to cancelled and removes only its configured logical session;
+- cancelling/removing logical 1002 retains auth material for auth DC 2;
+- the special-config total-attempt policy is exactly 6000 ms;
+- a network attempt control reports cancellation/deadline as terminal and uses remaining-time bounds;
+- no executable validation is run in Stage A.
+
+### 13.5 Round 92 source-level acceptance criteria
+
+- R92-AC-1: fixed-U ConfigLoader request/timer/session teardown and Session::cancel semantics are pinned by exact blob SHA.
+- R92-AC-2: SessionOwner is the only request lifecycle owner and exposes independently addressable request cancellation.
+- R92-AC-3: one absolute 6000 ms attempt can span controlled connect/auth/RPC rather than relying on per-read timeout reset.
+- R92-AC-4: cancellation/finish tears down the transient logical session while retaining per-real-DC AuthMaterial.
+- R92-AC-5: existing uncontrolled RuntimeClient/EstablishedSession behavior remains available; no second runtime/provider/persistence namespace is introduced.
+- R92-AC-6: focused contracts are authored but not run.
+- R92-AC-7: help.getConfig orchestration, dc_options-only application, and direct NoProxy HTTPS/Web-PKI acquisition remain pending.
+- R92-AC-8: no Actions/status/check query, build, typecheck, lint, validator, generator, dependency resolution, lock regeneration, test execution, package, deploy, install, or runtime acceptance is performed.
