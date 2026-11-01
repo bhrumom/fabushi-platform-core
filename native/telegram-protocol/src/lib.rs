@@ -82,8 +82,9 @@ pub use crypto::{
     quick_ack_token, AuthKey, CryptoDirection, CryptoError, EncryptedEnvelope, PlainMessage,
 };
 pub use dc::{
-    classify_rpc_error, parse_migration, DcDirectory, DcEndpoint, DcError, DcPurpose, DcRoute,
-    MigrationDirective, MigrationKind, RpcErrorAction,
+    classify_rpc_error, derive_protocol_dc_identity, parse_migration, DcDirectory, DcEndpoint,
+    DcError, DcPurpose, DcRoute, MigrationDirective, MigrationKind, ProtocolDcIdentity,
+    ProtocolDcRole, RpcErrorAction,
 };
 pub use generated::{
     wire_constructor_by_name, wire_constructors_by_id, WireConstructor, WireSchema,

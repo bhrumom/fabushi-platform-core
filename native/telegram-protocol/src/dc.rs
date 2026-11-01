@@ -3,6 +3,9 @@ use std::{collections::BTreeSet, net::IpAddr};
 use thiserror::Error;
 
 const TELEGRAM_PORTS: [u16; 3] = [443, 80, 5222];
+const PROTOCOL_DC_SHIFT: i32 = 10_000;
+const TEMPORARY_MAIN_DC: i32 = 1_000;
+const TEST_MODE_PROTOCOL_DC_SHIFT: i32 = 10_000;
 type BootstrapEndpoint = (i32, &'static str);
 type BootstrapEndpoints = &'static [BootstrapEndpoint];
 const TELEGRAM_PRODUCTION_IPV4: [(i32, &str); 6] = [
@@ -36,6 +39,18 @@ pub enum DcPurpose {
     Main,
     Media,
     Cdn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtocolDcRole {
+    Regular,
+    MediaCluster,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProtocolDcIdentity {
+    pub directory_dc_id: i32,
+    pub wire_id: i16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -103,6 +118,60 @@ pub enum DcError {
     DuplicateEndpoint,
     #[error("data center {dc_id} has no endpoint for {purpose:?}")]
     MissingEndpoint { dc_id: i32, purpose: DcPurpose },
+    #[error("protocol data center id {dc_id} cannot be represented on the wire")]
+    InvalidProtocolDcId { dc_id: i32 },
+}
+
+pub fn derive_protocol_dc_identity(
+    shifted_dc_id: i32,
+    test_mode: bool,
+    role: ProtocolDcRole,
+) -> Result<ProtocolDcIdentity, DcError> {
+    if shifted_dc_id <= 0 {
+        return Err(DcError::InvalidDcId);
+    }
+
+    let directory_dc_id = shifted_dc_id % PROTOCOL_DC_SHIFT;
+    if directory_dc_id <= 0 {
+        return Err(DcError::InvalidDcId);
+    }
+
+    let simple_dc_id = if directory_dc_id >= TEMPORARY_MAIN_DC {
+        directory_dc_id - TEMPORARY_MAIN_DC
+    } else {
+        directory_dc_id
+    };
+    if simple_dc_id <= 0 {
+        return Err(DcError::InvalidProtocolDcId {
+            dc_id: simple_dc_id,
+        });
+    }
+
+    let tested_dc_id = if test_mode {
+        simple_dc_id
+            .checked_add(TEST_MODE_PROTOCOL_DC_SHIFT)
+            .ok_or(DcError::InvalidProtocolDcId {
+                dc_id: simple_dc_id,
+            })?
+    } else {
+        simple_dc_id
+    };
+    let signed_dc_id = match role {
+        ProtocolDcRole::Regular => tested_dc_id,
+        ProtocolDcRole::MediaCluster => tested_dc_id
+            .checked_neg()
+            .ok_or(DcError::InvalidProtocolDcId {
+                dc_id: tested_dc_id,
+            })?,
+    };
+    let wire_id = signed_dc_id
+        .try_into()
+        .map_err(|_| DcError::InvalidProtocolDcId { dc_id: signed_dc_id })?;
+
+    Ok(ProtocolDcIdentity {
+        directory_dc_id,
+        wire_id,
+    })
 }
 
 impl DcEndpoint {

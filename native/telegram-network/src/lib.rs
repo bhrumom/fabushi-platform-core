@@ -12,7 +12,8 @@ use std::{
 
 use fabushi_telegram_protocol::{
     decrypt_message, encrypt_message, AuthKey, AuthKeyHandshake, CryptoDirection, CryptoError,
-    DcDirectory, DcError, DcPurpose, DhGenAction, EncryptedEnvelope, HandshakeError,
+    derive_protocol_dc_identity, DcDirectory, DcError, DcPurpose, DhGenAction, EncryptedEnvelope,
+    HandshakeError, ProtocolDcRole,
     MessageIdError, MessageIdGuard, ObfuscatedConnectionStart, PlainMessage, PlaintextEnvelope,
     SequenceError, SessionSequence, TransportError, TransportFrameCodec, TransportMode,
 };
@@ -881,33 +882,34 @@ pub fn connect_directory(
     purpose: DcPurpose,
     config: &NetworkConfig,
 ) -> Result<(ConnectedEndpoint, TcpTransport), NetworkError> {
-    let candidates = directory.candidates(dc_id, purpose, config.prefer_ipv6)?;
-    let protocol_dc_id = protocol_dc_id(directory, dc_id)?;
+    let protocol_role = match purpose {
+        DcPurpose::Media => ProtocolDcRole::MediaCluster,
+        DcPurpose::Main | DcPurpose::Cdn => ProtocolDcRole::Regular,
+    };
+    let protocol_dc = derive_protocol_dc_identity(dc_id, directory.test_mode(), protocol_role)?;
+    let candidates = directory.candidates(
+        protocol_dc.directory_dc_id,
+        purpose,
+        config.prefer_ipv6,
+    )?;
     let mut attempts = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         let address = SocketAddr::new(candidate.ip_address, candidate.port);
         let secret = candidate.secret.as_deref().unwrap_or(&[]);
-        match TcpTransport::connect_obfuscated(address, secret, protocol_dc_id, config) {
+        match TcpTransport::connect_obfuscated(address, secret, protocol_dc.wire_id, config) {
             Ok(transport) => {
-                return Ok((ConnectedEndpoint { dc_id, address }, transport));
+                return Ok((
+                    ConnectedEndpoint {
+                        dc_id: protocol_dc.directory_dc_id,
+                        address,
+                    },
+                    transport,
+                ));
             }
             Err(error) => attempts.push(format!("{address}: {error}")),
         }
     }
     Err(NetworkError::ConnectFailed { attempts })
-}
-
-fn protocol_dc_id(directory: &DcDirectory, dc_id: i32) -> Result<i16, NetworkError> {
-    let value = if directory.test_mode() {
-        dc_id
-            .checked_add(10_000)
-            .ok_or(NetworkError::InvalidProtocolDcId(dc_id))?
-    } else {
-        dc_id
-    };
-    value
-        .try_into()
-        .map_err(|_| NetworkError::InvalidProtocolDcId(value))
 }
 
 pub fn resume_auth_key(
