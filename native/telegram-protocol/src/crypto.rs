@@ -12,6 +12,7 @@ const AUTH_KEY_LENGTH: usize = 256;
 const AES_BLOCK_LENGTH: usize = 16;
 const MIN_PADDING_LENGTH: usize = 12;
 const MAX_PADDING_LENGTH: usize = 1_024;
+const MAX_MESSAGE_BODY_LENGTH: usize = 16 * 1024 * 1024;
 const INTERNAL_HEADER_LENGTH: usize = 32;
 
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
@@ -246,6 +247,9 @@ fn decode_plain_message(plaintext: &[u8]) -> Result<PlainMessage, CryptoError> {
         return Err(CryptoError::InvalidPlaintext);
     }
     let body_length = body_length as usize;
+    if body_length > MAX_MESSAGE_BODY_LENGTH {
+        return Err(CryptoError::InvalidPlaintext);
+    }
     let body_end = INTERNAL_HEADER_LENGTH
         .checked_add(body_length)
         .ok_or(CryptoError::InvalidPlaintext)?;
@@ -273,6 +277,7 @@ fn validate_plain_message(
     expected_session_id: Option<i64>,
 ) -> Result<(), CryptoError> {
     if message.body.is_empty()
+        || message.body.len() > MAX_MESSAGE_BODY_LENGTH
         || !message.body.len().is_multiple_of(4)
         || !(MIN_PADDING_LENGTH..=MAX_PADDING_LENGTH).contains(&message.padding.len())
         || !(INTERNAL_HEADER_LENGTH + message.body.len() + message.padding.len())

@@ -1,5 +1,5 @@
 use fabushi_telegram_protocol::{
-    aes_ige_encrypt, build_auth_send_code, build_auth_sign_in, build_auth_sign_up,
+    aes_ige_decrypt, aes_ige_encrypt, build_auth_send_code, build_auth_sign_in, build_auth_sign_up,
     build_client_dh_inner_data, build_init_connection_get_config, build_msg_resend_req, build_msgs_ack, build_msgs_state_req,
     build_p_q_inner_data_dc, build_p_q_inner_data_temp_dc, build_req_dh_params, build_req_pq_multi,
     build_set_client_dh_params,
@@ -3864,5 +3864,111 @@ fn encrypted_envelope_wire_fails_closed_on_short_or_misaligned_ciphertext() {
         )
         .unwrap_err(),
         CryptoError::AuthenticationFailed
+    );
+}
+
+
+#[test]
+fn secure_inner_message_wire_preserves_exact_header_offsets_and_round_trips() {
+    let auth_key = AuthKey::from_slice(&[0x42_u8; 256]).unwrap();
+    let message = PlainMessage {
+        server_salt: 0x0102_0304_0506_0708,
+        session_id: 0x1112_1314_1516_1718,
+        message_id: 0x2122_2324_2526_2728,
+        sequence_number: -7,
+        body: vec![0xde, 0xad, 0xbe, 0xef],
+        padding: vec![0xa5; 12],
+    };
+
+    let envelope = encrypt_message(&auth_key, CryptoDirection::ClientToServer, &message).unwrap();
+    let (aes_key, aes_iv) = derive_aes_key_iv(
+        &auth_key,
+        &envelope.message_key,
+        CryptoDirection::ClientToServer,
+    );
+    let plaintext = aes_ige_decrypt(&envelope.encrypted_data, &aes_key, &aes_iv).unwrap();
+
+    assert_eq!(plaintext.len(), 48);
+    assert_eq!(&plaintext[0..8], &message.server_salt.to_le_bytes());
+    assert_eq!(&plaintext[8..16], &message.session_id.to_le_bytes());
+    assert_eq!(&plaintext[16..24], &message.message_id.to_le_bytes());
+    assert_eq!(&plaintext[24..28], &message.sequence_number.to_le_bytes());
+    assert_eq!(&plaintext[28..32], &4_i32.to_le_bytes());
+    assert_eq!(&plaintext[32..36], message.body.as_slice());
+    assert_eq!(&plaintext[36..48], message.padding.as_slice());
+    assert_eq!(
+        decrypt_message(
+            &auth_key,
+            CryptoDirection::ClientToServer,
+            &envelope,
+            message.session_id,
+        )
+        .unwrap(),
+        message
+    );
+}
+
+#[test]
+fn secure_inner_message_wire_rejects_wrong_session_and_server_message_id_parity() {
+    let auth_key = AuthKey::from_slice(&[0x24_u8; 256]).unwrap();
+    let server_message = PlainMessage {
+        server_salt: 7,
+        session_id: 8,
+        message_id: 5,
+        sequence_number: 1,
+        body: vec![1, 2, 3, 4],
+        padding: vec![0x55; 12],
+    };
+    let envelope =
+        encrypt_message(&auth_key, CryptoDirection::ServerToClient, &server_message).unwrap();
+
+    assert_eq!(
+        decrypt_message(
+            &auth_key,
+            CryptoDirection::ServerToClient,
+            &envelope,
+            server_message.session_id + 1,
+        )
+        .unwrap_err(),
+        CryptoError::SessionMismatch
+    );
+
+    let invalid_server_message = PlainMessage {
+        message_id: 6,
+        ..server_message
+    };
+    let invalid_envelope = encrypt_message(
+        &auth_key,
+        CryptoDirection::ServerToClient,
+        &invalid_server_message,
+    )
+    .unwrap();
+    assert_eq!(
+        decrypt_message(
+            &auth_key,
+            CryptoDirection::ServerToClient,
+            &invalid_envelope,
+            invalid_server_message.session_id,
+        )
+        .unwrap_err(),
+        CryptoError::InvalidMessageId
+    );
+}
+
+#[test]
+fn secure_inner_message_wire_rejects_body_above_fixed_u_16_mib_ceiling() {
+    let auth_key = AuthKey::from_slice(&[0x66_u8; 256]).unwrap();
+    let message = PlainMessage {
+        server_salt: 1,
+        session_id: 2,
+        message_id: 4,
+        sequence_number: 1,
+        body: vec![0_u8; 16 * 1024 * 1024 + 4],
+        padding: vec![0x77; 12],
+    };
+
+    assert_eq!(
+        encrypt_message(&auth_key, CryptoDirection::ClientToServer, &message).unwrap_err(),
+        CryptoError::InvalidPlaintext
     );
 }
