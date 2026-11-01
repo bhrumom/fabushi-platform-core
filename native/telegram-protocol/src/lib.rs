@@ -155,6 +155,6 @@ pub use updates::{
 
 pub use web_proxy::{
     decode_web_proxy_link_secret, encode_web_proxy_link_secret, normalize_web_proxy_base_path,
-    parse_web_proxy_secret_text, validate_canonical_web_proxy_host, web_proxy_bridge_capability,
+    parse_mtproto_proxy_secret_text, parse_web_proxy_secret_text, validate_canonical_web_proxy_host, web_proxy_bridge_capability,
     web_proxy_bridge_path, web_proxy_bridge_url, WebProxyConfigError,
 };

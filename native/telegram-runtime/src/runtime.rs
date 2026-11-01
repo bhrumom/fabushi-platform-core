@@ -1,12 +1,16 @@
 use fabushi_telegram_core::Command;
 use fabushi_telegram_core::TelegramEngine;
-use fabushi_telegram_network::establish_auth_key;
-use fabushi_telegram_network::establish_auth_key_controlled;
-use fabushi_telegram_network::resume_auth_key;
-use fabushi_telegram_network::resume_auth_key_controlled;
+use fabushi_telegram_network::establish_auth_key_with_proxy;
+use fabushi_telegram_network::establish_auth_key_controlled_with_proxy;
+use fabushi_telegram_network::resume_auth_key_with_proxy;
+use fabushi_telegram_network::resume_auth_key_controlled_with_proxy;
 use fabushi_telegram_network::EstablishedSession;
 use fabushi_telegram_network::NetworkAttemptControl;
 use fabushi_telegram_network::NetworkConfig;
+use fabushi_telegram_network::NetworkProxyEndpoint;
+use fabushi_telegram_network::NetworkProxyKind;
+use fabushi_telegram_network::NetworkProxyProjection;
+use fabushi_telegram_network::ProxyResolutionCache;
 use fabushi_telegram_network::{
     http_time_now, seed_special_config_attempts, secure_random_index, update_http_time,
     DirectHttpsRace, StaggerSettlementPolicy,
@@ -350,6 +354,14 @@ impl SessionOwner {
         }
         true
     }
+
+    fn invalidate_network_transport(&mut self) {
+        for (_, request) in std::mem::take(&mut self.requests) {
+            request.control.cancel();
+        }
+        self.sessions.clear();
+        self.primary_logical_dc_id = None;
+    }
 }
 
 impl Drop for SessionOwner {
@@ -427,6 +439,8 @@ struct RuntimeClient {
     server_directory: Option<DcDirectory>,
     auth_context: Option<AuthContext>,
     update_state: Option<UpdateState>,
+    network_proxy: NetworkProxyProjection,
+    proxy_resolution: ProxyResolutionCache,
 }
 
 struct AuthContext {
@@ -452,6 +466,8 @@ impl Default for RuntimeClient {
             server_directory: None,
             auth_context: None,
             update_state: None,
+            network_proxy: NetworkProxyProjection::default(),
+            proxy_resolution: ProxyResolutionCache::default(),
         }
     }
 }
@@ -592,6 +608,8 @@ pub fn create_persistent_client(
         server_directory: None,
         auth_context,
         update_state: None,
+        network_proxy: NetworkProxyProjection::default(),
+        proxy_resolution: ProxyResolutionCache::default(),
     }))
 }
 
@@ -705,6 +723,9 @@ fn execute_value(client_id: u64, request: Value) -> Result<Value, RuntimeError> 
     if request_type == "telegram.refreshSpecialConfig" {
         return refresh_special_config_command(client_id, &request);
     }
+    if request_type == "telegram.applyNetworkProxy" {
+        return apply_network_proxy_command(client_id, &request);
+    }
     let mut clients = CLIENTS
         .lock()
         .map_err(|_| RuntimeError::RegistryUnavailable)?;
@@ -732,6 +753,8 @@ fn execute_value(client_id: u64, request: Value) -> Result<Value, RuntimeError> 
                 "serverTime": transport.map(|session| session.server_time),
                 "serverDcOptions": client.server_directory.as_ref().map(|value| value.endpoints().len()),
                 "updateState": client.update_state,
+                "networkProxyEnabled": client.network_proxy.enabled,
+                "networkProxyType": client.network_proxy.selected.as_ref().map(|proxy| proxy_kind_name(proxy.kind)),
             }))
         }
         "telegram.getState" => Ok(json!({
@@ -813,6 +836,102 @@ fn execute_value(client_id: u64, request: Value) -> Result<Value, RuntimeError> 
     }
 }
 
+
+fn proxy_kind_name(kind: NetworkProxyKind) -> &'static str {
+    match kind {
+        NetworkProxyKind::Socks5 => "socks5",
+        NetworkProxyKind::Http => "http",
+        NetworkProxyKind::Mtproto => "mtproto",
+        NetworkProxyKind::Web => "web",
+    }
+}
+
+fn parse_network_proxy_kind(value: &str) -> Result<NetworkProxyKind, RuntimeError> {
+    match value {
+        "socks5" => Ok(NetworkProxyKind::Socks5),
+        "http" => Ok(NetworkProxyKind::Http),
+        "mtproto" => Ok(NetworkProxyKind::Mtproto),
+        "web" => Ok(NetworkProxyKind::Web),
+        _ => Err(RuntimeError::InvalidParameter("selected.type")),
+    }
+}
+
+fn apply_network_proxy_command(client_id: u64, request: &Value) -> Result<Value, RuntimeError> {
+    let enabled = request
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .ok_or(RuntimeError::InvalidParameter("enabled"))?;
+    let prefer_ipv6 = request
+        .get("tryIpv6")
+        .and_then(Value::as_bool)
+        .ok_or(RuntimeError::InvalidParameter("tryIpv6"))?;
+    let selected = match request.get("selected") {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(value)) => {
+            let kind = value
+                .get("type")
+                .and_then(Value::as_str)
+                .ok_or(RuntimeError::InvalidParameter("selected.type"))
+                .and_then(parse_network_proxy_kind)?;
+            let host = value
+                .get("host")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty() && value.trim() == *value)
+                .ok_or(RuntimeError::InvalidParameter("selected.host"))?
+                .to_owned();
+            let port = value
+                .get("port")
+                .and_then(Value::as_u64)
+                .and_then(|value| u16::try_from(value).ok())
+                .filter(|value| *value != 0)
+                .ok_or(RuntimeError::InvalidParameter("selected.port"))?;
+            let user = value.get("user").and_then(Value::as_str).unwrap_or("").to_owned();
+            let password = value
+                .get("password")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            Some(NetworkProxyEndpoint {
+                kind,
+                host,
+                port,
+                user,
+                password,
+            })
+        }
+        _ => return Err(RuntimeError::InvalidParameter("selected")),
+    };
+    let next = NetworkProxyProjection {
+        enabled,
+        selected,
+        prefer_ipv6,
+    };
+    let mut clients = CLIENTS
+        .lock()
+        .map_err(|_| RuntimeError::RegistryUnavailable)?;
+    let client = clients
+        .get_mut(&client_id)
+        .ok_or(RuntimeError::ClientNotFound(client_id))?;
+    let changed = client.network_proxy != next;
+    if changed {
+        client.sessions.invalidate_network_transport();
+        client.proxy_resolution.clear();
+        client.network_proxy = next;
+    }
+    Ok(json!({
+        "@type": "telegram.networkProxyApplied",
+        "changed": changed,
+        "enabled": client.network_proxy.enabled,
+        "tryIpv6": client.network_proxy.prefer_ipv6,
+        "selectedType": client.network_proxy.selected.as_ref().map(|proxy| proxy_kind_name(proxy.kind)),
+        "customResolution": client.network_proxy.enabled
+            && client.network_proxy.selected.as_ref().is_some_and(|proxy| {
+                proxy.kind == NetworkProxyKind::Mtproto
+                    && proxy.host.parse::<std::net::IpAddr>().is_err()
+            }),
+    }))
+}
+
 fn bootstrap_transport(client_id: u64, request: &Value) -> Result<Value, RuntimeError> {
     {
         let clients = CLIENTS
@@ -834,8 +953,27 @@ fn bootstrap_transport(client_id: u64, request: &Value) -> Result<Value, Runtime
         .ok_or(RuntimeError::InvalidParameter("testMode"))?;
     let directory = fabushi_telegram_protocol::DcDirectory::telegram_defaults(test_mode, dc_id)
         .map_err(|error| RuntimeError::Network(error.to_string()))?;
-    let mut session = establish_auth_key(&directory, dc_id, &NetworkConfig::default())
-        .map_err(|error| RuntimeError::Network(error.to_string()))?;
+    let (projection, mut resolution) = {
+        let clients = CLIENTS
+            .lock()
+            .map_err(|_| RuntimeError::RegistryUnavailable)?;
+        let client = clients
+            .get(&client_id)
+            .ok_or(RuntimeError::ClientNotFound(client_id))?;
+        (client.network_proxy.clone(), client.proxy_resolution.clone())
+    };
+    let config = NetworkConfig {
+        prefer_ipv6: projection.prefer_ipv6,
+        ..NetworkConfig::default()
+    };
+    let mut session = establish_auth_key_with_proxy(
+        &directory,
+        dc_id,
+        &config,
+        &projection,
+        &mut resolution,
+    )
+    .map_err(|error| RuntimeError::Network(error.to_string()))?;
     let pong = session
         .ping()
         .map_err(|error| RuntimeError::Network(error.to_string()))?;
@@ -854,6 +992,7 @@ fn bootstrap_transport(client_id: u64, request: &Value) -> Result<Value, Runtime
     let client = clients
         .get_mut(&client_id)
         .ok_or(RuntimeError::ClientNotFound(client_id))?;
+    client.proxy_resolution = resolution;
     if !matches!(
         client.authorization.state(),
         AuthorizationState::WaitParameters | AuthorizationState::WaitPhoneNumber
@@ -1027,12 +1166,7 @@ fn take_transport(client_id: u64) -> Result<EstablishedSession, RuntimeError> {
     };
     let directory = DcDirectory::telegram_defaults(resume.test_mode, resume.dc_id)
         .map_err(|error| RuntimeError::Network(error.to_string()))?;
-    open_logical_session(
-        client_id,
-        resume.dc_id,
-        &directory,
-        &NetworkConfig::default(),
-    )
+    open_logical_session(client_id, resume.dc_id, &directory, &NetworkConfig::default())
 }
 
 fn open_logical_session(
@@ -1041,7 +1175,7 @@ fn open_logical_session(
     directory: &DcDirectory,
     config: &NetworkConfig,
 ) -> Result<EstablishedSession, RuntimeError> {
-    let material = {
+    let (material, projection, mut resolution) = {
         let mut clients = CLIENTS
             .lock()
             .map_err(|_| RuntimeError::RegistryUnavailable)?;
@@ -1058,24 +1192,39 @@ fn open_logical_session(
                 client.sessions.seed_persisted(&persisted)?;
             }
         }
-        client
-            .sessions
-            .auth_material(logical_dc_id, directory.test_mode())?
+        (
+            client
+                .sessions
+                .auth_material(logical_dc_id, directory.test_mode())?,
+            client.network_proxy.clone(),
+            client.proxy_resolution.clone(),
+        )
     };
-
+    let effective = NetworkConfig {
+        prefer_ipv6: projection.prefer_ipv6,
+        ..*config
+    };
     let session = if let Some(material) = material {
-        resume_auth_key(
+        resume_auth_key_with_proxy(
             directory,
             logical_dc_id,
             material.auth_key,
             material.server_salt,
             material.server_time,
-            config,
+            &effective,
+            &projection,
+            &mut resolution,
         )
         .map_err(|error| RuntimeError::Network(error.to_string()))?
     } else {
-        establish_auth_key(directory, logical_dc_id, config)
-            .map_err(|error| RuntimeError::Network(error.to_string()))?
+        establish_auth_key_with_proxy(
+            directory,
+            logical_dc_id,
+            &effective,
+            &projection,
+            &mut resolution,
+        )
+        .map_err(|error| RuntimeError::Network(error.to_string()))?
     };
 
     let mut clients = CLIENTS
@@ -1084,6 +1233,7 @@ fn open_logical_session(
     let client = clients
         .get_mut(&client_id)
         .ok_or(RuntimeError::ClientNotFound(client_id))?;
+    client.proxy_resolution = resolution;
     client
         .sessions
         .remember_auth_material(logical_dc_id, directory.test_mode(), &session)?;
@@ -1097,7 +1247,7 @@ fn open_logical_session_controlled(
     config: &NetworkConfig,
     control: &NetworkAttemptControl,
 ) -> Result<EstablishedSession, RuntimeError> {
-    let material = {
+    let (material, projection, mut resolution) = {
         let mut clients = CLIENTS
             .lock()
             .map_err(|_| RuntimeError::RegistryUnavailable)?;
@@ -1114,25 +1264,42 @@ fn open_logical_session_controlled(
                 client.sessions.seed_persisted(&persisted)?;
             }
         }
-        client
-            .sessions
-            .auth_material(logical_dc_id, directory.test_mode())?
+        (
+            client
+                .sessions
+                .auth_material(logical_dc_id, directory.test_mode())?,
+            client.network_proxy.clone(),
+            client.proxy_resolution.clone(),
+        )
+    };
+    let effective = NetworkConfig {
+        prefer_ipv6: projection.prefer_ipv6,
+        ..*config
     };
 
     let session = if let Some(material) = material {
-        resume_auth_key_controlled(
+        resume_auth_key_controlled_with_proxy(
             directory,
             logical_dc_id,
             material.auth_key,
             material.server_salt,
             material.server_time,
-            config,
+            &effective,
             control,
+            &projection,
+            &mut resolution,
         )
         .map_err(|error| RuntimeError::Network(error.to_string()))?
     } else {
-        establish_auth_key_controlled(directory, logical_dc_id, config, control)
-            .map_err(|error| RuntimeError::Network(error.to_string()))?
+        establish_auth_key_controlled_with_proxy(
+            directory,
+            logical_dc_id,
+            &effective,
+            control,
+            &projection,
+            &mut resolution,
+        )
+        .map_err(|error| RuntimeError::Network(error.to_string()))?
     };
 
     let mut clients = CLIENTS
@@ -1141,6 +1308,7 @@ fn open_logical_session_controlled(
     let client = clients
         .get_mut(&client_id)
         .ok_or(RuntimeError::ClientNotFound(client_id))?;
+    client.proxy_resolution = resolution;
     client
         .sessions
         .remember_auth_material(logical_dc_id, directory.test_mode(), &session)?;
@@ -2787,5 +2955,53 @@ mod authorization_restore_contract_tests {
         assert!(error
             .to_string()
             .contains("missing self-user identity or MTProto auth-key material"));
+    }
+}
+
+#[cfg(test)]
+mod network_proxy_contracts {
+    use super::*;
+
+    fn request(kind: &str) -> Value {
+        json!({
+            "@type": "telegram.applyNetworkProxy",
+            "enabled": true,
+            "tryIpv6": true,
+            "selected": {
+                "type": kind,
+                "host": "proxy.example",
+                "port": 443,
+                "user": "",
+                "password": "00112233445566778899aabbccddeeff"
+            }
+        })
+    }
+
+    #[test]
+    fn carrier_projection_is_transient_and_secret_free_in_result() {
+        let client = create_client();
+        let result = execute_value(client, request("mtproto")).unwrap();
+        assert_eq!(result.get("enabled").and_then(Value::as_bool), Some(true));
+        assert_eq!(result.get("selectedType").and_then(Value::as_str), Some("mtproto"));
+        assert_eq!(result.get("customResolution").and_then(Value::as_bool), Some(true));
+        assert!(!result.to_string().contains("00112233445566778899aabbccddeeff"));
+        let clients = CLIENTS.lock().unwrap();
+        let state = clients.get(&client).unwrap();
+        assert!(state.persisted_transport.is_none());
+        assert!(state.sessions.primary().is_none());
+    }
+
+    #[test]
+    fn projection_change_invalidates_sessions_but_not_persisted_auth_state_contract() {
+        let client = create_client();
+        execute_value(client, request("mtproto")).unwrap();
+        let changed = execute_value(client, json!({
+            "@type": "telegram.applyNetworkProxy",
+            "enabled": false,
+            "tryIpv6": false,
+            "selected": null
+        })).unwrap();
+        assert_eq!(changed.get("changed").and_then(Value::as_bool), Some(true));
+        assert_eq!(changed.get("enabled").and_then(Value::as_bool), Some(false));
     }
 }

@@ -100,7 +100,7 @@ pub fn validate_canonical_web_proxy_host(host: &str) -> Result<(), WebProxyConfi
     Ok(())
 }
 
-pub fn parse_web_proxy_secret_text(value: &str) -> Result<Vec<u8>, WebProxyConfigError> {
+pub fn parse_mtproto_proxy_secret_text(value: &str) -> Result<Vec<u8>, WebProxyConfigError> {
     let decoded = if value.len() >= 32
         && value.len().is_multiple_of(2)
         && value.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -113,10 +113,17 @@ pub fn parse_web_proxy_secret_text(value: &str) -> Result<Vec<u8>, WebProxyConfi
     match decoded.as_slice() {
         bytes if bytes.len() == 16 => Ok(decoded),
         bytes if bytes.len() == 17 && bytes[0] == 0xdd => Ok(decoded),
-        bytes if bytes.len() >= 21 && bytes[0] == 0xee => {
-            Err(WebProxyConfigError::UnsupportedSecret)
-        }
+        bytes if bytes.len() >= 21 && bytes[0] == 0xee => Ok(decoded),
         _ => Err(WebProxyConfigError::InvalidSecret),
+    }
+}
+
+pub fn parse_web_proxy_secret_text(value: &str) -> Result<Vec<u8>, WebProxyConfigError> {
+    let decoded = parse_mtproto_proxy_secret_text(value)?;
+    if decoded.len() >= 21 && decoded[0] == 0xee {
+        Err(WebProxyConfigError::UnsupportedSecret)
+    } else {
+        Ok(decoded)
     }
 }
 

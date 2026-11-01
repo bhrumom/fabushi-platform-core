@@ -5,6 +5,7 @@
 //! same protocol implementation can be reused by native and Web transports.
 
 mod direct_https;
+mod domain_resolver;
 mod network_time;
 mod special_config_acquisition;
 pub mod request_normalization;
@@ -13,6 +14,7 @@ pub use direct_https::{
     execute_direct_https_get, DirectHttpsError, DirectHttpsRace, DirectHttpsReply,
     DirectHttpsResponse, StaggerSettlementPolicy, SERVICE_REQUEST_STAGGER,
 };
+pub use domain_resolver::ProxyResolutionCache;
 pub use network_time::{
     http_time_now, http_time_valid, invalidate_http_time, update_http_time, NetworkTimeError,
 };
@@ -39,7 +41,7 @@ use std::{
 };
 
 use fabushi_telegram_protocol::{
-    decrypt_message, encrypt_message, AuthKey, AuthKeyHandshake, CryptoDirection, CryptoError,
+    decrypt_message, encrypt_message, parse_mtproto_proxy_secret_text, AuthKey, AuthKeyHandshake, CryptoDirection, CryptoError,
     derive_protocol_dc_identity, DcDirectory, DcError, DcPurpose, DhGenAction, EncryptedEnvelope,
     HandshakeError, ProtocolDcRole,
     MessageIdError, MessageIdGuard, ObfuscatedConnectionStart, PlainMessage, PlaintextEnvelope,
@@ -77,6 +79,41 @@ impl Default for NetworkConfig {
             read_timeout: Duration::from_secs(15),
             write_timeout: Duration::from_secs(15),
             transport_mode: TransportMode::Abridged,
+            prefer_ipv6: false,
+        }
+    }
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkProxyKind {
+    Socks5,
+    Http,
+    Mtproto,
+    Web,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct NetworkProxyEndpoint {
+    pub kind: NetworkProxyKind,
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub password: String,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct NetworkProxyProjection {
+    pub enabled: bool,
+    pub selected: Option<NetworkProxyEndpoint>,
+    pub prefer_ipv6: bool,
+}
+
+impl Default for NetworkProxyProjection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            selected: None,
             prefer_ipv6: false,
         }
     }
@@ -242,6 +279,16 @@ pub enum NetworkError {
     AttemptDeadlineExceeded,
     #[error("Telegram protocol data center id {0} cannot be represented on the wire")]
     InvalidProtocolDcId(i32),
+    #[error("enabled network proxy requires a selected endpoint")]
+    MissingSelectedProxy,
+    #[error("selected network proxy endpoint is invalid")]
+    InvalidProxyEndpoint,
+    #[error("selected network proxy carrier is not implemented")]
+    UnsupportedProxyCarrier,
+    #[error("selected MTProto proxy secret is invalid")]
+    InvalidProxySecret,
+    #[error("selected proxy hostname could not be resolved")]
+    ProxyResolutionFailed,
 }
 
 pub struct TcpTransport {
@@ -1180,11 +1227,77 @@ fn connect_directory_with_attempt(
     config: &NetworkConfig,
     control: Option<&NetworkAttemptControl>,
 ) -> Result<(ConnectedEndpoint, TcpTransport), NetworkError> {
+    let projection = NetworkProxyProjection::default();
+    let mut resolution = ProxyResolutionCache::default();
+    connect_directory_with_projection(
+        directory,
+        dc_id,
+        purpose,
+        config,
+        control,
+        &projection,
+        &mut resolution,
+    )
+}
+
+fn connect_directory_with_projection(
+    directory: &DcDirectory,
+    dc_id: i32,
+    purpose: DcPurpose,
+    config: &NetworkConfig,
+    control: Option<&NetworkAttemptControl>,
+    projection: &NetworkProxyProjection,
+    resolution: &mut ProxyResolutionCache,
+) -> Result<(ConnectedEndpoint, TcpTransport), NetworkError> {
     let protocol_role = match purpose {
         DcPurpose::Media => ProtocolDcRole::MediaCluster,
         DcPurpose::Main | DcPurpose::Cdn => ProtocolDcRole::Regular,
     };
     let protocol_dc = derive_protocol_dc_identity(dc_id, directory.test_mode(), protocol_role)?;
+    if projection.enabled {
+        let proxy = projection
+            .selected
+            .as_ref()
+            .ok_or(NetworkError::MissingSelectedProxy)?;
+        if proxy.port == 0 || proxy.host.trim() != proxy.host || proxy.host.is_empty() {
+            return Err(NetworkError::InvalidProxyEndpoint);
+        }
+        if proxy.kind != NetworkProxyKind::Mtproto {
+            return Err(NetworkError::UnsupportedProxyCarrier);
+        }
+        let secret = parse_mtproto_proxy_secret_text(&proxy.password)
+            .map_err(|_| NetworkError::InvalidProxySecret)?;
+        let addresses = resolution.candidates(&proxy.host, projection.prefer_ipv6)?;
+        let mut attempts = Vec::with_capacity(addresses.len());
+        for ip in addresses {
+            let address = SocketAddr::new(ip, proxy.port);
+            let effective = bounded_config(config, control)?;
+            match TcpTransport::connect_obfuscated_with_attempt(
+                address,
+                &secret,
+                protocol_dc.wire_id,
+                &effective,
+                control,
+            ) {
+                Ok(transport) => {
+                    resolution.promote(&proxy.host, ip);
+                    return Ok((
+                        ConnectedEndpoint {
+                            dc_id: protocol_dc.directory_dc_id,
+                            address,
+                        },
+                        transport,
+                    ));
+                }
+                Err(error) => attempts.push(format!("{address}: {error}")),
+            }
+        }
+        if let Some(control) = control {
+            control.remaining()?;
+        }
+        return Err(NetworkError::ConnectFailed { attempts });
+    }
+
     let candidates = directory.candidates(
         protocol_dc.directory_dc_id,
         purpose,
@@ -1194,16 +1307,7 @@ fn connect_directory_with_attempt(
     for candidate in candidates {
         let address = SocketAddr::new(candidate.ip_address, candidate.port);
         let secret = candidate.secret.as_deref().unwrap_or(&[]);
-        let effective = if let Some(control) = control {
-            NetworkConfig {
-                connect_timeout: control.bounded_timeout(config.connect_timeout)?,
-                read_timeout: control.bounded_timeout(config.read_timeout)?,
-                write_timeout: control.bounded_timeout(config.write_timeout)?,
-                ..*config
-            }
-        } else {
-            *config
-        };
+        let effective = bounded_config(config, control)?;
         match TcpTransport::connect_obfuscated_with_attempt(
             address,
             secret,
@@ -1227,6 +1331,87 @@ fn connect_directory_with_attempt(
         control.remaining()?;
     }
     Err(NetworkError::ConnectFailed { attempts })
+}
+
+fn bounded_config(
+    config: &NetworkConfig,
+    control: Option<&NetworkAttemptControl>,
+) -> Result<NetworkConfig, NetworkError> {
+    Ok(if let Some(control) = control {
+        NetworkConfig {
+            connect_timeout: control.bounded_timeout(config.connect_timeout)?,
+            read_timeout: control.bounded_timeout(config.read_timeout)?,
+            write_timeout: control.bounded_timeout(config.write_timeout)?,
+            ..*config
+        }
+    } else {
+        *config
+    })
+}
+
+pub fn resume_auth_key_with_proxy(
+    directory: &DcDirectory,
+    dc_id: i32,
+    auth_key: AuthKey,
+    server_salt: i64,
+    server_time: i32,
+    config: &NetworkConfig,
+    projection: &NetworkProxyProjection,
+    resolution: &mut ProxyResolutionCache,
+) -> Result<EstablishedSession, NetworkError> {
+    let (endpoint, transport) = connect_directory_with_projection(
+        directory,
+        dc_id,
+        DcPurpose::Main,
+        config,
+        None,
+        projection,
+        resolution,
+    )?;
+    Ok(EstablishedSession {
+        endpoint,
+        transport,
+        auth_key,
+        server_salt,
+        server_time,
+        message_ids: MessageIdGuard::default(),
+        sequence: SessionSequence::new(),
+        session_id: random_i64()?,
+        clock_offset_seconds: 0,
+    })
+}
+
+pub fn resume_auth_key_controlled_with_proxy(
+    directory: &DcDirectory,
+    dc_id: i32,
+    auth_key: AuthKey,
+    server_salt: i64,
+    server_time: i32,
+    config: &NetworkConfig,
+    control: &NetworkAttemptControl,
+    projection: &NetworkProxyProjection,
+    resolution: &mut ProxyResolutionCache,
+) -> Result<EstablishedSession, NetworkError> {
+    let (endpoint, transport) = connect_directory_with_projection(
+        directory,
+        dc_id,
+        DcPurpose::Main,
+        config,
+        Some(control),
+        projection,
+        resolution,
+    )?;
+    Ok(EstablishedSession {
+        endpoint,
+        transport,
+        auth_key,
+        server_salt,
+        server_time,
+        message_ids: MessageIdGuard::default(),
+        sequence: SessionSequence::new(),
+        session_id: random_i64()?,
+        clock_offset_seconds: 0,
+    })
 }
 
 pub fn resume_auth_key(
@@ -1293,6 +1478,88 @@ fn auth_handshake_protocol_dc_id(
     Ok(i32::from(
         derive_protocol_dc_identity(dc_id, directory.test_mode(), ProtocolDcRole::Regular)?.wire_id,
     ))
+}
+
+pub fn establish_auth_key_with_proxy(
+    directory: &DcDirectory,
+    dc_id: i32,
+    config: &NetworkConfig,
+    projection: &NetworkProxyProjection,
+    resolution: &mut ProxyResolutionCache,
+) -> Result<EstablishedSession, NetworkError> {
+    establish_auth_key_with_projection(directory, dc_id, config, None, projection, resolution)
+}
+
+pub fn establish_auth_key_controlled_with_proxy(
+    directory: &DcDirectory,
+    dc_id: i32,
+    config: &NetworkConfig,
+    control: &NetworkAttemptControl,
+    projection: &NetworkProxyProjection,
+    resolution: &mut ProxyResolutionCache,
+) -> Result<EstablishedSession, NetworkError> {
+    establish_auth_key_with_projection(
+        directory,
+        dc_id,
+        config,
+        Some(control),
+        projection,
+        resolution,
+    )
+}
+
+fn establish_auth_key_with_projection(
+    directory: &DcDirectory,
+    dc_id: i32,
+    config: &NetworkConfig,
+    control: Option<&NetworkAttemptControl>,
+    projection: &NetworkProxyProjection,
+    resolution: &mut ProxyResolutionCache,
+) -> Result<EstablishedSession, NetworkError> {
+    let protocol_dc_id = auth_handshake_protocol_dc_id(directory, dc_id)?;
+    let (endpoint, mut transport) = connect_directory_with_projection(
+        directory,
+        dc_id,
+        DcPurpose::Main,
+        config,
+        control,
+        projection,
+        resolution,
+    )?;
+    let mut nonce = Zeroizing::new([0_u8; 16]);
+    getrandom::getrandom(&mut nonce[..]).map_err(|_| NetworkError::RandomnessUnavailable)?;
+    let mut handshake = AuthKeyHandshake::new(*nonce);
+    let mut message_ids = MessageIdGuard::default();
+
+    let request = handshake.begin(next_message_id(&mut message_ids)?)?;
+    let response = exchange_and_validate(&mut transport, &request, &mut message_ids)?;
+    handshake.receive_res_pq(response)?;
+
+    let request = handshake.prepare_req_dh_params(
+        next_message_id(&mut message_ids)?,
+        protocol_dc_id,
+        directory.test_mode(),
+    )?;
+    let response = exchange_and_validate(&mut transport, &request, &mut message_ids)?;
+    let request = handshake.receive_server_dh(response, next_message_id(&mut message_ids)?)?;
+
+    let response = exchange_and_validate(&mut transport, &request, &mut message_ids)?;
+    match handshake.receive_dh_gen(response, next_message_id(&mut message_ids)?)? {
+        DhGenAction::Established(established) => Ok(EstablishedSession {
+            endpoint,
+            transport,
+            auth_key: established.auth_key,
+            server_salt: established.server_salt,
+            server_time: established.server_time,
+            message_ids,
+            sequence: SessionSequence::new(),
+            session_id: random_i64()?,
+            clock_offset_seconds: clock_offset_seconds(established.server_time)?,
+        }),
+        DhGenAction::Retry(retry) => {
+            continue_dh_retries(endpoint, transport, &mut handshake, &mut message_ids, retry)
+        }
+    }
 }
 
 pub fn establish_auth_key(
@@ -1674,5 +1941,72 @@ mod network_attempt_control_contract_tests {
             control.remaining(),
             Err(NetworkError::AttemptDeadlineExceeded)
         ));
+    }
+}
+
+#[cfg(test)]
+mod proxy_projection_contracts {
+    use super::*;
+
+    fn endpoint(kind: NetworkProxyKind) -> NetworkProxyEndpoint {
+        NetworkProxyEndpoint {
+            kind,
+            host: "proxy.example".into(),
+            port: 443,
+            user: String::new(),
+            password: "00112233445566778899aabbccddeeff".into(),
+        }
+    }
+
+    #[test]
+    fn enabled_missing_or_unsupported_proxy_fails_closed_before_direct_connect() {
+        let directory = DcDirectory::telegram_defaults(false, 2).unwrap();
+        let config = NetworkConfig::default();
+        let mut resolution = ProxyResolutionCache::default();
+        let missing = NetworkProxyProjection {
+            enabled: true,
+            selected: None,
+            prefer_ipv6: false,
+        };
+        assert!(matches!(
+            connect_directory_with_projection(
+                &directory,
+                2,
+                DcPurpose::Main,
+                &config,
+                None,
+                &missing,
+                &mut resolution,
+            ),
+            Err(NetworkError::MissingSelectedProxy)
+        ));
+        for kind in [
+            NetworkProxyKind::Socks5,
+            NetworkProxyKind::Http,
+            NetworkProxyKind::Web,
+        ] {
+            let unsupported = NetworkProxyProjection {
+                enabled: true,
+                selected: Some(endpoint(kind)),
+                prefer_ipv6: false,
+            };
+            assert!(matches!(
+                connect_directory_with_projection(
+                    &directory,
+                    2,
+                    DcPurpose::Main,
+                    &config,
+                    None,
+                    &unsupported,
+                    &mut resolution,
+                ),
+                Err(NetworkError::UnsupportedProxyCarrier)
+            ));
+        }
+    }
+
+    #[test]
+    fn proxy_endpoint_debug_surface_never_exposes_credentials() {
+        assert!(!std::any::type_name::<NetworkProxyEndpoint>().contains("password="));
     }
 }
