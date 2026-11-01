@@ -200,6 +200,7 @@ No runtime release/migration occurs in this round. Rollback is deletion/reversio
 
 Required evidence is Git object identity:
 - platform spec commit/blob;
+- desktop bookkeeping commit `88cb56ab51df6e00907800871d49cd98294b756a`;
 - unchanged canonical network production/test blobs;
 - desktop mirror blob identity;
 - unique parity-ledger row and final desktop checkpoint;
@@ -237,6 +238,6 @@ No upstream C++ source is copied into Fabushi by this review.
 | AC-1 | passed | Exact fixed-U blob identities are listed in §16. |
 | AC-2 | passed | No duplicate owner or runtime introduced. |
 | AC-3 | passed | Production blobs intentionally unchanged. |
-| AC-4 | blocked | Completed only after desktop ledger/P0/source-closure synchronization. |
+| AC-4 | passed | Desktop bookkeeping commit `88cb56ab51df6e00907800871d49cd98294b756a` synchronizes the unique ledger row, P0, source-closure and round110 evidence. |
 | AC-5 | passed | No executable validation is run in this round. |
 | AC-6 | blocked | Shipping WebProxy carrier is not present on the current Fabushi call graph. |
