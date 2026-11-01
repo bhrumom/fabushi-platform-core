@@ -148,3 +148,20 @@ Do not add executable tests against a nonexistent runtime lifecycle. When the ca
 ## 8. Provenance
 
 Behavioral provenance only; no upstream C++ is copied.
+
+
+## 9. Round 89 source-compliance record
+
+| Requirement / AC | Source-level status | Evidence |
+| --- | --- | --- |
+| AC-1 / fixed-U application semantics | passed for review | config_loader.cpp@5d07404ba07223016c6728b986dcba10628d7194 and mtproto_dc_options.cpp@d8499fc1df2ed7fdb88da687a04b824d243ff49a pin the 1000+d temporary route, 6000 ms terminate boundary, empty-dc_options rejection, endpoint-only setFromList replacement, per-DC changed publication, and non-persistence of temporary endpoints. |
+| AC-2 / wire identity | passed for review | facade.h@39e2f732c7df32af37ebf8222e887aec7e11b256, session_private.cpp@13cbc76ec723386027b5b4dcac79999b791c4614 and mtproto_dc_key_creator.cpp@13c57454f14b814b5923ea253048fb881ad8cf03 prove temporary routing id is normalized before p_q_inner_data protocol DC emission. |
+| AC-3 / existing owners | passed for review | DcDirectory dc.rs@a9582e4ece93590c322febbff391ba3ff7635575, network lib starting blob e0dc33a728916fb7be916956f44cfb0b670486c6, and runtime.rs@10031c5261bb0810ad2df2fca3de2e2fe4f65301 were inspected at the starting authority. |
+| AC-4 / independently implementable prerequisite | implemented, validation not run | platform implementation commit 1d4ce62cb6a298ddaaec7cc29d123edf16e8e955 changes network lib to 6023c96c4ee96a7cae37dbd6f9be077cf88779cb. establish_auth_key derives the regular protocol identity and passes its wire_id into prepare_req_dh_params. Four focused contracts are authored in the same blob and were not executed. No manifest or lock changed. |
+| AC-5 / complete temporary-session application | blocked / no production delta | runtime remains a single synchronous Option<EstablishedSession> owner without a shifted-session map, separately cancellable request handle, total 6000 ms attempt owner, or dc_options-only change-publication path. A bootstrap-only parallel runtime was not introduced. |
+| AC-6 / no fake owner | passed | No second runtime, directory, persistence model, synchronous timeout surrogate, or HTTP facade was added. |
+| AC-7 / HTTP carrier separation | passed | The direct NoProxy HTTPS/Web-PKI/800 ms carrier remains separately blocked under telegram-doh-special-config-http-carrier-lifecycle-boundary.md. |
+| AC-8 / deferred validation | passed | No CI/status/check query, build, typecheck, lint, validator, generator, dependency resolution, lock regeneration, test execution, package, deploy, installation, or runtime acceptance was performed. |
+| Desktop mirror | source-identical | bhrumom/fabushi-desktop commit dc4e1e654ad2627f5f29554e6db1e3a2c3e20aa6 carries the identical telegram-network lib blob 6023c96c4ee96a7cae37dbd6f9be077cf88779cb. |
+
+The complete special-config carrier/application responsibility remains mapped/pending and accepted=false. The auth-handshake protocol-DC correction extends the existing implemented protocol-DC wire responsibility and remains validation_status=not-run.
