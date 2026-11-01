@@ -1032,11 +1032,21 @@ pub fn resume_auth_key(
     })
 }
 
+fn auth_handshake_protocol_dc_id(
+    directory: &DcDirectory,
+    dc_id: i32,
+) -> Result<i32, NetworkError> {
+    Ok(i32::from(
+        derive_protocol_dc_identity(dc_id, directory.test_mode(), ProtocolDcRole::Regular)?.wire_id,
+    ))
+}
+
 pub fn establish_auth_key(
     directory: &DcDirectory,
     dc_id: i32,
     config: &NetworkConfig,
 ) -> Result<EstablishedSession, NetworkError> {
+    let protocol_dc_id = auth_handshake_protocol_dc_id(directory, dc_id)?;
     let (endpoint, mut transport) = connect_directory(directory, dc_id, DcPurpose::Main, config)?;
     let mut nonce = Zeroizing::new([0_u8; 16]);
     getrandom::getrandom(&mut nonce[..]).map_err(|_| NetworkError::RandomnessUnavailable)?;
@@ -1049,7 +1059,7 @@ pub fn establish_auth_key(
 
     let request = handshake.prepare_req_dh_params(
         next_message_id(&mut message_ids)?,
-        dc_id,
+        protocol_dc_id,
         directory.test_mode(),
     )?;
     let response = exchange_and_validate(&mut transport, &request, &mut message_ids)?;
@@ -1172,6 +1182,45 @@ fn read_i64_at(input: &[u8], offset: usize) -> Result<i64, NetworkError> {
             .try_into()
             .expect("eight-byte slice"),
     ))
+}
+
+#[cfg(test)]
+mod protocol_dc_handshake_contract_tests {
+    use super::auth_handshake_protocol_dc_id;
+    use fabushi_telegram_protocol::DcDirectory;
+
+    #[test]
+    fn auth_handshake_uses_real_production_protocol_dc_id() {
+        let directory = DcDirectory::telegram_defaults(false, 2).expect("directory");
+        assert_eq!(auth_handshake_protocol_dc_id(&directory, 2).expect("dc"), 2);
+    }
+
+    #[test]
+    fn auth_handshake_normalizes_temporary_production_dc_id() {
+        let directory = DcDirectory::telegram_defaults(false, 2).expect("directory");
+        assert_eq!(
+            auth_handshake_protocol_dc_id(&directory, 1002).expect("dc"),
+            2
+        );
+    }
+
+    #[test]
+    fn auth_handshake_applies_test_protocol_dc_shift() {
+        let directory = DcDirectory::telegram_defaults(true, 2).expect("directory");
+        assert_eq!(
+            auth_handshake_protocol_dc_id(&directory, 2).expect("dc"),
+            10002
+        );
+    }
+
+    #[test]
+    fn auth_handshake_normalizes_temporary_test_dc_before_test_shift() {
+        let directory = DcDirectory::telegram_defaults(true, 2).expect("directory");
+        assert_eq!(
+            auth_handshake_protocol_dc_id(&directory, 1002).expect("dc"),
+            10002
+        );
+    }
 }
 
 #[cfg(test)]
