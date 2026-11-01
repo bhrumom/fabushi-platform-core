@@ -279,3 +279,18 @@ The owner-absence blocker recorded earlier is now closed for the minimal authori
 The existing shipping AppHost now contains one source-neutral `ProductSettingsOwner`, separately persists `network.proxyEnabled`, exposes typed Settings snapshot/mutation methods, and publishes the authoritative boolean through the same embedded Telegram client into the existing `telegram.refreshSpecialConfig` RuntimeClient boundary. `ui_state`, telegram-storage, account-service, telegram-network and RuntimeClient remain non-owners of durable product Settings.
 
 This does **not** close the entire `TDRP-R9-PROXY-SETTINGS-STATE-PERSISTENCE-001` responsibility: fixed-U proxy mode/list/selected/rotation, migration/import semantics, and their eventual unified Settings UI projection remain pending. The row therefore remains mapped/pending, with the missing-owner blocker replaced by those remaining scope items. Stage-A contracts are authored but not executed; `validation_status=not-run`, `accepted=false`.
+
+
+## 20. Round 98 canonical owner extension — typed state and in-place migration
+
+The owner-absence blocker is closed by the existing ProductSettingsOwner. Round 98 therefore moves the carrier-independent parts of R3-R12 into that same source-neutral owner.
+
+Canonical state is ProductSettingsState version 2 under network.proxy. It includes mode, selected, ordered list, tryIpv6, useProxyForCalls, checkIpWarningShown, and rotation { enabled, timeoutSeconds, preferredIndices }. Persistent proxy endpoints carry only fixed-U durable record fields (type, host, port, user, password); runtime resolvedIPs/resolvedExpireAt and carrier/checker/timer state are excluded.
+
+The owner implements fixed-U mutation semantics directly: timeout normalization, preferred-index normalization, list replacement clearing preferences, insertion/removal index remapping, replacement, and preference promotion. Selection+mode has an atomic typed mutation. No proxy endpoint is wired to a carrier in this round.
+
+The existing Fabushi v1 persisted state is migrated in place: network.proxyEnabled=true -> v2 mode Enabled; false -> v2 mode System; all other fields receive fixed-U defaults. The old boolean is then derived, not stored: proxyEnabled := (mode == Enabled). It remains the only projection sent to telegram.refreshSpecialConfig. System and Disabled both project false.
+
+This closes the canonical typed state and current Fabushi schema-migration slice. Direct import of an arbitrary historical TDesktop Core::Settings byte stream is not invented here because Fabushi has no authoritative source path or outer Core::Settings version contract from which to extract that nested proxy QByteArray safely. The fixed-U SettingsProxy legacy semantics remain the migration oracle for any future explicit TDesktop data-import surface; a source-specific importer must feed this owner rather than become a second store.
+
+Stage-A contracts are authored but not run. validation_status remains not-run and accepted=false; unified Settings UI projection and unimplemented selected-proxy/carrier consumers remain open outside this owner-only slice.

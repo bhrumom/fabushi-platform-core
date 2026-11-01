@@ -139,3 +139,53 @@ Source-level implementation review against desktop commit `b1b5dd027497c39a355e9
 - source-authored contracts cover persistence/reopen, malformed-data fail-closed, source-neutral host method names, and exact boolean RuntimeClient request shape.
 
 Source-level requirements in sections 1-8 and Stage-A implementation portions of section 10 are satisfied. Executable validation is deliberately not performed in Stage A, so validation remains `not-run`, acceptance remains false, and no release/verification claim is made. The broader fixed-U proxy list/selected/mode/rotation migration remains outside this minimal owner slice and continues under `telegram-proxy-settings-state-persistence.md`.
+
+
+## 12. Round 98 typed network proxy state extension (spec-first)
+
+Round 98 extends the same canonical, source-neutral ProductSettingsOwner; it does not create a Telegram-specific settings store, provider-local preference database, second Settings root, or carrier owner.
+
+The canonical persistence schema advances from version 1 to version 2. Version 2 replaces the lossy stored network.proxyEnabled boolean with one typed network.proxy object:
+
+```text
+ProductSettingsState v2 {
+  version: 2,
+  network: {
+    proxy: {
+      mode: System | Enabled | Disabled,
+      selected: ProxyEndpoint?,
+      list: ProxyEndpoint[],
+      tryIpv6: bool,
+      useProxyForCalls: bool,
+      checkIpWarningShown: bool,
+      rotation: {
+        enabled: bool,
+        timeoutSeconds: positive integer,
+        preferredIndices: integer[]
+      }
+    }
+  }
+}
+
+ProxyEndpoint {
+  type: Socks5 | Http | Mtproto | Web,
+  host: string,
+  port: uint32,
+  user: string,
+  password: string
+}
+```
+
+Resolved IPs, DNS expiry, sockets, WebView handles, checker results, timers, and carrier state are explicitly excluded. They remain transient runtime concerns. ProxyEndpoint retains user/password because fixed-U persistent proxy records use those fields for authentication and, for MTProto/Web forms, source-defined secret/base-path encodings; the Settings owner must never log those values.
+
+Canonical defaults preserve fixed-U SettingsProxy semantics: mode=System, selected=None, list=[], useProxyForCalls=false, checkIpWarningShown=false, rotation.enabled=false, rotation.timeoutSeconds=10, rotation.preferredIndices=[]; tryIpv6=false on Windows and true on other supported desktop platforms.
+
+The v1 -> v2 in-place migration is authoritative for the existing Fabushi product-settings.json path: proxyEnabled=true maps to mode=Enabled; proxyEnabled=false maps to mode=System because v1 could only distinguish the Enabled gate from the non-Enabled gate and System is the fixed-U/default neutral mode. All other v2 fields receive canonical defaults. Migration is persisted back through the same ProductSettingsOwner path before the owner becomes available. Malformed or unsupported versions remain fail-closed.
+
+proxyEnabled is no longer separately persisted. It is derived exactly as mode == Enabled and is published only to the already-existing telegram.refreshSpecialConfig consumer boundary. System and Disabled both project false. No selected/list endpoint is sent to an unimplemented carrier.
+
+The source-neutral mutation contract is settings.mutateNetworkProxy with a typed operation. Supported canonical operations are setMode, setSelected, setSelectedAndMode, setList, add, insert, remove, replace, setTryIpv6, setUseProxyForCalls, setCheckIpWarningShown, setRotationEnabled, setRotationTimeout, setRotationPreferredIndices, and promoteRotationPreferredIndex. setSelectedAndMode exists so selection+mode can be one domain mutation rather than two externally observable writes. The compatibility settings.setNetworkProxyEnabled method remains source-neutral and is interpreted as a projection command: true selects Enabled; false moves Enabled back to System but preserves an already-System or already-Disabled mode; it republishes the derived boolean even on a no-op retry.
+
+Mutation invariants are the fixed-U SettingsProxy invariants: non-positive rotation timeout normalizes to 10; preferred indices drop negative/out-of-range/duplicate values preserving first occurrence; setList clears preferred indices; insert clamps to [0,list.len] and increments preferred indices at/after insertion; remove decrements indices after the removed element and drops the removed index; replace preserves index ordering; promotion is invalid/no-op out of range, idempotent when already first, otherwise moves/inserts the index to the front.
+
+Stage-A contracts must be authored for v1 migration, defaults, all list/preferred/timeout invariants, mode-derived proxyEnabled publication, same-value retry, and fail-closed malformed/unsupported state. They are not executed in Stage A.
