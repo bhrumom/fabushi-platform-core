@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn padding_rejects_short_counts_and_preserves_source_alphabet_mapping() {
-        let mut bytes = [0_u8, 23, 0, 25, 61, 62, 63, 124]
+        let mut bytes = [0_u8, 23, 25, 0, 25, 61, 62, 63, 26]
             .into_iter()
             .chain(std::iter::repeat(0));
         let padding = generate_dns_random_padding_with_entropy(|| {

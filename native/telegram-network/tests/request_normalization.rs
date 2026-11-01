@@ -97,7 +97,7 @@ fn special_config_request_normalization_preserves_doh_and_firestore_shapes() {
 
 #[test]
 fn dns_padding_contract_preserves_rejection_range_and_modulo_alphabet() {
-    let mut source = vec![0_u8, 23, 0, 25, 61, 62, 63, 124];
+    let mut source = vec![0_u8, 23, 25, 0, 25, 61, 62, 63, 26];
     source.extend(std::iter::repeat(0_u8).take(16));
     let mut source = source.into_iter();
 
