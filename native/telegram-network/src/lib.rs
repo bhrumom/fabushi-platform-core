@@ -4,6 +4,16 @@
 //! cryptography, and authorization state remain in `telegram-protocol` so the
 //! same protocol implementation can be reused by native and Web transports.
 
+pub mod request_normalization;
+
+pub use request_normalization::{
+    generate_dns_random_padding, generate_dns_random_padding_with_entropy,
+    normalize_domain_resolver_request, normalize_special_config_doh_request,
+    normalize_special_config_firestore_request, NormalizedServiceRequest,
+    RequestNormalizationError, RequestProvider, DNS_DOMAINS, DNS_JSON_ACCEPT,
+    DNS_USER_AGENT,
+};
+
 use std::{
     io::{self, Read, Write},
     net::{Shutdown, SocketAddr, TcpStream},
