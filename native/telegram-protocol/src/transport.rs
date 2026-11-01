@@ -4,6 +4,7 @@ use thiserror::Error;
 
 const DEFAULT_MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 const FULL_FRAME_OVERHEAD: usize = 12;
+const PADDED_INTERMEDIATE_PACKET_SIZE_MAX: usize = 0x01000000 * 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,6 +40,8 @@ pub enum TransportError {
     EmptyPayload,
     #[error("abridged MTProto payload length {0} is not divisible by four")]
     AbridgedPayloadAlignment(usize),
+    #[error("padded intermediate MTProto payload length {0} is not divisible by four")]
+    PaddedIntermediatePayloadAlignment(usize),
     #[error("MTProto transport frame length {length} exceeds maximum {maximum}")]
     FrameLengthLimit { length: usize, maximum: usize },
     #[error("MTProto transport frame length {0} is invalid")]
@@ -51,7 +54,9 @@ pub enum TransportError {
     CrcMismatch { expected: u32, actual: u32 },
     #[error("MTProto transport length cannot be represented on the wire")]
     LengthOutOfRange,
-    #[error("quick ACK is not supported by the full MTProto transport")]
+    #[error("operating system secure randomness is unavailable")]
+    RandomnessUnavailable,
+    #[error("quick ACK is not supported by this MTProto transport mode")]
     QuickAckUnsupported,
     #[error("padded intermediate transport padding must contain 0-15 bytes")]
     InvalidPaddingLength,
@@ -90,7 +95,13 @@ impl TransportFrameCodec {
     }
 
     pub fn encode(&mut self, payload: &[u8]) -> Result<Vec<u8>, TransportError> {
-        self.encode_internal(payload, &[], false)
+        if self.mode != TransportMode::PaddedIntermediate {
+            return self.encode_internal(payload, &[], false);
+        }
+        let mut random = [0_u8; 16];
+        getrandom::getrandom(&mut random).map_err(|_| TransportError::RandomnessUnavailable)?;
+        let padding_length = usize::from(random[0] & 0x0f);
+        self.encode_internal(payload, &random[1..1 + padding_length], false)
     }
 
     pub fn encode_with_padding(
@@ -118,6 +129,11 @@ impl TransportFrameCodec {
         if payload.is_empty() {
             return Err(TransportError::EmptyPayload);
         }
+        if self.mode == TransportMode::PaddedIntermediate && !payload.len().is_multiple_of(4) {
+            return Err(TransportError::PaddedIntermediatePayloadAlignment(
+                payload.len(),
+            ));
+        }
         let total_payload_length = payload
             .len()
             .checked_add(padding.len())
@@ -136,10 +152,15 @@ impl TransportFrameCodec {
         }
 
         match self.mode {
-            TransportMode::Full if quick_ack => Err(TransportError::QuickAckUnsupported),
+            TransportMode::Full | TransportMode::PaddedIntermediate if quick_ack => {
+                Err(TransportError::QuickAckUnsupported)
+            }
             TransportMode::Full => self.encode_full(payload),
             TransportMode::Abridged => self.encode_abridged(payload, quick_ack),
             TransportMode::Intermediate | TransportMode::PaddedIntermediate => {
+                if self.mode == TransportMode::PaddedIntermediate {
+                    self.validate_padded_intermediate_frame_length(total_payload_length)?;
+                }
                 let mut length: u32 = total_payload_length
                     .try_into()
                     .map_err(|_| TransportError::LengthOutOfRange)?;
@@ -300,7 +321,7 @@ impl TransportFrameCodec {
             return Ok(None);
         };
         let encoded_length = u32::from_le_bytes(length_bytes.try_into().expect("four bytes"));
-        if encoded_length & (1 << 31) != 0 {
+        if self.mode == TransportMode::Intermediate && encoded_length & (1 << 31) != 0 {
             return Ok(Some(DecodedFrame {
                 payload: Vec::new(),
                 sequence_number: None,
@@ -309,32 +330,36 @@ impl TransportFrameCodec {
             }));
         }
         let payload_length = encoded_length as usize;
-        self.validate_frame_length(payload_length)?;
+        if self.mode == TransportMode::PaddedIntermediate {
+            self.validate_padded_intermediate_frame_length(payload_length)?;
+        } else {
+            self.validate_frame_length(payload_length)?;
+        }
         let consumed_bytes = 4_usize
             .checked_add(payload_length)
             .ok_or(TransportError::LengthOutOfRange)?;
         let Some(payload) = input.get(4..consumed_bytes) else {
             return Ok(None);
         };
-        if self.mode == TransportMode::PaddedIntermediate
-            && (8..=16).contains(&payload.len())
-            && payload[..4] == [0xff; 4]
-        {
-            return Ok(Some(DecodedFrame {
-                payload: Vec::new(),
-                sequence_number: None,
-                quick_ack_token: Some(u32::from_le_bytes(
-                    payload[4..8].try_into().expect("four bytes"),
-                )),
-                consumed_bytes,
-            }));
-        }
         Ok(Some(DecodedFrame {
             payload: payload.to_vec(),
             sequence_number: None,
             quick_ack_token: None,
             consumed_bytes,
         }))
+    }
+
+    fn validate_padded_intermediate_frame_length(
+        &self,
+        payload_length: usize,
+    ) -> Result<(), TransportError> {
+        let packet_length = payload_length
+            .checked_add(4)
+            .ok_or(TransportError::LengthOutOfRange)?;
+        if packet_length < 8 || packet_length >= PADDED_INTERMEDIATE_PACKET_SIZE_MAX {
+            return Err(TransportError::InvalidFrameLength(packet_length));
+        }
+        self.validate_frame_length(payload_length)
     }
 
     fn validate_frame_length(&self, payload_length: usize) -> Result<(), TransportError> {
