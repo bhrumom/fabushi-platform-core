@@ -65,3 +65,16 @@ Contracts must be written but not executed in Stage A and cover:
 - preservation of generic `Intermediate` quick-ACK behavior outside VersionD.
 
 No build, typecheck, lint, generator, schema validator, test, package, deployment, installation, runtime acceptance, Actions/status/check query, or CI trigger is permitted in this Stage-A slice.
+
+
+## Round 105 implementation record
+
+Source-level production implementation is `3a3d850139082e32a783b7d03b6ea2fd31b00ee9`.
+
+- Canonical `native/telegram-protocol/src/transport.rs@5d6abd61f130b25baae10a6269eebd20fd025b3a` keeps the existing `TransportFrameCodec` owner and changes only the padded-intermediate branch: shipping `encode` uses OS randomness for a 0..15-byte padding length and bytes; explicit-padding encoding enforces 4-byte unpadded payload alignment and 0..15 padding; receive framing enforces fixed-U VersionD packet floor and strict `0x04000000` packet ceiling; VersionD quick-ACK encoding/decoding fails closed instead of borrowing generic intermediate semantics.
+- Existing canonical shipping `native/telegram-network/src/lib.rs@54f509474391bb5118ba4678ba5c566ab3e74ec8` remains unchanged and continues routing `TcpTransport::send_payload/receive_payload` through `TransportFrameCodec::encode/decode`.
+- Authored-only canonical contract commit is `cbc042f54b5b2bb7ec035ad68aaad5bd40263b4a`, contract blob `cd53d0b1b546aaceaf5ad46aaf6957dab5b32bf9`. Desktop provider contract mirror commit `551d641ba59ae6f2ef7e3c08bfbf884db8f7f2a3` has the same blob.
+- Contracts cover explicit padding 0/15, unpadded alignment, fragmented header/body, 0..3 declared-body rejection, highest legal partial boundary, first illegal packet-size boundary, random shipping padding domain, VersionD quick-ACK rejection, and preservation of generic Intermediate quick-ACK behavior.
+- No contract/build/typecheck/lint/schema/generator/integration/E2E/package/deployment/runtime validation was executed, and no GitHub Actions/status/check query or trigger was performed.
+
+Connection-start nonce/AES-CTR prefix, Version1/VersionD secret handling, protocol/DC id obfuscation, quick-ACK lifecycle, broader connection scheduling/racing/retry, auth-key binding/persistence, arbitrary request history, gzip, complete difference decoding/application, broader source/legal closure, Stage-B executable evidence, and independent release ACCEPT remain outside this source-level responsibility.
