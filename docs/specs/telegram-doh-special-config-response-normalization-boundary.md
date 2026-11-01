@@ -120,12 +120,12 @@ Source-level compliance review completed in Stage A. Executable validation remai
 | --- | --- | --- |
 | R1-R6 | passed | Fixed-U domain-resolver/special-config blobs were reread. `response_normalization.rs@9371f73669b4e6b211608f043119ca4eca56e185` implements structural DoH filtering, TTL projection, TXT ordering/Latin-1 projection and Firestore nested extraction. |
 | R7-R9 | passed | The codec is pure, lives in existing `telegram-protocol`, reuses existing `serde_json`, and makes no Cargo/lock delta. |
-| R10 | passed | Internal and public authored-only contracts are in `response_normalization.rs@9371f73669b4e6b211608f043119ca4eca56e185` and `protocol_contract.rs@259f457eeaacce0ed09f1acf1f0fd821a0269733`; none were executed. |
+| R10 | passed | Internal and public authored-only contracts are in final `response_normalization.rs@8d2d70ec883ea8969be68b280e994e2bb35baf71` and `protocol_contract.rs@7e2536f7b4bcd13f895ef12993aea2ecebb74ef1`; none were executed. |
 | R11 | passed | Carrier request scheduling, HTTP Date mutation, temporary-DC lifecycle and dc-options application remain separately pending. |
-| R12 | pending implementation | Pure fixed-U HTTP Date parsing was identified during final round116 source reread and must be added without clock mutation. |
-| AC-1-AC-4 | passed | Platform implementation/authored-contract commit `3d27d1aa1272bb15d39c1e2031872a1f2266c62e`; module/lib/contract blobs `9371f73669b4e6b211608f043119ca4eca56e185`, `27543d45f3825321e26c8a0b664e37c8488169e2`, `259f457eeaacce0ed09f1acf1f0fd821a0269733`. |
-| AC-5 | passed | Desktop mirror commit `4070ca2be5db0d22bd54c27857ccf84748ce8763` has the same three blob identities. |
-| AC-6 | passed | Desktop initial bookkeeping commit `4f91cd629df720e79743885807c5da7db97042c8`: ledger `9d8a5312dd16f4343274df82e77e00c5d406e371`, P0 `f9d639209337900c67eb311e36ad2e5c3bb35151`, source-closure `2b5abb6d86955a3b7e5fa359fe5a53919af0cb89`, round116 evidence `933fc37eaec7eac1f5008ca8db22aadb0387dca9`. |
+| R12 | passed | `parse_http_date_unix_seconds` in `response_normalization.rs@8d2d70ec883ea8969be68b280e994e2bb35baf71` reproduces the fixed-U Date shape/month/civil-time validity and unanchored match behavior while returning UTC Unix seconds without global clock mutation. |
+| AC-1-AC-4 | passed | Base response implementation/authored-contract commit `3d27d1aa1272bb15d39c1e2031872a1f2266c62e`, followed by HTTP-Date implementation commit `1d5d02d02abea178c9f91c37e41d24bee3171eca`; final module/lib/contract blobs are `8d2d70ec883ea8969be68b280e994e2bb35baf71`, `8ab2cd39719dbeb3725c1a52c8632b6f97cfdf0f`, `7e2536f7b4bcd13f895ef12993aea2ecebb74ef1`. |
+| AC-5 | passed | Desktop final source/contract mirror commit `bcb34c647362932be0c98e7d7caef918991bf11f` has the same final three blob identities `8d2d70ec883ea8969be68b280e994e2bb35baf71`, `8ab2cd39719dbeb3725c1a52c8632b6f97cfdf0f`, `7e2536f7b4bcd13f895ef12993aea2ecebb74ef1`. |
+| AC-6 | passed | Desktop HTTP-Date-refined bookkeeping commit `19405a837402874643537d9e90613ae2a74ca311`: ledger `52d225b630a629f7a330743ce6d99963a0a39173`, P0 `85289769d5b3a935ae61c4fb496b261c370c5c6a`, source-closure `6bf7f10860fe6d38a36554862cbb5d40eab0a237`, round116 evidence `f3599c5cacd0875b2fb25f880d7947f78e520de6`. |
 | AC-7-AC-8 | passed | No scheduler/application production delta and no executable validation/release claim. |
 
 No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, dependency resolution, lock regeneration, unit/contract/integration/E2E execution, package, deployment, installation or runtime acceptance was performed.
@@ -133,4 +133,4 @@ No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema 
 
 ### Final source-level compliance
 
-R1-R11 remain source-review satisfied; R12 and the HTTP-Date portion of AC-2 are pending implementation after the final round116 source reread. Executable validation remains intentionally `not-run`; `accepted=false` and no release-readiness claim is made. Carrier request scheduling/application remains separately pending and is not part of this compliance claim.
+All R1-R12 and AC-1 through AC-8 are satisfied at source/implementation/bookkeeping review level. Executable validation remains intentionally `not-run`; `accepted=false` and no release-readiness claim is made. Carrier request scheduling, global HTTP-derived time mutation, temporary-DC lifecycle and dc-options application remain separately pending and are not part of this compliance claim.
