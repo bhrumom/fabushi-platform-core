@@ -641,6 +641,11 @@ pub fn build_req_dh_params(
     public_key_fingerprint: u64,
     encrypted_inner_data: &[u8],
 ) -> Result<Vec<u8>, HandshakeError> {
+    if decode_unsigned_be(&response.pq)? != factors.pq
+        || factors.p.saturating_mul(factors.q) != factors.pq
+    {
+        return Err(HandshakeError::PqFactorsDoNotMatch);
+    }
     if !response
         .server_public_key_fingerprints
         .contains(&public_key_fingerprint)

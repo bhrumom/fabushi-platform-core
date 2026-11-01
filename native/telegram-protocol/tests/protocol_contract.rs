@@ -1988,6 +1988,24 @@ fn res_pq_factors_semiprime_and_builds_next_dh_request_contracts() {
     assert_eq!(request_reader.read_u64().unwrap(), 0x2222);
     assert_eq!(request_reader.read_bytes().unwrap(), encrypted);
     assert!(request_reader.is_finished());
+
+    let mismatched_factors = FactoredPq {
+        pq: factors.pq,
+        p: factors.p,
+        q: factors.q + 2,
+    };
+    assert_eq!(
+        build_req_dh_params(&response, &mismatched_factors, 0x2222, &[0x55]).unwrap_err(),
+        HandshakeError::PqFactorsDoNotMatch
+    );
+    assert_eq!(
+        build_req_dh_params(&response, &factors, 0x9999, &[0x55]).unwrap_err(),
+        HandshakeError::NoTrustedServerKey
+    );
+    assert_eq!(
+        build_req_dh_params(&response, &factors, 0x2222, &[]).unwrap_err(),
+        HandshakeError::EmptyEncryptedInnerData
+    );
 }
 
 #[test]
