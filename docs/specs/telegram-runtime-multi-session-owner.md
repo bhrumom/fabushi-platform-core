@@ -264,3 +264,61 @@ Author but do not execute contracts proving:
 | R92-AC-8 / deferred validation | passed | No GitHub Actions/status/check query or trigger, build, typecheck, lint, validator, generator, dependency resolution, lock regeneration, unit/contract/integration/E2E execution, package, deploy, installation or runtime acceptance was performed. |
 
 Spec-first commit is 89805c2b3f24fc187dac975b67e222b0ab44dee1 / spec blob d5fa42b7aa2fe517f2ac69eeaeeb0d72e0db6876. Implementation commits are dbf24c6113fbe681e9e3fdcd912e14351e1bc588, f8acfdde4020ee6d27d2a9a7c118ba759802dfd7, 3881f5f022942d3cbef9aa1caed51ebc518960f6, 3e5b4f9686e1182b85a809bb4224b66c684de614, and 1fc3e07d4b1e0cc88c5df148de03909dd6b8feeb. Executable validation remains intentionally deferred.
+
+
+## 15. Round 93 — resolved special endpoint to dc_options-only application
+
+Round 93 closes only the carrier-independent application path that begins after a special-config endpoint has already been resolved. Direct NoProxy HTTPS/Web-PKI endpoint acquisition remains a separate blocked responsibility. This round reuses the existing RuntimeClient/SessionOwner, telegram-protocol DcDirectory and the Round-92 6000 ms owned-request lifecycle; it does not add a second runtime, provider, directory, account or persistence owner.
+
+### 15.1 Additional fixed-U source
+
+- Telegram/SourceFiles/mtproto/scheme/api.tl@8319b7df634d145390c299404129fd161a5dbd2a
+- Telegram/SourceFiles/mtproto/config_loader.cpp@5d07404ba07223016c6728b986dcba10628d7194
+- Telegram/SourceFiles/mtproto/mtproto_dc_options.cpp@d8499fc1df2ed7fdb88da687a04b824d243ff49a
+- Telegram/SourceFiles/mtproto/mtproto_dc_options.h@4e0b979c4a84661f3365196ab8702dc8cb60fd03
+- Telegram/SourceFiles/mtproto/facade.h@39e2f732c7df32af37ebf8222e887aec7e11b256
+
+The fixed schema declares `help.getConfig#c4f9186b = Config`; because it has no parameters, the special request body is the bare little-endian constructor id only, not `invokeWithLayer(initConnection(...))`. ConfigLoader maps a selected real DC below 1000 to a temporary logical DC `1000 + dc`, inserts exactly that endpoint as a transient `tcpo_only` option with its optional secret, sends `MTPhelp_GetConfig()` through the temporary session, and starts the existing 6000 ms attempt timeout. The callback parses `Config` and `specialConfigLoaded` applies only `vdc_options`; all other Config fields wait for normal main-DC configuration.
+
+`DcOptions::setFromList` rebuilds the option map from the supplied list, computes the per-DC difference against the current map, mutates only when the difference is non-empty, and publishes one changed DC id for each affected DC. Empty special `dc_options` are ignored by ConfigLoader.
+
+### 15.2 Existing-owner-first design
+
+1. telegram-protocol SHALL own the bare `help.getConfig` serializer because the constructor and TL byte order are protocol facts.
+2. telegram-protocol `DcDirectory` SHALL own dc-options-only replacement and deterministic per-DC difference calculation. Replacement SHALL preserve the current directory's `this_dc` and environment metadata and SHALL not copy any unrelated Config fields from the special response.
+3. RuntimeClient SHALL remain the sole application/lifecycle owner. It SHALL accept an already-resolved `SpecialConfigEndpoint`, derive the temporary logical DC from the source-equivalent `1000 + real_dc` mapping, create a transient one-endpoint directory, begin the existing special-config owned request before opening the session, invoke the bare request, parse only the Config prefix through `dc_options`, apply those options to the existing `server_directory`, and return the resulting change publication.
+4. The one-endpoint transient directory and temporary logical session SHALL never replace or persist the canonical `server_directory`. Per-real-DC AuthMaterial reuse and 6000 ms cancellation/teardown remain owned by SessionOwner.
+5. This round SHALL NOT add endpoint acquisition, HTTP/DoH/Firestore scheduling, a public JSON special-config command, new persistence keys/schema, or another settings/network/runtime namespace.
+
+### 15.3 Required behavior
+
+- `build_help_get_config` serializes exactly four bytes for constructor `0xc4f9186b` in TL little-endian order.
+- Real special DC ids must be positive and below the temporary namespace boundary; the temporary logical id is exactly `1000 + real_dc`.
+- The resolved endpoint is represented as one transient `tcpo_only` main endpoint, retaining its IPv4 address, port and optional transport secret.
+- `begin_special_config_attempt` registers ownership before controlled session open and the existing absolute 6000 ms budget spans open/auth/RPC.
+- The RPC body is bare `help.getConfig`; no initConnection/layer wrapper is used on this secondary special-config attempt.
+- A malformed/failed/empty Config response does not mutate the canonical server directory. Existing owned-request failure teardown remains in force.
+- A valid special Config replaces only canonical dc options. Current `this_dc`, test-mode/environment state, authorization state, other Config metadata and persistence remain unchanged.
+- Change publication contains sorted unique real DC ids whose endpoint lists were added, removed or changed. No-op replacement yields an empty publication and does not replace the stored option vector.
+- Successful or failed temporary attempts leave no temporary request/session state, while shared real-DC AuthMaterial remains reusable.
+
+### 15.4 Authored-only contracts
+
+Author but do not execute contracts proving:
+- the bare request is exactly the constructor bytes and contains no wrapper;
+- temporary id mapping rejects invalid/already-temporary ids and maps real dc 2 to logical 1002;
+- dc-options-only replacement preserves current directory metadata, reports added/removed/changed DC ids, and reports an empty change for identical options;
+- a resolved endpoint is converted to one temporary `tcpo_only` endpoint with secret preservation;
+- the runtime application uses the owned special-config request and updates only `server_directory` dc options;
+- Stage A performs no executable validation.
+
+### 15.5 Round 93 source-level acceptance criteria
+
+- R93-AC-1: fixed-U bare serializer, temporary-id mapping, ConfigLoader special callback and DcOptions replacement/publication semantics are pinned by exact source blob SHA.
+- R93-AC-2: telegram-protocol exposes a source-equivalent bare `help.getConfig` serializer and source-neutral temporary-DC/dc-options replacement contracts.
+- R93-AC-3: RuntimeClient exposes a carrier-independent resolved-endpoint application entrypoint using the existing SessionOwner and exact 6000 ms owned attempt.
+- R93-AC-4: successful application replaces only canonical dc options and returns the exact changed-DC publication; unrelated Config/runtime state is not copied.
+- R93-AC-5: temporary endpoint/session/request state is transient and per-real-DC auth material remains reusable.
+- R93-AC-6: direct NoProxy HTTPS/Web-PKI endpoint acquisition remains separately blocked; no HTTP carrier or public special-config command is added.
+- R93-AC-7: focused contracts are authored but not run.
+- R93-AC-8: no Actions/status/check query or trigger, build, typecheck, lint, validator, generator, dependency resolution, lock regeneration, test execution, package, deploy, install or runtime acceptance is performed.
