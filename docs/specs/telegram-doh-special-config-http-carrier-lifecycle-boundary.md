@@ -163,3 +163,21 @@ This round does not yet claim the higher-level RuntimeClient endpoint-acquisitio
 - R94-AC-7: focused contracts are authored but not run.
 - R94-AC-8: aggregate carrier/application parity stays pending until runtime composition is production-wired and Stage-B evidence exists.
 - R94-AC-9: no Actions/status/check query or executable validation is performed.
+
+
+## 9. Round 94 source-compliance record
+
+| Requirement / AC | Source-level status | Evidence |
+| --- | --- | --- |
+| R94-AC-1 fixed-U carrier lifecycle | passed for source review | `special_config_request.cpp@fdb65506b0a886bc2daeccb61090bc44be7e2d88`, `special_config_request.h@91901489e778089b03187682a9556e929867b94f`, `mtproto_domain_resolver.cpp@eeac8f6a8e2df67967ea7b536fb165e2f8d983e9`, `mtproto_domain_resolver.h@cb1979bbbf0454135c8668ed1e5013da85d1dedc` were reread at fixed U. |
+| R94-AC-2 direct HTTPS/Web-PKI owner | implemented, validation not run | platform commit `dc2541aa769fb8fd3f9699683ba802a6a7afddbe`; `direct_https.rs@0c7444d23fdee0aa135f12fd55a50ec3fe42c690`; `lib.rs@bace7702a74f1c3b848ac12add69d8cd74748342`. |
+| R94-AC-3 no-proxy boundary | implemented, validation not run | direct carrier opens `TcpStream` to normalized origin host:443 and has no proxy/environment/PAC/WPAD integration; request contracts assert origin-form serialization and no Proxy-* header. |
+| R94-AC-4 cancellation/finalization split | implemented, validation not run | `DirectHttpsRace::finalize_reply` releases one handle without cancellation; `cancel_reply` invokes `NetworkAttemptControl::cancel`; Drop explicitly cancels still-owned handles. |
+| R94-AC-5 distinct stagger settlement | implemented, validation not run | `SERVICE_REQUEST_STAGGER=800ms`; DomainResolver policy fences future schedule and releases remaining handles without explicit abort, while SpecialConfig policy leaves remaining schedule owned/live. |
+| R94-AC-6 dependency inputs | source-pinned, validation not run | `Cargo.toml@51bd7e2a4ac50b76c3bad11e9aef7ac633f6cfef`; manually transcribed `Cargo.lock@efa2e4e217aa17bbb72de8494c5b2740d14e6a94`; source dependency closure came from already-pinned `native/global-dharma/Cargo.lock`. No dependency resolution or lock generation executed. |
+| R94-AC-7 contracts | authored, not run | pure tests inside `direct_https.rs` cover request shaping, exact 800ms constant, readable non-2xx body, chunked decoding, settlement split, and explicit cancellation vs finalization. |
+| R94-AC-8 aggregate responsibility | pending | carrier is now independently implemented, but no new HTTP-acquisition-to-RuntimeClient orchestration was introduced in this slice; the existing resolved-endpoint -> temporary help.getConfig -> dc_options path remains the canonical downstream composition. |
+| R94-AC-9 zero CI | passed for this source-edit round | no Actions/status/check query, build, typecheck, lint, validator, generator, dependency resolution, lock regeneration, test execution, packaging, deployment, installation, or runtime acceptance was performed. |
+
+Dependency provenance was recorded at platform commit `cbe7e60632397e705725db7b30c41ce4bef80eb7` in `native/telegram-network/THIRD_PARTY_NOTICES.md@2e84b5a0ad5d80be35939ee488e4c56b07f9125c`.
+The desktop source mirror commit is `623936831ac1831022a35b22471a58bd96036104`; mirrored carrier/lib/notices blobs are byte-identical to platform-core.
