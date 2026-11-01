@@ -264,13 +264,34 @@ impl TcpTransport {
         protocol_dc_id: i16,
         config: &NetworkConfig,
     ) -> Result<Self, NetworkError> {
-        let mut stream = TcpStream::connect_timeout(&address, config.connect_timeout)?;
+        Self::connect_obfuscated_with_attempt(address, secret, protocol_dc_id, config, None)
+    }
+
+    fn connect_obfuscated_with_attempt(
+        address: SocketAddr,
+        secret: &[u8],
+        protocol_dc_id: i16,
+        config: &NetworkConfig,
+        control: Option<&NetworkAttemptControl>,
+    ) -> Result<Self, NetworkError> {
+        let connect_timeout = if let Some(control) = control {
+            control.bounded_timeout(config.connect_timeout)?
+        } else {
+            config.connect_timeout
+        };
+        let mut stream = TcpStream::connect_timeout(&address, connect_timeout)?;
         stream.set_nodelay(true)?;
-        stream.set_read_timeout(Some(config.read_timeout))?;
-        stream.set_write_timeout(Some(config.write_timeout))?;
+        if let Some(control) = control {
+            control.register_stream(&stream)?;
+            stream.set_read_timeout(Some(control.bounded_timeout(config.read_timeout)?))?;
+            stream.set_write_timeout(Some(control.bounded_timeout(config.write_timeout)?))?;
+        } else {
+            stream.set_read_timeout(Some(config.read_timeout))?;
+            stream.set_write_timeout(Some(config.write_timeout))?;
+        }
         let tls_camouflage = secret.len() >= 21 && secret[0] == 0xee;
         let tls_read_buffer = if tls_camouflage {
-            perform_tls_camouflage_handshake(&mut stream, secret)?
+            perform_tls_camouflage_handshake(&mut stream, secret, control)?
         } else {
             Vec::new()
         };
@@ -284,7 +305,7 @@ impl TcpTransport {
             obfuscated: Some(obfuscated),
             tls_camouflage,
             tls_read_buffer,
-            attempt_control: None,
+            attempt_control: control.cloned(),
         })
     }
 
@@ -435,13 +456,20 @@ impl TcpTransport {
 fn perform_tls_camouflage_handshake(
     stream: &mut TcpStream,
     secret: &[u8],
+    control: Option<&NetworkAttemptControl>,
 ) -> Result<Vec<u8>, NetworkError> {
     let timestamp = i32::try_from(http_time_now().map_err(|_| NetworkError::InvalidSystemClock)?)
         .map_err(|_| NetworkError::InvalidSystemClock)?;
     let hello = prepare_tls_client_hello_with_entropy(secret, timestamp, &mut |output| {
         getrandom::getrandom(output).map_err(|_| TlsCamouflageError::RandomnessUnavailable)
     })?;
+    if let Some(control) = control {
+        stream.set_write_timeout(Some(control.remaining()?))?;
+    }
     stream.write_all(&hello.bytes)?;
+    if let Some(control) = control {
+        stream.set_write_timeout(Some(control.remaining()?))?;
+    }
     stream.flush()?;
 
     let mut incoming = Vec::with_capacity(DEFAULT_READ_CHUNK_BYTES);
@@ -450,6 +478,9 @@ fn perform_tls_camouflage_handshake(
             return Ok(incoming.split_off(consumed));
         }
         let mut chunk = [0_u8; DEFAULT_READ_CHUNK_BYTES];
+        if let Some(control) = control {
+            stream.set_read_timeout(Some(control.remaining()?))?;
+        }
         let count = stream.read(&mut chunk)?;
         if count == 0 {
             return Err(NetworkError::ConnectionClosed);
@@ -1163,11 +1194,14 @@ fn connect_directory_with_attempt(
         } else {
             *config
         };
-        match TcpTransport::connect_obfuscated(address, secret, protocol_dc.wire_id, &effective) {
-            Ok(mut transport) => {
-                if let Some(control) = control {
-                    transport.attach_attempt_control(control.clone())?;
-                }
+        match TcpTransport::connect_obfuscated_with_attempt(
+            address,
+            secret,
+            protocol_dc.wire_id,
+            &effective,
+            control,
+        ) {
+            Ok(transport) => {
                 return Ok((
                     ConnectedEndpoint {
                         dc_id: protocol_dc.directory_dc_id,
