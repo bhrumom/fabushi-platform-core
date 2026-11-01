@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use fabushi_telegram_network::{establish_auth_key, NetworkConfig, TcpTransport};
+use fabushi_telegram_network::{establish_auth_key, NetworkConfig, NetworkError, TcpTransport};
 use fabushi_telegram_protocol::{
     DcDirectory, ObfuscatedConnectionStart, PlaintextEnvelope, TransportFrameCodec, TransportMode,
 };
@@ -221,5 +221,53 @@ fn connect_directory_normalizes_temporary_id_only_for_the_protocol_wire() {
         connect_directory(&directory, 1_002, DcPurpose::Main, &NetworkConfig::default()).unwrap();
     assert_eq!(endpoint.dc_id, 1_002);
     transport.send_payload(&[0x41; 12]).unwrap();
+    server.join().unwrap();
+}
+
+
+#[test]
+fn abridged_shipping_send_keeps_quick_ack_request_bit_clear() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut initial = [0_u8; 1];
+        stream.read_exact(&mut initial).unwrap();
+        assert_eq!(initial, [0xef]);
+
+        let mut length = [0_u8; 1];
+        stream.read_exact(&mut length).unwrap();
+        assert_eq!(length[0] & 0x80, 0);
+        assert_eq!(length[0], 3);
+
+        let mut payload = [0_u8; 12];
+        stream.read_exact(&mut payload).unwrap();
+        assert_eq!(payload, [0x41; 12]);
+    });
+
+    let stream = TcpStream::connect(address).unwrap();
+    let mut transport = TcpTransport::from_stream(stream, TransportMode::Abridged);
+    transport.send_payload(&[0x41; 12]).unwrap();
+    server.join().unwrap();
+}
+
+#[test]
+fn unsolicited_abridged_quick_ack_fails_closed_without_correlation_owner() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut initial = [0_u8; 1];
+        stream.read_exact(&mut initial).unwrap();
+        assert_eq!(initial, [0xef]);
+        stream.write_all(&0x8123_4567_u32.to_be_bytes()).unwrap();
+    });
+
+    let stream = TcpStream::connect(address).unwrap();
+    let mut transport = TcpTransport::from_stream(stream, TransportMode::Abridged);
+    assert!(matches!(
+        transport.receive_payload(),
+        Err(NetworkError::UnexpectedQuickAck(0x8123_4567))
+    ));
     server.join().unwrap();
 }
