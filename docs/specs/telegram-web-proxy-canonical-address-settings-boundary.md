@@ -199,4 +199,12 @@ Initial source disposition. Executable validation intentionally remains not-run.
 | AC-1 | passed | This spec records exact provenance and vectors. |
 | AC-2 | passed | Live checkpoint inventory records the missing settings owner and IDNA dependency. |
 | AC-3 | passed | Deliberate no-production-delta avoids false ownership/equivalence. |
-| AC-4-AC-7 | pending | Await desktop bookkeeping and final source-compliance readback. |
+| AC-4 | passed | Desktop bookkeeping `a32d435e5363804d6637867a662c00bf661e9ae2` adds exactly one mapped/pending row; ledger blob `35537527b7120522b85eca89f67a236cc33c67f5`. |
+| AC-5 | passed | Existing bridge production remains `4c91f6e4e6b8d37d84afd40aae6af9fbbe7d80d4`; relay/network production remains `241cd8ec792070a8de8af9ec6ca5b317e34376d1`. |
+| AC-6 | passed | Desktop P0 `c35371d7119c8badfe69681bbb15da3710738a71`, source-closure `0172702a6e9220ed7ad47a3e8a3593d9c8c010a3`, evidence `683c5738869f7aeae61c1a74f463059d05fbe953`; coverage is 16202 total source entries / 112 responsibilities / 16172 unknown / 16145 unread / 0 omitted / 0 unmapped responsibilities. |
+| AC-7 | passed | Source review is complete for this exact boundary; responsibility remains mapped/pending, validation_status=not-run, accepted=false, with no executable evidence. |
+
+
+### Final source-level compliance note
+
+Desktop bookkeeping commit is `a32d435e5363804d6637867a662c00bf661e9ae2`. Exact Unicode/IDNA host normalization plus unified settings import/share lifecycle remains blocked for the reasons above; this is a deliberate no-production-delta result, not an implementation claim. No build, dependency resolution, lock regeneration, test, CI/status/check query, package, deployment, installation or runtime acceptance was performed.
