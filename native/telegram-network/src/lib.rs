@@ -106,6 +106,8 @@ pub enum NetworkError {
     InvalidSystemClock,
     #[error("Telegram closed the TCP connection")]
     ConnectionClosed,
+    #[error("Telegram returned an uncorrelated quick-ACK token 0x{0:08x}")]
+    UnexpectedQuickAck(u32),
     #[error("Telegram returned too many dh_gen_retry responses")]
     DhRetryLimit,
     #[error("operating system secure randomness is unavailable")]
@@ -205,8 +207,8 @@ impl TcpTransport {
         loop {
             if let Some(frame) = self.codec.decode(&self.read_buffer)? {
                 self.read_buffer.drain(..frame.consumed_bytes);
-                if frame.quick_ack_token.is_some() {
-                    continue;
+                if let Some(token) = frame.quick_ack_token {
+                    return Err(NetworkError::UnexpectedQuickAck(token));
                 }
                 return Ok(frame.payload);
             }
