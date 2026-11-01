@@ -1,10 +1,20 @@
+use aes::{
+    cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit},
+    Aes256,
+};
 use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 const DEFAULT_MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 const FULL_FRAME_OVERHEAD: usize = 12;
 const PADDED_INTERMEDIATE_PACKET_SIZE_MAX: usize = 0x01000000 * 4;
+const CONNECTION_START_PREFIX_SIZE: usize = 64;
+const CONNECTION_START_KEY_SIZE: usize = 32;
+const CONNECTION_START_IV_SIZE: usize = 16;
+const ABRIDGED_PROTOCOL_ID: u32 = 0xefef_efef;
+const PADDED_INTERMEDIATE_PROTOCOL_ID: u32 = 0xdddd_dddd;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -60,6 +70,202 @@ pub enum TransportError {
     QuickAckUnsupported,
     #[error("padded intermediate transport padding must contain 0-15 bytes")]
     InvalidPaddingLength,
+    #[error("invalid MTProto obfuscated transport secret length {0}")]
+    InvalidObfuscatedSecret(usize),
+    #[error("invalid MTProto direct-TCP connection-start nonce")]
+    InvalidConnectionStartNonce,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObfuscatedTransportSecret {
+    Plain,
+    Abridged([u8; 16]),
+    PaddedIntermediate([u8; 16]),
+}
+
+impl ObfuscatedTransportSecret {
+    pub fn parse(secret: &[u8]) -> Result<Self, TransportError> {
+        if secret.is_empty() {
+            return Ok(Self::Plain);
+        }
+        if secret.len() == 16 {
+            return Ok(Self::Abridged(secret.try_into().expect("sixteen bytes")));
+        }
+        if secret.len() == 17 && secret[0] == 0xdd {
+            return Ok(Self::PaddedIntermediate(
+                secret[1..17].try_into().expect("sixteen bytes"),
+            ));
+        }
+        if secret.len() >= 21 && secret[0] == 0xee {
+            return Ok(Self::PaddedIntermediate(
+                secret[1..17].try_into().expect("sixteen bytes"),
+            ));
+        }
+        Err(TransportError::InvalidObfuscatedSecret(secret.len()))
+    }
+
+    pub fn mode(&self) -> TransportMode {
+        match self {
+            Self::Plain | Self::Abridged(_) => TransportMode::Abridged,
+            Self::PaddedIntermediate(_) => TransportMode::PaddedIntermediate,
+        }
+    }
+
+    pub fn protocol_id(&self) -> u32 {
+        match self {
+            Self::Plain | Self::Abridged(_) => ABRIDGED_PROTOCOL_ID,
+            Self::PaddedIntermediate(_) => PADDED_INTERMEDIATE_PROTOCOL_ID,
+        }
+    }
+
+    fn derive_key(&self, source: &[u8; CONNECTION_START_KEY_SIZE]) -> [u8; 32] {
+        match self {
+            Self::Plain => *source,
+            Self::Abridged(secret) | Self::PaddedIntermediate(secret) => {
+                let mut digest = Sha256::new();
+                digest.update(source);
+                digest.update(secret);
+                digest.finalize().into()
+            }
+        }
+    }
+}
+
+pub fn is_good_direct_start_nonce(nonce: &[u8; CONNECTION_START_PREFIX_SIZE]) -> bool {
+    let first = u32::from_le_bytes(nonce[0..4].try_into().expect("four bytes"));
+    let second = u32::from_le_bytes(nonce[4..8].try_into().expect("four bytes"));
+    nonce[0] != 0xef
+        && !matches!(
+            first,
+            0x4441_4548
+                | 0x5453_4f50
+                | 0x2054_4547
+                | 0xeeee_eeee
+                | 0xdddd_dddd
+                | 0x0201_0316
+        )
+        && second != 0
+}
+
+struct AesCtrState {
+    cipher: Aes256,
+    counter: [u8; CONNECTION_START_IV_SIZE],
+    keystream: [u8; CONNECTION_START_IV_SIZE],
+    offset: usize,
+}
+
+impl AesCtrState {
+    fn new(key: &[u8; CONNECTION_START_KEY_SIZE], iv: &[u8; CONNECTION_START_IV_SIZE]) -> Self {
+        Self {
+            cipher: Aes256::new(GenericArray::from_slice(key)),
+            counter: *iv,
+            keystream: [0; CONNECTION_START_IV_SIZE],
+            offset: CONNECTION_START_IV_SIZE,
+        }
+    }
+
+    fn apply(&mut self, data: &mut [u8]) {
+        for byte in data {
+            if self.offset == CONNECTION_START_IV_SIZE {
+                let mut block = GenericArray::clone_from_slice(&self.counter);
+                self.cipher.encrypt_block(&mut block);
+                self.keystream.copy_from_slice(&block);
+                increment_ctr(&mut self.counter);
+                self.offset = 0;
+            }
+            *byte ^= self.keystream[self.offset];
+            self.offset += 1;
+        }
+    }
+}
+
+fn increment_ctr(counter: &mut [u8; CONNECTION_START_IV_SIZE]) {
+    for byte in counter.iter_mut().rev() {
+        let (next, overflow) = byte.overflowing_add(1);
+        *byte = next;
+        if !overflow {
+            break;
+        }
+    }
+}
+
+pub struct ObfuscatedConnectionStart {
+    prefix: [u8; CONNECTION_START_PREFIX_SIZE],
+    mode: TransportMode,
+    send: AesCtrState,
+    receive: AesCtrState,
+}
+
+impl ObfuscatedConnectionStart {
+    pub fn random(secret: &[u8], protocol_dc_id: i16) -> Result<Self, TransportError> {
+        loop {
+            let mut nonce = [0_u8; CONNECTION_START_PREFIX_SIZE];
+            getrandom::getrandom(&mut nonce).map_err(|_| TransportError::RandomnessUnavailable)?;
+            if is_good_direct_start_nonce(&nonce) {
+                return Self::from_nonce(secret, protocol_dc_id, nonce);
+            }
+        }
+    }
+
+    pub fn from_nonce(
+        secret: &[u8],
+        protocol_dc_id: i16,
+        mut nonce: [u8; CONNECTION_START_PREFIX_SIZE],
+    ) -> Result<Self, TransportError> {
+        if !is_good_direct_start_nonce(&nonce) {
+            return Err(TransportError::InvalidConnectionStartNonce);
+        }
+        let secret = ObfuscatedTransportSecret::parse(secret)?;
+
+        let send_source: [u8; CONNECTION_START_KEY_SIZE] =
+            nonce[8..40].try_into().expect("thirty-two bytes");
+        let send_iv: [u8; CONNECTION_START_IV_SIZE] =
+            nonce[40..56].try_into().expect("sixteen bytes");
+        let send_key = secret.derive_key(&send_source);
+
+        let mut reversed = [0_u8; CONNECTION_START_KEY_SIZE + CONNECTION_START_IV_SIZE];
+        reversed.copy_from_slice(&nonce[8..56]);
+        reversed.reverse();
+        let receive_source: [u8; CONNECTION_START_KEY_SIZE] =
+            reversed[..32].try_into().expect("thirty-two bytes");
+        let receive_iv: [u8; CONNECTION_START_IV_SIZE] =
+            reversed[32..48].try_into().expect("sixteen bytes");
+        let receive_key = secret.derive_key(&receive_source);
+
+        nonce[56..60].copy_from_slice(&secret.protocol_id().to_le_bytes());
+        nonce[60..62].copy_from_slice(&protocol_dc_id.to_le_bytes());
+
+        let mut send = AesCtrState::new(&send_key, &send_iv);
+        let receive = AesCtrState::new(&receive_key, &receive_iv);
+        let mut encrypted_nonce = nonce;
+        send.apply(&mut encrypted_nonce);
+
+        let mut prefix = nonce;
+        prefix[56..64].copy_from_slice(&encrypted_nonce[56..64]);
+
+        Ok(Self {
+            prefix,
+            mode: secret.mode(),
+            send,
+            receive,
+        })
+    }
+
+    pub fn prefix(&self) -> &[u8; CONNECTION_START_PREFIX_SIZE] {
+        &self.prefix
+    }
+
+    pub fn mode(&self) -> TransportMode {
+        self.mode
+    }
+
+    pub fn encrypt_outbound(&mut self, data: &mut [u8]) {
+        self.send.apply(data);
+    }
+
+    pub fn decrypt_inbound(&mut self, data: &mut [u8]) {
+        self.receive.apply(data);
+    }
 }
 
 #[derive(Debug, Clone)]

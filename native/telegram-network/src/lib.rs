@@ -13,8 +13,8 @@ use std::{
 use fabushi_telegram_protocol::{
     decrypt_message, encrypt_message, AuthKey, AuthKeyHandshake, CryptoDirection, CryptoError,
     DcDirectory, DcError, DcPurpose, DhGenAction, EncryptedEnvelope, HandshakeError,
-    MessageIdError, MessageIdGuard, PlainMessage, PlaintextEnvelope, SequenceError,
-    SessionSequence, TransportError, TransportFrameCodec, TransportMode,
+    MessageIdError, MessageIdGuard, ObfuscatedConnectionStart, PlainMessage, PlaintextEnvelope,
+    SequenceError, SessionSequence, TransportError, TransportFrameCodec, TransportMode,
 };
 use thiserror::Error;
 use zeroize::Zeroizing;
@@ -126,6 +126,8 @@ pub enum NetworkError {
     StateReconciliationLimit { request_message_id: i64 },
     #[error("Telegram did not return an RPC result before the message limit")]
     RpcTimeout,
+    #[error("Telegram protocol data center id {0} cannot be represented on the wire")]
+    InvalidProtocolDcId(i32),
 }
 
 pub struct TcpTransport {
@@ -133,6 +135,7 @@ pub struct TcpTransport {
     codec: TransportFrameCodec,
     read_buffer: Vec<u8>,
     initialized: bool,
+    obfuscated: Option<ObfuscatedConnectionStart>,
 }
 
 impl TcpTransport {
@@ -148,21 +151,50 @@ impl TcpTransport {
         Ok(Self::from_stream(stream, mode))
     }
 
+    pub fn connect_obfuscated(
+        address: SocketAddr,
+        secret: &[u8],
+        protocol_dc_id: i16,
+        config: &NetworkConfig,
+    ) -> Result<Self, NetworkError> {
+        let stream = TcpStream::connect_timeout(&address, config.connect_timeout)?;
+        stream.set_nodelay(true)?;
+        stream.set_read_timeout(Some(config.read_timeout))?;
+        stream.set_write_timeout(Some(config.write_timeout))?;
+        let obfuscated = ObfuscatedConnectionStart::random(secret, protocol_dc_id)?;
+        let mode = obfuscated.mode();
+        Ok(Self {
+            stream,
+            codec: TransportFrameCodec::new(mode),
+            read_buffer: Vec::with_capacity(DEFAULT_READ_CHUNK_BYTES),
+            initialized: false,
+            obfuscated: Some(obfuscated),
+        })
+    }
+
     pub fn from_stream(stream: TcpStream, mode: TransportMode) -> Self {
         Self {
             stream,
             codec: TransportFrameCodec::new(mode),
             read_buffer: Vec::with_capacity(DEFAULT_READ_CHUNK_BYTES),
             initialized: false,
+            obfuscated: None,
         }
     }
 
     pub fn send_payload(&mut self, payload: &[u8]) -> Result<(), NetworkError> {
         if !self.initialized {
-            self.stream.write_all(self.codec.initial_header())?;
+            if let Some(obfuscated) = self.obfuscated.as_ref() {
+                self.stream.write_all(obfuscated.prefix())?;
+            } else {
+                self.stream.write_all(self.codec.initial_header())?;
+            }
             self.initialized = true;
         }
-        let frame = self.codec.encode(payload)?;
+        let mut frame = self.codec.encode(payload)?;
+        if let Some(obfuscated) = self.obfuscated.as_mut() {
+            obfuscated.encrypt_outbound(&mut frame);
+        }
         self.stream.write_all(&frame)?;
         self.stream.flush()?;
         Ok(())
@@ -182,6 +214,9 @@ impl TcpTransport {
             let count = self.stream.read(&mut chunk)?;
             if count == 0 {
                 return Err(NetworkError::ConnectionClosed);
+            }
+            if let Some(obfuscated) = self.obfuscated.as_mut() {
+                obfuscated.decrypt_inbound(&mut chunk[..count]);
             }
             self.read_buffer.extend_from_slice(&chunk[..count]);
         }
@@ -847,10 +882,12 @@ pub fn connect_directory(
     config: &NetworkConfig,
 ) -> Result<(ConnectedEndpoint, TcpTransport), NetworkError> {
     let candidates = directory.candidates(dc_id, purpose, config.prefer_ipv6)?;
+    let protocol_dc_id = protocol_dc_id(directory, dc_id)?;
     let mut attempts = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         let address = SocketAddr::new(candidate.ip_address, candidate.port);
-        match TcpTransport::connect(address, config.transport_mode, config) {
+        let secret = candidate.secret.as_deref().unwrap_or(&[]);
+        match TcpTransport::connect_obfuscated(address, secret, protocol_dc_id, config) {
             Ok(transport) => {
                 return Ok((ConnectedEndpoint { dc_id, address }, transport));
             }
@@ -858,6 +895,19 @@ pub fn connect_directory(
         }
     }
     Err(NetworkError::ConnectFailed { attempts })
+}
+
+fn protocol_dc_id(directory: &DcDirectory, dc_id: i32) -> Result<i16, NetworkError> {
+    let value = if directory.test_mode() {
+        dc_id
+            .checked_add(10_000)
+            .ok_or(NetworkError::InvalidProtocolDcId(dc_id))?
+    } else {
+        dc_id
+    };
+    value
+        .try_into()
+        .map_err(|_| NetworkError::InvalidProtocolDcId(value))
 }
 
 pub fn resume_auth_key(

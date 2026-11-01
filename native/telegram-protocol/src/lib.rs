@@ -121,7 +121,10 @@ pub use srp::{
     PasswordSrpProof, SrpError, INPUT_CHECK_PASSWORD_SRP_CONSTRUCTOR,
 };
 pub use tl::{TlError, TlReader, TlWriter, BOOL_FALSE_CONSTRUCTOR, BOOL_TRUE_CONSTRUCTOR};
-pub use transport::{DecodedFrame, TransportError, TransportFrameCodec, TransportMode};
+pub use transport::{
+    is_good_direct_start_nonce, DecodedFrame, ObfuscatedConnectionStart,
+    ObfuscatedTransportSecret, TransportError, TransportFrameCodec, TransportMode,
+};
 pub use updates::{
     build_updates_get_difference, build_updates_get_state, parse_new_session_created,
     parse_terminal_difference, parse_update_state, DifferenceRequest, NewSessionCreated,
