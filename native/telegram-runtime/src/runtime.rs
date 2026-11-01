@@ -130,10 +130,19 @@ struct OwnedSession {
     session: EstablishedSession,
 }
 
+#[derive(Clone)]
+struct AuthMaterial {
+    test_mode: bool,
+    server_salt: i64,
+    server_time: i32,
+    auth_key: AuthKey,
+}
+
 #[derive(Default)]
 struct SessionOwner {
     primary_logical_dc_id: Option<i32>,
     sessions: BTreeMap<i32, OwnedSession>,
+    auth_materials: BTreeMap<i32, AuthMaterial>,
 }
 
 impl SessionOwner {
@@ -144,11 +153,21 @@ impl SessionOwner {
 
     fn take_primary(&mut self) -> Option<EstablishedSession> {
         let logical_dc_id = self.primary_logical_dc_id?;
+        self.take(logical_dc_id)
+    }
+
+    fn take(&mut self, logical_dc_id: i32) -> Option<EstablishedSession> {
         self.sessions.remove(&logical_dc_id).map(|owned| owned.session)
     }
 
-    fn put_primary(&mut self, session: EstablishedSession) -> Result<(), RuntimeError> {
-        let route = SessionRoute::new(session.endpoint.dc_id)?;
+    fn put_primary(
+        &mut self,
+        session: EstablishedSession,
+        test_mode: bool,
+    ) -> Result<(), RuntimeError> {
+        let logical_dc_id = session.endpoint.dc_id;
+        self.remember_auth_material(logical_dc_id, test_mode, &session)?;
+        let route = SessionRoute::new(logical_dc_id)?;
         self.primary_logical_dc_id = Some(route.logical_dc_id);
         self.sessions.insert(
             route.logical_dc_id,
@@ -158,6 +177,78 @@ impl SessionOwner {
             },
         );
         Ok(())
+    }
+
+    fn seed_persisted(&mut self, state: &PersistedTransportState) -> Result<(), RuntimeError> {
+        let route = SessionRoute::new(state.dc_id)?;
+        let auth_key = AuthKey::from_slice(&state.auth_key)
+            .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
+        self.insert_auth_material(
+            route,
+            AuthMaterial {
+                test_mode: state.test_mode,
+                server_salt: state.server_salt,
+                server_time: state.server_time,
+                auth_key,
+            },
+        )?;
+        if self.primary_logical_dc_id.is_none() {
+            self.primary_logical_dc_id = Some(route.logical_dc_id);
+        }
+        Ok(())
+    }
+
+    fn remember_auth_material(
+        &mut self,
+        logical_dc_id: i32,
+        test_mode: bool,
+        session: &EstablishedSession,
+    ) -> Result<(), RuntimeError> {
+        let route = SessionRoute::new(logical_dc_id)?;
+        self.insert_auth_material(
+            route,
+            AuthMaterial {
+                test_mode,
+                server_salt: session.server_salt,
+                server_time: session.server_time,
+                auth_key: session.auth_key.clone(),
+            },
+        )
+    }
+
+    fn insert_auth_material(
+        &mut self,
+        route: SessionRoute,
+        material: AuthMaterial,
+    ) -> Result<(), RuntimeError> {
+        if let Some(existing) = self.auth_materials.get(&route.auth_dc_id) {
+            if existing.test_mode != material.test_mode {
+                return Err(RuntimeError::Protocol(format!(
+                    "auth material environment mismatch for data center {}",
+                    route.auth_dc_id
+                )));
+            }
+        }
+        self.auth_materials.insert(route.auth_dc_id, material);
+        Ok(())
+    }
+
+    fn auth_material(
+        &self,
+        logical_dc_id: i32,
+        test_mode: bool,
+    ) -> Result<Option<AuthMaterial>, RuntimeError> {
+        let route = SessionRoute::new(logical_dc_id)?;
+        let Some(material) = self.auth_materials.get(&route.auth_dc_id) else {
+            return Ok(None);
+        };
+        if material.test_mode != test_mode {
+            return Err(RuntimeError::Protocol(format!(
+                "auth material environment mismatch for data center {}",
+                route.auth_dc_id
+            )));
+        }
+        Ok(Some(material.clone()))
     }
 
     fn remove(&mut self, logical_dc_id: i32) -> Option<EstablishedSession> {
@@ -770,22 +861,76 @@ fn take_transport(client_id: u64) -> Result<EstablishedSession, RuntimeError> {
         if let Some(session) = client.sessions.take_primary() {
             return Ok(session);
         }
-        client.persisted_transport.clone()
+        let resume = client
+            .persisted_transport
+            .clone()
+            .ok_or(RuntimeError::TransportNotConnected)?;
+        client.sessions.seed_persisted(&resume)?;
+        resume
     };
-    let resume = resume.ok_or(RuntimeError::TransportNotConnected)?;
     let directory = DcDirectory::telegram_defaults(resume.test_mode, resume.dc_id)
         .map_err(|error| RuntimeError::Network(error.to_string()))?;
-    let auth_key = AuthKey::from_slice(&resume.auth_key)
-        .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
-    resume_auth_key(
-        &directory,
+    open_logical_session(
+        client_id,
         resume.dc_id,
-        auth_key,
-        resume.server_salt,
-        resume.server_time,
+        &directory,
         &NetworkConfig::default(),
     )
-    .map_err(|error| RuntimeError::Network(error.to_string()))
+}
+
+fn open_logical_session(
+    client_id: u64,
+    logical_dc_id: i32,
+    directory: &DcDirectory,
+    config: &NetworkConfig,
+) -> Result<EstablishedSession, RuntimeError> {
+    let material = {
+        let mut clients = CLIENTS
+            .lock()
+            .map_err(|_| RuntimeError::RegistryUnavailable)?;
+        let client = clients
+            .get_mut(&client_id)
+            .ok_or(RuntimeError::ClientNotFound(client_id))?;
+        if let Some(session) = client.sessions.take(logical_dc_id) {
+            return Ok(session);
+        }
+        if let Some(persisted) = client.persisted_transport.clone() {
+            let persisted_route = SessionRoute::new(persisted.dc_id)?;
+            let requested_route = SessionRoute::new(logical_dc_id)?;
+            if persisted_route.auth_dc_id == requested_route.auth_dc_id {
+                client.sessions.seed_persisted(&persisted)?;
+            }
+        }
+        client
+            .sessions
+            .auth_material(logical_dc_id, directory.test_mode())?
+    };
+
+    let session = if let Some(material) = material {
+        resume_auth_key(
+            directory,
+            logical_dc_id,
+            material.auth_key,
+            material.server_salt,
+            material.server_time,
+            config,
+        )
+        .map_err(|error| RuntimeError::Network(error.to_string()))?
+    } else {
+        establish_auth_key(directory, logical_dc_id, config)
+            .map_err(|error| RuntimeError::Network(error.to_string()))?
+    };
+
+    let mut clients = CLIENTS
+        .lock()
+        .map_err(|_| RuntimeError::RegistryUnavailable)?;
+    let client = clients
+        .get_mut(&client_id)
+        .ok_or(RuntimeError::ClientNotFound(client_id))?;
+    client
+        .sessions
+        .remember_auth_material(logical_dc_id, directory.test_mode(), &session)?;
+    Ok(session)
 }
 
 fn delivery_state(delivery: &SentCodeDelivery) -> (CodeDeliveryType, u8) {
@@ -1571,7 +1716,7 @@ fn put_transport(
         auth_key: session.auth_key.as_bytes().to_vec(),
     });
     persist_transport_state(client)?;
-    client.sessions.put_primary(session)?;
+    client.sessions.put_primary(session, test_mode)?;
     Ok(())
 }
 
@@ -1635,6 +1780,64 @@ mod authorization_restore_contract_tests {
         assert!(owner.primary().is_none());
         assert!(owner.route(2).is_none());
         assert!(owner.route(1002).is_none());
+    }
+
+    #[test]
+    fn persisted_primary_auth_material_is_shared_with_temporary_logical_route() {
+        let mut owner = SessionOwner::default();
+        let persisted = PersistedTransportState {
+            dc_id: 2,
+            test_mode: false,
+            server_salt: 17,
+            server_time: 23,
+            auth_key: vec![7_u8; 256],
+        };
+
+        owner.seed_persisted(&persisted).unwrap();
+        let regular = owner.auth_material(2, false).unwrap().unwrap();
+        let temporary = owner.auth_material(1002, false).unwrap().unwrap();
+
+        assert_eq!(regular.auth_key.id(), temporary.auth_key.id());
+        assert_eq!(regular.server_salt, temporary.server_salt);
+        assert_eq!(regular.server_time, temporary.server_time);
+        assert_eq!(owner.primary_logical_dc_id, Some(2));
+        assert_eq!(owner.auth_materials.len(), 1);
+    }
+
+    #[test]
+    fn removing_temporary_logical_session_retains_real_dc_auth_material() {
+        let mut owner = SessionOwner::default();
+        let persisted = PersistedTransportState {
+            dc_id: 2,
+            test_mode: false,
+            server_salt: 31,
+            server_time: 37,
+            auth_key: vec![9_u8; 256],
+        };
+
+        owner.seed_persisted(&persisted).unwrap();
+        assert!(owner.remove(1002).is_none());
+        assert!(owner.auth_material(1002, false).unwrap().is_some());
+        assert_eq!(owner.auth_materials.len(), 1);
+    }
+
+    #[test]
+    fn auth_material_environment_mismatch_fails_closed() {
+        let mut owner = SessionOwner::default();
+        let persisted = PersistedTransportState {
+            dc_id: 2,
+            test_mode: false,
+            server_salt: 41,
+            server_time: 43,
+            auth_key: vec![5_u8; 256],
+        };
+
+        owner.seed_persisted(&persisted).unwrap();
+        let error = owner.auth_material(1002, true).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("auth material environment mismatch for data center 2"));
     }
 
     #[test]
