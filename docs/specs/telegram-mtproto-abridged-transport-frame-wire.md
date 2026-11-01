@@ -54,3 +54,16 @@ Source-level closure requires:
 - no GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E execution, package, deployment, installation, or runtime acceptance is performed.
 
 This slice is source-level wire responsibility closure only. It is not executable verification, candidate readiness, release acceptance, or broader connection-transport closure.
+
+
+## Round 104 implementation record
+
+Source-level implementation is committed at `97c38a1bde61edc53ed9d888ffb3cb541e4ff68f`.
+
+- Canonical production `native/telegram-protocol/src/transport.rs@7f981b96f2f8a17823ba9c84bf2e2324d408be31` adds only the fixed-U fail-closed rejection of an extended abridged length whose decoded word count is below 127.
+- Canonical shipping `native/telegram-network/src/lib.rs@54f509474391bb5118ba4678ba5c566ab3e74ec8` is unchanged and still routes socket send/receive through `TransportFrameCodec::encode/decode`; default transport remains `Abridged`.
+- Canonical authored-only focused contract is `native/telegram-protocol/tests/protocol_contract.rs@00eff72062ab8d3285234428bd09be3fccb27993`; the desktop tracked mirror is byte-identical at commit `f2405ce2ea29785fbc218840d3e9bf1ff4048576`.
+- Desktop unique-ledger/P0/source-closure/evidence bookkeeping is committed at `505eeb190d50a90d955be27f432b3a60f7cf5757`, recording `implemented / coverage_disposition=rewritten / validation_status=not-run / accepted=false` and coverage `responsibilities_total=105, unknown=16172, unread=16145, omitted=0, unmapped_responsibilities=0`.
+- No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E execution, GitHub Actions/status/check query, package, deployment, installation, or runtime acceptance was performed.
+
+Connection-start obfuscation/AES-CTR prefix, Version1/VersionD secret handling, quick-ACK lifecycle, auth-key binding/persistence/expiry/renewal, broader connection scheduling/racing/send retry, arbitrary request histories, gzip, complete difference/differenceSlice decoding/application, broader fixed-U source/legal closure, Stage-B executable evidence, and independent release ACCEPT remain outside this source-level closure.
