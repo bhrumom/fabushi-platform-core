@@ -4777,3 +4777,26 @@ fn special_config_carrier_response_adapters_emit_compact_payload_only() {
         .is_empty()
     );
 }
+
+
+#[test]
+fn http_date_response_parser_preserves_fixed_u_validity_boundary() {
+    use fabushi_telegram_protocol::parse_http_date_unix_seconds;
+
+    assert_eq!(
+        parse_http_date_unix_seconds("Wed, 10 Jul 2019 14:33:38 GMT"),
+        Some(1_562_769_218)
+    );
+    assert_eq!(
+        parse_http_date_unix_seconds("x Wed, 10 Jul 2019 14:33:38 GMT y"),
+        Some(1_562_769_218)
+    );
+    assert_eq!(
+        parse_http_date_unix_seconds("Wed, 31 Apr 2019 14:33:38 GMT"),
+        None
+    );
+    assert_eq!(
+        parse_http_date_unix_seconds("Wed, 10 Foo 2019 14:33:38 GMT"),
+        None
+    );
+}

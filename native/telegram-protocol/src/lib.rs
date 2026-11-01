@@ -112,7 +112,8 @@ pub use handshake::{
 };
 pub use request::{ProtocolRequest, RequestId, RequestSequencer};
 pub use response_normalization::{
-    normalize_dns_response, normalize_special_config_response, parse_dns_response, DnsEntry,
+    normalize_dns_response, normalize_special_config_response, parse_dns_response,
+    parse_http_date_unix_seconds, DnsEntry,
     NormalizedDnsResponse, SpecialConfigResponseKind,
 };
 pub use schema::{
