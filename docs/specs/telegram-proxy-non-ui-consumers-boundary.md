@@ -180,3 +180,65 @@ Final source-review disposition:
 | AC-8 | passed | Stage-A zero-CI/no-execution constraint was maintained. |
 
 No production source blob changed in platform-core or desktop for this boundary. No build, test, validator, dependency resolution, Actions/status/check query, package, deployment, installation or runtime acceptance was performed.
+
+
+## 12. Round 100 implementation amendment — selected-proxy carrier projection
+
+Status: Stage A implementation authorized; executable validation remains not-run.
+
+The blocker recorded above has changed. Desktop now has one canonical source-neutral ProductSettingsOwner v2 and one unified Settings UI/edit path. The carrier consumer may therefore be implemented without creating a second settings owner, provided the runtime receives only a transient projection after ProductSettingsOwner persistence.
+
+### 12.1 Source facts added in this round
+
+The fixed-U selected-proxy chain is additionally pinned to:
+
+- `Telegram/SourceFiles/core/application.cpp@7172206f5c1e540e19c90798e9a9e5721276cc53`: `Application::setCurrentProxy` performs selected+mode mutation, refreshes the global proxy projection, emits `proxyChanges`, then emits `connectionTypeChanges`.
+- `Telegram/SourceFiles/main/main_account.cpp@2721c7ac12effe454d398610d26d638fadaa1f68`: proxy changes restart MTProto sessions; a changed MTProto/Web host+port also reinitializes the main connection.
+- `Telegram/SourceFiles/mtproto/session.cpp@40d7048c3057c7c5523b786048670524c8bebe4c`: `Session::refreshOptions` projects only the enabled selected proxy plus IPv6 preference into live session options.
+- `Telegram/SourceFiles/mtproto/session_private.cpp@13cbc76ec723386027b5b4dcac79999b791c4614`: MTProto/Web selection forces the TCP path and publishes the original proxy host+port in `inputClientProxy`.
+- `Telegram/SourceFiles/mtproto/connection_tcp.cpp@d721a9058e1885d2964ded55bd4e4c7c2ce9e381`: MTProto selection connects to the proxy host+port and uses the selected proxy secret while retaining the protocol DC id; Web selection has a separate WebProxySocket carrier.
+- `Telegram/SourceFiles/mtproto/connection_abstract.cpp@3baabf3f72c7c7edba3151814681fbf167a5ca0a` and `connection_resolving.cpp@d319e632655bbfe28956c8ced981a5cdf0299d1d`: custom resolution wraps SOCKS5/MTProto hostnames, races direct no-proxy DoH requests, tries resolved IPs, and promotes a successful IP only in transient resolution order.
+- `Telegram/SourceFiles/mtproto/mtproto_proxy_data.cpp@f9748fcb6358dd8ce7429536ec2b999cb2a989ef`: `tryCustomResolve()` is true only for SOCKS5/MTProto non-IP hosts; `resolvedIPs` / `resolvedExpireAt` are not durable proxy fields.
+
+### 12.2 Target ownership and control flow
+
+The implementation contract is:
+
+`ProductSettingsOwner persist -> transient selected-proxy projection -> existing RuntimeClient -> existing telegram-network carrier`.
+
+Requirements for this projection:
+
+1. ProductSettingsOwner remains the only durable owner of mode, selected/list, IPv6 preference, credentials and rotation settings.
+2. RuntimeClient may retain only a transient carrier projection and transient DNS observations. It must not write a second settings file or provider-private settings record.
+3. An applied projection change invalidates/cancels live network sessions/owned requests so the next session is opened from the new projection while reusable auth material remains owned by the existing SessionOwner.
+4. System/Disabled projects direct transport. Enabled without a selected proxy fails closed; it must never silently fall back to direct transport.
+5. The existing native carrier in this round implements the MTProto-proxy route: connect to the selected proxy address, use the selected MTProto secret, retain the destination protocol DC id, and use the source-defined connection-start/TLS-camouflage machinery already owned by telegram-network.
+6. SOCKS5, HTTP and Web selections must fail closed at this carrier boundary until their already-separated carrier responsibilities are implemented. In particular, an enabled unsupported proxy must not leak traffic through a direct Telegram connection.
+7. MTProto proxy hostnames use the already-owned direct no-proxy DomainResolver request/response normalization, 800 ms staggered race and source-bounded TTL. Resolved IP order and expiry are transient only.
+8. The good resolved IP may be promoted in the transient runtime/network projection after a successful connection. No durable Settings write is required because fixed-U serializes neither resolved IPs nor expiry.
+9. IPv6 preference is projected into the existing NetworkConfig from canonical Settings; it does not become independently persisted by RuntimeClient.
+10. No proxy secret may appear in logs, status payloads or error strings.
+
+### 12.3 Publication contract
+
+Desktop publication must occur after ProductSettingsOwner persistence for every mutation that can change the active carrier projection: mode, selected proxy or IPv6 preference. Restored product Settings must also be projected into the existing process-lifetime TelegramClientLease before that lease is used for network work. The existing `proxyEnabled -> telegram.refreshSpecialConfig` suppression publication remains part of the same post-persistence publication and is not replaced by a second settings owner.
+
+### 12.4 Authored contracts for this amendment
+
+The implementation must author, but Stage A must not execute, contracts proving:
+
+- System/Disabled yields direct NetworkConfig and Enabled+missing-selected fails closed.
+- an enabled MTProto projection maps host/port/secret/IPv6 to the existing carrier without persisting it;
+- unsupported enabled SOCKS5/HTTP/Web projections fail closed rather than direct-connect;
+- a hostname MTProto proxy uses normalized DomainResolver attempts, accepts source-bounded TTL and filters response data to matching IP families;
+- a successful resolved proxy IP is promoted only in transient resolution order;
+- applying a changed projection invalidates live sessions/owned requests while preserving reusable auth material and persisted auth-key state;
+- startup restoration publishes the current ProductSettingsOwner projection before normal host use;
+- mode/selected/IPv6 mutations publish after persistence;
+- proxy secrets are absent from response/status/error projections;
+- the existing special-config suppression path still receives the same authoritative enabled boolean;
+- all new APIs remain source-neutral carrier/settings projections and no Telegram-specific settings/store/runtime owner is introduced.
+
+### 12.5 Round 100 acceptance
+
+This responsibility may advance to `implemented / validation_status=not-run / accepted=false` only when the platform network/runtime implementation, desktop mirrored production sources, ProductSettingsOwner publication, TelegramClientLease adapter and the authored contracts are all committed into the existing shipping composition. Stage B executable validation remains the only validation blocker for the implemented MTProto selected-proxy/custom-resolution slice; unsupported proxy carrier types remain explicitly fail-closed under their separate carrier responsibilities.
