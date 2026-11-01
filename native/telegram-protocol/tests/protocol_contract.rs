@@ -196,14 +196,50 @@ fn api_initialization_and_phone_auth_requests_match_pinned_layer() {
 }
 
 #[test]
-fn message_acknowledgement_encodes_server_ids_as_a_tl_vector() {
-    let request = build_msgs_ack(&[101, 103]).unwrap();
-    let mut reader = TlReader::new(&request);
+fn msgs_ack_request_wire_is_exact_and_vector_bounded() {
+    let empty = build_msgs_ack(&[]).unwrap();
+    let mut empty_expected = Vec::new();
+    empty_expected.extend_from_slice(&MSGS_ACK_CONSTRUCTOR.to_le_bytes());
+    empty_expected.extend_from_slice(&0x1cb5_c415_u32.to_le_bytes());
+    empty_expected.extend_from_slice(&0_i32.to_le_bytes());
+    assert_eq!(empty, empty_expected);
+
+    let shipping_id = 0x0102_0304_0506_0708_i64;
+    let one = build_msgs_ack(&[shipping_id]).unwrap();
+    let mut one_expected = Vec::new();
+    one_expected.extend_from_slice(&MSGS_ACK_CONSTRUCTOR.to_le_bytes());
+    one_expected.extend_from_slice(&0x1cb5_c415_u32.to_le_bytes());
+    one_expected.extend_from_slice(&1_i32.to_le_bytes());
+    one_expected.extend_from_slice(&shipping_id.to_le_bytes());
+    assert_eq!(one, one_expected);
+
+    let ids = [i64::MIN, -1, 0, 101, 103, i64::MAX];
+    let encoded = build_msgs_ack(&ids).unwrap();
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&MSGS_ACK_CONSTRUCTOR.to_le_bytes());
+    expected.extend_from_slice(&0x1cb5_c415_u32.to_le_bytes());
+    expected.extend_from_slice(&(ids.len() as i32).to_le_bytes());
+    for id in ids {
+        expected.extend_from_slice(&id.to_le_bytes());
+    }
+    assert_eq!(encoded, expected);
+
+    let mut reader = TlReader::new(&encoded);
     assert_eq!(reader.read_u32().unwrap(), MSGS_ACK_CONSTRUCTOR);
-    assert_eq!(reader.read_vector_length().unwrap(), 2);
-    assert_eq!(reader.read_i64().unwrap(), 101);
-    assert_eq!(reader.read_i64().unwrap(), 103);
+    assert_eq!(reader.read_vector_length().unwrap(), ids.len());
+    for id in ids {
+        assert_eq!(reader.read_i64().unwrap(), id);
+    }
     assert!(reader.is_finished());
+
+    let mut overflow = TlWriter::new();
+    assert_eq!(
+        overflow
+            .write_vector_length(i32::MAX as usize + 1)
+            .unwrap_err(),
+        TlError::LengthOutOfRange
+    );
+    assert!(overflow.as_slice().is_empty());
 }
 
 #[test]
