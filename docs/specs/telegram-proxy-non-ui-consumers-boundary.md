@@ -146,3 +146,37 @@ Contract set `CONTRACT-TDRP-PROXY-NON-UI-CONSUMERS-001`:
 - platform-core: `bhrumom/fabushi-platform-core checkpoint/tdrp-telegram-auth-lifecycle-7457eb1c-r16@1cff6f7176de9d879576e0630503626636240622`
 
 No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, dependency resolution, lock regeneration, unit/contract/integration/E2E execution, package, deployment, installation or runtime acceptance is part of this source-review closure.
+
+
+## 11. Final source-level compliance record
+
+Desktop bookkeeping has now been written through the existing single migration ledger line:
+
+- desktop bookkeeping commit: `a23452a00e9c4d395f3f97bf74ec27fd82747fb2`
+- parity-ledger blob: `ca7fb45076804a0905d48ad1e3605e922310f33a`
+- P0 source-closure/ledger blob: `85825d4c00857ad76abc36998e087c99afacd98f`
+- source-closure blob: `c3a83028db52a1ffe25206b72512699000f2e57c`
+- round114 evidence blob: `a7e318f8aa33e81fb953fb3d143cd4db43ef9588`
+- coverage: `source_entries_total=16202, responsibilities_total=116, unknown=16172, unread=16145, omitted=0, unmapped_responsibilities=0`
+
+The desktop ledger contains exactly three new responsibilities for this boundary:
+
+- `TDRP-R9-PROXY-EXTERNAL-MUTATION-CONSUMER-001`
+- `TDRP-R9-PROXY-CALL-CONSUMER-001`
+- `TDRP-R9-PROXY-MTPROTO-CONSUMER-001`
+
+All three are `mapped / pending / validation_status=not-run / accepted=false`. This is intentional: source semantics and owner boundaries are closed for this slice, but production implementation remains blocked by the missing canonical Fabushi Settings/application owner and, for MTProto runtime consumption, the absence of a shipping selectable proxy/config-acquisition consumer. The call-proxy consumer specifically requires no production delta because fixed-U `supportsCalls()` is unconditionally false.
+
+Final source-review disposition:
+
+| Requirement / AC | Status | Evidence / reason |
+| --- | --- | --- |
+| R1-R8 | passed | Fixed-U source and current-owner review recorded in this spec and round114 evidence. |
+| R9 production implementation | blocked | No canonical product Settings owner; no shipping selected-proxy/config-loader carrier consumer; fixed-U call proxy branch is unreachable. |
+| R10 executable validation | not-run | Stage A deliberately prohibits executable validation. |
+| AC-1-AC-5 | passed | Exact source semantics and owner split are recorded without a parallel state system. |
+| AC-6 | passed | Three unique desktop ledger rows exist at the bookkeeping identities above. |
+| AC-7 | passed | Desktop P0/source-closure/evidence are synchronized and remotely persisted. |
+| AC-8 | passed | Stage-A zero-CI/no-execution constraint was maintained. |
+
+No production source blob changed in platform-core or desktop for this boundary. No build, test, validator, dependency resolution, Actions/status/check query, package, deployment, installation or runtime acceptance was performed.
