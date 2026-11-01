@@ -85,3 +85,19 @@ Future contracts, only after the missing lifecycle exists, must cover secondary 
 - AC-5: contracts are authored but not executed.
 - AC-6: special-config remains pending for request cancellation/6000 ms/dc_options application and the separately blocked HTTP carrier.
 - AC-7: no Actions/status/check query or executable validation is performed.
+
+
+## 10. Round 90 source-compliance record
+
+| Requirement / AC | Source-level status | Evidence |
+| --- | --- | --- |
+| AC-1 / fixed-U generic lifecycle | passed for source review | mtp_instance.cpp@d25fe3b72298fab371854f80186ee8e4777ea087 pins the general _sessions/getSession/startSession/killSession lifecycle; getDcById maps temporary logical ids to real Dcenter/auth identity. config_loader.cpp@5d07404ba07223016c6728b986dcba10628d7194 and mtproto_dc_options.cpp@d8499fc1df2ed7fdb88da687a04b824d243ff49a prove ordinary config enumeration is another shifted-session consumer. |
+| AC-2 / unique existing owner | passed | RuntimeClient remains the sole account-bound runtime owner. No second runtime/provider/account/directory/session registry was added. |
+| AC-3 / shipping primary migration | implemented, validation not run | platform implementation commit 8c57554ade7ad4bc75e3692a0e5dc57099162206 changes runtime.rs to d531db9176a09e973690b3a44da52208e09e33b5. Existing take_transport/put_transport and all current RPC paths now delegate to RuntimeClient.sessions. No public ABI, manifest, lock or storage-schema delta was made. |
+| AC-4 / logical versus auth DC | implemented, validation not run | SessionRoute uses the existing derive_protocol_dc_identity(..., Regular) rule; authored contracts pin logical 2 -> auth 2 and logical 1002 -> auth 2 while keeping their logical ids distinct. |
+| AC-5 / contracts authored only | passed for Stage A | Two focused internal runtime contracts are present in runtime.rs@d531db9176a09e973690b3a44da52208e09e33b5 and were not executed. |
+| AC-6 / special-config remains separate | passed | TDRP-R9-MTPROTO-SPECIAL-CONFIG-CARRIER-APPLICATION-001 remains mapped/pending. Secondary endpoint session creation/auth sharing, cancellable request ownership, 6000 ms total-attempt teardown, dc_options-only application and direct HTTP carrier remain open. |
+| AC-7 / deferred validation | passed | No Actions/status/check query, build, typecheck, lint, validator, generator, dependency resolution, lock regeneration, test execution, package, deploy, installation or runtime acceptance was performed. |
+| Desktop mirror/bookkeeping | source-identical / recorded | desktop mirror commit 8f04c5f35cc6674b33f27edb09fe66fb1db7d6f0 carries runtime blob d531db9176a09e973690b3a44da52208e09e33b5. Desktop bookkeeping commit b8b5505c71c7e72806ded1255daaeac68163b039 adds the unique ledger row and round121 evidence with validation_status=not-run and accepted=false. |
+
+The canonical multi-session owner is implemented only at source level. Executable verification and acceptance remain deferred to Stage B/C.

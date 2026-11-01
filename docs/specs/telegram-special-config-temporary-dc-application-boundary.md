@@ -165,3 +165,10 @@ Behavioral provenance only; no upstream C++ is copied.
 | Desktop mirror | source-identical | bhrumom/fabushi-desktop commit dc4e1e654ad2627f5f29554e6db1e3a2c3e20aa6 carries the identical telegram-network lib blob 6023c96c4ee96a7cae37dbd6f9be077cf88779cb. |
 
 The complete special-config carrier/application responsibility remains mapped/pending and accepted=false. The auth-handshake protocol-DC correction extends the existing implemented protocol-DC wire responsibility and remains validation_status=not-run.
+
+
+## 10. Round 90 prerequisite narrowing
+
+Fixed-U reread of mtp_instance.cpp/session_private.cpp established that the shifted-session map is a general MTProto lifecycle owner rather than special-config-only machinery. The existing RuntimeClient has therefore been upgraded, source-neutral and existing-owner-first, at platform commit 8c57554ade7ad4bc75e3692a0e5dc57099162206 / runtime blob d531db9176a09e973690b3a44da52208e09e33b5. The current shipping primary session now uses that owner, and SessionRoute separates temporary logical 1000+d from real auth DC d.
+
+This closes only the previously absent canonical session-registry prerequisite. Complete special-config application remains blocked/mapped because the runtime still lacks actual secondary EstablishedSession creation/resume against the transient endpoint, independently cancellable request ownership, the fixed 6000 ms total-attempt deadline, and dc_options-only replacement/change publication. Direct NoProxy HTTPS/Web-PKI acquisition remains separately blocked. No second runtime or timeout surrogate is introduced.
