@@ -78,3 +78,14 @@ Source-level production implementation is `3a3d850139082e32a783b7d03b6ea2fd31b00
 - No contract/build/typecheck/lint/schema/generator/integration/E2E/package/deployment/runtime validation was executed, and no GitHub Actions/status/check query or trigger was performed.
 
 Connection-start nonce/AES-CTR prefix, Version1/VersionD secret handling, protocol/DC id obfuscation, quick-ACK lifecycle, broader connection scheduling/racing/retry, auth-key binding/persistence, arbitrary request history, gzip, complete difference decoding/application, broader source/legal closure, Stage-B executable evidence, and independent release ACCEPT remain outside this source-level responsibility.
+
+
+## Round 105 source-level compliance
+
+Desktop bookkeeping checkpoint is `44da95b4b754433990a48b23cbc323bc8ca44030`, with unique ledger blob `39c0693abc259fa0c9cb5fa00270462dec1df13a`, P0 blob `bc93bf20625f14d491f58cae2d460c21087e0b2b`, source-closure blob `2aa8449e086d275ee4dcaa9364a0df2d0a708cef`, and round-105 evidence blob `baea424457b88aac8bf9eb4ddb2e44ec2a6c8ac9`.
+
+The unique `TDRP-R9-MTPROTO-PADDED-INTERMEDIATE-TRANSPORT-FRAME-WIRE-001` responsibility is recorded as `implemented / coverage_disposition=rewritten / validation_status=not-run / accepted=false`. Coverage is `responsibilities_total=106, unknown=16172, unread=16145, omitted=0, unmapped_responsibilities=0`.
+
+Canonical production remains `native/telegram-protocol/src/transport.rs@5d6abd61f130b25baae10a6269eebd20fd025b3a`; canonical shipping network remains `native/telegram-network/src/lib.rs@54f509474391bb5118ba4678ba5c566ab3e74ec8`; canonical and desktop authored-only contract mirrors are byte-identical at `cd53d0b1b546aaceaf5ad46aaf6957dab5b32bf9`.
+
+No executable validation or GitHub Actions/status/check query was performed. Connection-start nonce/AES-CTR prefix, Version1/VersionD secret handling, quick-ACK lifecycle, broader connection scheduling/racing/send retry, auth-key binding/persistence/expiry/renewal, arbitrary request histories, gzip, complete difference/differenceSlice decoding/application, broader source/legal closure, Stage-B evidence, and independent release ACCEPT remain open.
