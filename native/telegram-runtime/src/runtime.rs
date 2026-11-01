@@ -308,8 +308,14 @@ impl SessionOwner {
         (request_id, control)
     }
 
+    fn request_scope(&self, request_id: u64) -> Option<(i32, NetworkAttemptControl)> {
+        self.requests
+            .get(&request_id)
+            .map(|request| (request.logical_dc_id, request.control.clone()))
+    }
+
     fn request_control(&self, request_id: u64) -> Option<NetworkAttemptControl> {
-        self.requests.get(&request_id).map(|request| request.control.clone())
+        self.request_scope(request_id).map(|(_, control)| control)
     }
 
     fn cancel_request(&mut self, request_id: u64) -> bool {
@@ -1109,11 +1115,10 @@ fn finish_logical_request(client_id: u64, request_id: u64) -> Result<bool, Runti
 fn invoke_owned_logical_request(
     client_id: u64,
     request_id: u64,
-    logical_dc_id: i32,
     directory: &DcDirectory,
     body: &[u8],
 ) -> Result<Vec<u8>, RuntimeError> {
-    let control = {
+    let (logical_dc_id, control) = {
         let clients = CLIENTS
             .lock()
             .map_err(|_| RuntimeError::RegistryUnavailable)?;
@@ -1122,7 +1127,7 @@ fn invoke_owned_logical_request(
             .ok_or(RuntimeError::ClientNotFound(client_id))?;
         client
             .sessions
-            .request_control(request_id)
+            .request_scope(request_id)
             .ok_or(RuntimeError::InvalidParameter("requestId"))?
     };
     let mut session = open_logical_session_controlled(
@@ -1146,7 +1151,9 @@ fn invoke_owned_logical_request(
         client
             .sessions
             .remember_auth_material(logical_dc_id, directory.test_mode(), &session)?;
-        client.sessions.put(logical_dc_id, session, directory.test_mode())?;
+        if client.sessions.request_control(request_id).is_some() {
+            client.sessions.put(logical_dc_id, session, directory.test_mode())?;
+        }
     }
     result
 }
