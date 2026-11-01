@@ -15,6 +15,7 @@ pub mod schema;
 pub mod session;
 pub mod srp;
 pub mod tl;
+pub mod tls;
 pub mod transport;
 pub mod updates;
 
@@ -122,6 +123,11 @@ pub use srp::{
     PasswordSrpProof, SrpError, INPUT_CHECK_PASSWORD_SRP_CONSTRUCTOR,
 };
 pub use tl::{TlError, TlReader, TlWriter, BOOL_FALSE_CONSTRUCTOR, BOOL_TRUE_CONSTRUCTOR};
+pub use tls::{
+    decode_tls_server_record, encode_tls_client_records, inspect_tls_server_hello,
+    prepare_tls_client_hello, prepare_tls_client_hello_with_entropy, tls_camouflage_hmac,
+    DecodedTlsRecord, TlsCamouflageError, TlsCamouflageSecret, TlsClientHello,
+};
 pub use transport::{
     is_good_direct_start_nonce, DecodedFrame, ObfuscatedConnectionStart,
     ObfuscatedTransportSecret, TransportError, TransportFrameCodec, TransportMode,

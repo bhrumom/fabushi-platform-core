@@ -16,6 +16,8 @@ use fabushi_telegram_protocol::{
     HandshakeError, ProtocolDcRole,
     MessageIdError, MessageIdGuard, ObfuscatedConnectionStart, PlainMessage, PlaintextEnvelope,
     SequenceError, SessionSequence, TransportError, TransportFrameCodec, TransportMode,
+    TlsCamouflageError, DecodedTlsRecord, decode_tls_server_record, encode_tls_client_records,
+    inspect_tls_server_hello, prepare_tls_client_hello,
 };
 use thiserror::Error;
 use zeroize::Zeroizing;
@@ -94,6 +96,8 @@ pub enum NetworkError {
     Io(#[from] io::Error),
     #[error("Telegram transport frame failed: {0}")]
     Transport(#[from] TransportError),
+    #[error("Telegram TLS camouflage wire failed: {0}")]
+    TlsCamouflage(#[from] TlsCamouflageError),
     #[error("Telegram auth-key handshake failed: {0}")]
     Handshake(#[from] HandshakeError),
     #[error("Telegram message id failed validation: {0}")]
@@ -139,6 +143,8 @@ pub struct TcpTransport {
     read_buffer: Vec<u8>,
     initialized: bool,
     obfuscated: Option<ObfuscatedConnectionStart>,
+    tls_camouflage: bool,
+    tls_read_buffer: Vec<u8>,
 }
 
 impl TcpTransport {
@@ -160,10 +166,16 @@ impl TcpTransport {
         protocol_dc_id: i16,
         config: &NetworkConfig,
     ) -> Result<Self, NetworkError> {
-        let stream = TcpStream::connect_timeout(&address, config.connect_timeout)?;
+        let mut stream = TcpStream::connect_timeout(&address, config.connect_timeout)?;
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(config.read_timeout))?;
         stream.set_write_timeout(Some(config.write_timeout))?;
+        let tls_camouflage = secret.len() >= 21 && secret[0] == 0xee;
+        let tls_read_buffer = if tls_camouflage {
+            perform_tls_camouflage_handshake(&mut stream, secret)?
+        } else {
+            Vec::new()
+        };
         let obfuscated = ObfuscatedConnectionStart::random(secret, protocol_dc_id)?;
         let mode = obfuscated.mode();
         Ok(Self {
@@ -172,6 +184,8 @@ impl TcpTransport {
             read_buffer: Vec::with_capacity(DEFAULT_READ_CHUNK_BYTES),
             initialized: false,
             obfuscated: Some(obfuscated),
+            tls_camouflage,
+            tls_read_buffer,
         })
     }
 
@@ -182,23 +196,35 @@ impl TcpTransport {
             read_buffer: Vec::with_capacity(DEFAULT_READ_CHUNK_BYTES),
             initialized: false,
             obfuscated: None,
+            tls_camouflage: false,
+            tls_read_buffer: Vec::new(),
         }
     }
 
     pub fn send_payload(&mut self, payload: &[u8]) -> Result<(), NetworkError> {
+        let mut connection_prefix = Vec::new();
         if !self.initialized {
             if let Some(obfuscated) = self.obfuscated.as_ref() {
-                self.stream.write_all(obfuscated.prefix())?;
+                connection_prefix.extend_from_slice(obfuscated.prefix());
             } else {
                 self.stream.write_all(self.codec.initial_header())?;
             }
-            self.initialized = true;
         }
+
         let mut frame = self.codec.encode(payload)?;
         if let Some(obfuscated) = self.obfuscated.as_mut() {
             obfuscated.encrypt_outbound(&mut frame);
         }
-        self.stream.write_all(&frame)?;
+        if self.tls_camouflage {
+            let records = encode_tls_client_records(&connection_prefix, &frame)?;
+            self.stream.write_all(&records)?;
+        } else {
+            if !connection_prefix.is_empty() {
+                self.stream.write_all(&connection_prefix)?;
+            }
+            self.stream.write_all(&frame)?;
+        }
+        self.initialized = true;
         self.stream.flush()?;
         Ok(())
     }
@@ -213,15 +239,40 @@ impl TcpTransport {
                 return Ok(frame.payload);
             }
 
+            if self.tls_camouflage {
+                if let Some(record) = decode_tls_server_record(&self.tls_read_buffer)? {
+                    match record {
+                        DecodedTlsRecord::Empty { consumed_bytes } => {
+                            self.tls_read_buffer.drain(..consumed_bytes);
+                        }
+                        DecodedTlsRecord::Payload {
+                            mut payload,
+                            consumed_bytes,
+                        } => {
+                            self.tls_read_buffer.drain(..consumed_bytes);
+                            if let Some(obfuscated) = self.obfuscated.as_mut() {
+                                obfuscated.decrypt_inbound(&mut payload);
+                            }
+                            self.read_buffer.extend_from_slice(&payload);
+                        }
+                    }
+                    continue;
+                }
+            }
+
             let mut chunk = [0_u8; DEFAULT_READ_CHUNK_BYTES];
             let count = self.stream.read(&mut chunk)?;
             if count == 0 {
                 return Err(NetworkError::ConnectionClosed);
             }
-            if let Some(obfuscated) = self.obfuscated.as_mut() {
-                obfuscated.decrypt_inbound(&mut chunk[..count]);
+            if self.tls_camouflage {
+                self.tls_read_buffer.extend_from_slice(&chunk[..count]);
+            } else {
+                if let Some(obfuscated) = self.obfuscated.as_mut() {
+                    obfuscated.decrypt_inbound(&mut chunk[..count]);
+                }
+                self.read_buffer.extend_from_slice(&chunk[..count]);
             }
-            self.read_buffer.extend_from_slice(&chunk[..count]);
         }
     }
 
@@ -236,6 +287,28 @@ impl TcpTransport {
     pub fn shutdown(&self) -> Result<(), NetworkError> {
         self.stream.shutdown(Shutdown::Both)?;
         Ok(())
+    }
+}
+
+fn perform_tls_camouflage_handshake(
+    stream: &mut TcpStream,
+    secret: &[u8],
+) -> Result<Vec<u8>, NetworkError> {
+    let hello = prepare_tls_client_hello(secret)?;
+    stream.write_all(&hello.bytes)?;
+    stream.flush()?;
+
+    let mut incoming = Vec::with_capacity(DEFAULT_READ_CHUNK_BYTES);
+    loop {
+        if let Some(consumed) = inspect_tls_server_hello(secret, &hello.digest, &incoming)? {
+            return Ok(incoming.split_off(consumed));
+        }
+        let mut chunk = [0_u8; DEFAULT_READ_CHUNK_BYTES];
+        let count = stream.read(&mut chunk)?;
+        if count == 0 {
+            return Err(NetworkError::ConnectionClosed);
+        }
+        incoming.extend_from_slice(&chunk[..count]);
     }
 }
 
