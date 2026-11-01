@@ -1118,44 +1118,53 @@ fn invoke_owned_logical_request(
     directory: &DcDirectory,
     body: &[u8],
 ) -> Result<Vec<u8>, RuntimeError> {
-    let (logical_dc_id, control) = {
-        let clients = CLIENTS
-            .lock()
-            .map_err(|_| RuntimeError::RegistryUnavailable)?;
-        let client = clients
-            .get(&client_id)
-            .ok_or(RuntimeError::ClientNotFound(client_id))?;
-        client
-            .sessions
-            .request_scope(request_id)
-            .ok_or(RuntimeError::InvalidParameter("requestId"))?
-    };
-    let mut session = open_logical_session_controlled(
-        client_id,
-        logical_dc_id,
-        directory,
-        &NetworkConfig::default(),
-        &control,
-    )?;
-    let result = session
-        .invoke_raw_controlled(body, &control)
-        .map(|response| response.body)
-        .map_err(|error| RuntimeError::Network(error.to_string()));
-    {
-        let mut clients = CLIENTS
-            .lock()
-            .map_err(|_| RuntimeError::RegistryUnavailable)?;
-        let client = clients
-            .get_mut(&client_id)
-            .ok_or(RuntimeError::ClientNotFound(client_id))?;
-        client
-            .sessions
-            .remember_auth_material(logical_dc_id, directory.test_mode(), &session)?;
-        if client.sessions.request_control(request_id).is_some() {
-            client.sessions.put(logical_dc_id, session, directory.test_mode())?;
+    let operation = (|| -> Result<Vec<u8>, RuntimeError> {
+        let (logical_dc_id, control) = {
+            let clients = CLIENTS
+                .lock()
+                .map_err(|_| RuntimeError::RegistryUnavailable)?;
+            let client = clients
+                .get(&client_id)
+                .ok_or(RuntimeError::ClientNotFound(client_id))?;
+            client
+                .sessions
+                .request_scope(request_id)
+                .ok_or(RuntimeError::InvalidParameter("requestId"))?
+        };
+        let mut session = open_logical_session_controlled(
+            client_id,
+            logical_dc_id,
+            directory,
+            &NetworkConfig::default(),
+            &control,
+        )?;
+        let result = session
+            .invoke_raw_controlled(body, &control)
+            .map(|response| response.body)
+            .map_err(|error| RuntimeError::Network(error.to_string()));
+        {
+            let mut clients = CLIENTS
+                .lock()
+                .map_err(|_| RuntimeError::RegistryUnavailable)?;
+            let client = clients
+                .get_mut(&client_id)
+                .ok_or(RuntimeError::ClientNotFound(client_id))?;
+            client
+                .sessions
+                .remember_auth_material(logical_dc_id, directory.test_mode(), &session)?;
+            if client.sessions.request_control(request_id).is_some() {
+                client.sessions.put(logical_dc_id, session, directory.test_mode())?;
+            }
         }
+        result
+    })();
+
+    if operation.is_ok() {
+        let _ = finish_logical_request(client_id, request_id);
+    } else {
+        let _ = cancel_logical_request(client_id, request_id);
     }
-    result
+    operation
 }
 
 fn begin_special_config_attempt(
@@ -2099,6 +2108,17 @@ mod authorization_restore_contract_tests {
         assert!(!second.is_cancelled());
         assert!(owner.request_control(first_id).is_none());
         assert!(owner.request_control(second_id).is_some());
+    }
+
+    #[test]
+    fn finishing_transient_request_clears_request_owner() {
+        let mut owner = SessionOwner::default();
+        let (request_id, control) =
+            owner.begin_request(1002, SPECIAL_CONFIG_TOTAL_ATTEMPT, true);
+
+        assert!(owner.finish_request(request_id));
+        assert!(!control.is_cancelled());
+        assert!(owner.request_control(request_id).is_none());
     }
 
     #[test]
