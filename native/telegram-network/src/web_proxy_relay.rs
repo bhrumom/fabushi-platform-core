@@ -475,10 +475,10 @@ impl WebProxyRelay {
     }
 
     fn bootstrap(&self) -> Result<WebProxyBootstrap, NetworkError> {
-        let guard = self.inner.lock().map_err(|_| NetworkError::WebProxyRelayUnavailable)?;
-        if Instant::now() >= guard.bootstrap_expires {
-            return Err(NetworkError::WebProxyBootstrapExpired);
-        }
+        let token = random_url_token(32).map_err(NetworkError::Io)?;
+        let mut guard = self.inner.lock().map_err(|_| NetworkError::WebProxyRelayUnavailable)?;
+        guard.bootstrap_token = token;
+        guard.bootstrap_expires = Instant::now() + CAPABILITY_LIFETIME;
         Ok(WebProxyBootstrap {
             url: format!("http://127.0.0.1:{}/#{}", self.listener_address.port(), guard.bootstrap_token),
         })

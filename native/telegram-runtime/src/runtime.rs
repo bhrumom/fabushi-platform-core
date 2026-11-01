@@ -11,6 +11,8 @@ use fabushi_telegram_network::NetworkProxyEndpoint;
 use fabushi_telegram_network::NetworkProxyKind;
 use fabushi_telegram_network::NetworkProxyProjection;
 use fabushi_telegram_network::ProxyResolutionCache;
+use fabushi_telegram_network::prepare_web_proxy_relay;
+use fabushi_telegram_network::retire_web_proxy_relay;
 use fabushi_telegram_network::{
     http_time_now, seed_special_config_attempts, secure_random_index, update_http_time,
     DirectHttpsRace, StaggerSettlementPolicy,
@@ -625,10 +627,18 @@ pub fn close_client(client_id: u64) -> Result<(), RuntimeError> {
     let mut clients = CLIENTS
         .lock()
         .map_err(|_| RuntimeError::RegistryUnavailable)?;
-    clients
+    let client = clients
         .remove(&client_id)
-        .map(|_| ())
-        .ok_or(RuntimeError::ClientNotFound(client_id))
+        .ok_or(RuntimeError::ClientNotFound(client_id))?;
+    if let Some(proxy) = client
+        .network_proxy
+        .selected
+        .as_ref()
+        .filter(|proxy| proxy.kind == NetworkProxyKind::Web)
+    {
+        retire_web_proxy_relay(proxy);
+    }
+    Ok(())
 }
 
 pub fn authorization_snapshot(client_id: u64) -> Result<AuthorizationSnapshot, RuntimeError> {
@@ -906,6 +916,15 @@ fn apply_network_proxy_command(client_id: u64, request: &Value) -> Result<Value,
         selected,
         prefer_ipv6,
     };
+    let web_bootstrap = if next.enabled {
+        next.selected
+            .as_ref()
+            .filter(|proxy| proxy.kind == NetworkProxyKind::Web)
+            .map(prepare_web_proxy_relay)
+            .transpose()?
+    } else {
+        None
+    };
     let mut clients = CLIENTS
         .lock()
         .map_err(|_| RuntimeError::RegistryUnavailable)?;
@@ -914,6 +933,14 @@ fn apply_network_proxy_command(client_id: u64, request: &Value) -> Result<Value,
         .ok_or(RuntimeError::ClientNotFound(client_id))?;
     let changed = client.network_proxy != next;
     if changed {
+        if let Some(previous) = client
+            .network_proxy
+            .selected
+            .as_ref()
+            .filter(|proxy| proxy.kind == NetworkProxyKind::Web)
+        {
+            retire_web_proxy_relay(previous);
+        }
         client.sessions.invalidate_network_transport();
         client.proxy_resolution.clear();
         client.network_proxy = next;
@@ -929,6 +956,7 @@ fn apply_network_proxy_command(client_id: u64, request: &Value) -> Result<Value,
                 proxy.kind == NetworkProxyKind::Mtproto
                     && proxy.host.parse::<std::net::IpAddr>().is_err()
             }),
+        "webProxyBootstrapUrl": web_bootstrap.as_ref().map(|bootstrap| bootstrap.url.as_str()),
     }))
 }
 
@@ -2989,6 +3017,36 @@ mod network_proxy_contracts {
         let state = clients.get(&client).unwrap();
         assert!(state.persisted_transport.is_none());
         assert!(state.sessions.primary().is_none());
+    }
+
+    #[test]
+    fn web_projection_prepares_secret_free_loopback_bootstrap_without_second_runtime() {
+        let client = create_client();
+        let result = execute_value(client, json!({
+            "@type": "telegram.applyNetworkProxy",
+            "enabled": true,
+            "tryIpv6": false,
+            "selected": {
+                "type": "web",
+                "host": "proxy.example",
+                "port": 443,
+                "user": "",
+                "password": "00112233445566778899aabbccddeeff"
+            }
+        })).unwrap();
+        let url = result
+            .get("webProxyBootstrapUrl")
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(url.starts_with("http://127.0.0.1:"));
+        assert!(url.contains("/#"));
+        assert!(!result.to_string().contains("00112233445566778899aabbccddeeff"));
+        let clients = CLIENTS.lock().unwrap();
+        let state = clients.get(&client).unwrap();
+        assert!(state.sessions.primary().is_none());
+        assert_eq!(state.network_proxy.selected.as_ref().unwrap().kind, NetworkProxyKind::Web);
+        drop(clients);
+        close_client(client).unwrap();
     }
 
     #[test]
