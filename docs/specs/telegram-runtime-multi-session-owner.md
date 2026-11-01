@@ -297,9 +297,9 @@ The fixed schema declares `help.getConfig#c4f9186b = Config`; because it has no 
 - The resolved endpoint is represented as one transient `tcpo_only` main endpoint, retaining its IPv4 address, port and optional transport secret.
 - `begin_special_config_attempt` registers ownership before controlled session open and the existing absolute 6000 ms budget spans open/auth/RPC.
 - The RPC body is bare `help.getConfig`; no initConnection/layer wrapper is used on this secondary special-config attempt.
-- A malformed/failed/empty Config response does not mutate the canonical server directory. Existing owned-request failure teardown remains in force.
+- A malformed/failed Config response does not mutate the canonical server directory. A valid Config with empty `dc_options` is a successful no-op with an empty publication, matching `specialConfigLoaded`; existing owned-request teardown remains in force.
 - A valid special Config replaces only canonical dc options. Current `this_dc`, test-mode/environment state, authorization state, other Config metadata and persistence remain unchanged.
-- Change publication follows fixed-U CountOptionsDifference exactly: per DC, only endpoint count and IP+port membership participate in equality; flags/secret-only differences do not publish and do not replace the stored option vector. Added/removed DC ids or changed IP+port membership publish sorted unique real DC ids. No-op replacement yields an empty publication.
+- Input normalization follows fixed-U ApplyOneOption: repeated entries with the same DC id, IP and port are silently collapsed to the first option. Change publication then follows fixed-U CountOptionsDifference exactly: per DC, only normalized endpoint count and IP+port membership participate in equality; flags/secret-only differences do not publish and do not replace the stored option vector. Added/removed DC ids or changed IP+port membership publish sorted unique real DC ids. No-op replacement yields an empty publication.
 - Successful or failed temporary attempts leave no temporary request/session state, while shared real-DC AuthMaterial remains reusable.
 
 ### 15.4 Authored-only contracts
