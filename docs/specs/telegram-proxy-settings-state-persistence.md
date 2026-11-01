@@ -252,7 +252,9 @@ Initial source disposition. Executable validation intentionally remains not-run.
 | R13-R14 | blocked | Existing persistence surfaces are not the canonical product Settings owner; no shipping unified Settings state owner is present in the current checkpoint. |
 | R15 | passed | Only durable contracts/bookkeeping are allowed; no executable validation is run. |
 | AC-1-AC-4 | passed | Source/owner review is complete and no production state is added. |
-| AC-5 | passed | Desktop bookkeeping `c6c4dc28262154d2af11c467cd0ae4b731c52916` adds exactly one mapped/pending row; ledger blob `6982428698020571e0d3e74d6bd559944c8f5f63`. |\n| AC-6 | passed | Desktop P0 `2a9d9d97356931e57a3875e0cc46f1a940fa12b6`, source-closure `a5fb93f9746f587f8869f06133f19f8e2b230d57`, evidence `b08286b1dc53f688033f3a478098f78742641272`; coverage is 16202 total source entries / 113 responsibilities / 16172 unknown / 16145 unread / 0 omitted / 0 unmapped responsibilities. |\n| AC-7 | passed | Source review is complete for this exact boundary; responsibility remains mapped/pending, validation_status=not-run, accepted=false, with no executable evidence. |
+| AC-5 | passed | Desktop bookkeeping `c6c4dc28262154d2af11c467cd0ae4b731c52916` adds exactly one mapped/pending row; ledger blob `6982428698020571e0d3e74d6bd559944c8f5f63`. |
+| AC-6 | passed | Desktop P0 `2a9d9d97356931e57a3875e0cc46f1a940fa12b6`, source-closure `a5fb93f9746f587f8869f06133f19f8e2b230d57`, evidence `b08286b1dc53f688033f3a478098f78742641272`; coverage is 16202 total source entries / 113 responsibilities / 16172 unknown / 16145 unread / 0 omitted / 0 unmapped responsibilities. |
+| AC-7 | passed | Source review is complete for this exact boundary; responsibility remains mapped/pending, validation_status=not-run, accepted=false, with no executable evidence. |
 | AC-8 | passed | Stage-A executable validation remains not-run. |
 
 
