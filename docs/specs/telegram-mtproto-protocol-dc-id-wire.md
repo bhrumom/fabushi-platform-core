@@ -145,9 +145,27 @@ Fixed source authority: telegramdesktop/tdesktop@f985723b552b30fe1c17d377d57f44e
 
 | Requirement / AC | Status | Evidence / reason |
 | --- | --- | --- |
-| R1-R10 | pending | Stage-A implementation not yet recorded. |
-| AC-1 | pending | |
-| AC-2 | pending | |
-| AC-3 | pending | |
-| AC-4 | pending | |
-| AC-5 | pending | |
+| R1-R9 | passed | Source review plus production commit `e9cfc7fbd06002c6510d3bf45df9710e55ff1d57`: `dc.rs@a9582e4ece93590c322febbff391ba3ff7635575`, facade `daf27c48a422ed6ed663ca0021ff138436d99c0b`, network `3034acab752ca37531033bb8a1d106003b20265d`. |
+| R10 | passed | Focused contracts authored at `ceacfa08800950103c6118b6c579ef582b1e1458`; no contract or executable validation was run. |
+| AC-1 | passed | Exact pure derivation is owned by existing `telegram-protocol::dc`; no scheduling/auth lifecycle added. |
+| AC-2 | passed | Existing `telegram-network::connect_directory` delegates derivation and retains endpoint/socket ownership. |
+| AC-3 | passed | Protocol contract blob `adc51856cebcdb6e539828e3d4abb9952fc32c29` and network contract blob `4adbcabf66dc0ca35861f46e40e9a8ca77fb73c5` are authored only; not run. |
+| AC-4 | passed | Desktop provider sync `385e5a261da3620733053503027c9a28c71cc221`; bookkeeping `dc671558c60f4c292e2a8bf6de8faf1000da6c89` with ledger `9c535480834f3d365a09207d74a278ad9b0413ea`, P0 `0bdbdbfeef3d2078668d8fdb33fcfc8e5c3cb022`, source-closure `0e35b0ccde15b52a8ed6a5c0802e488a6daaf4ac`, evidence `53b73ccabeea16926f44920208c5245f7b8f046b`; all ref writes used non-force expected-SHA CAS. |
+| AC-5 | passed | Unique ledger responsibility is source-level `implemented` with `validation_status=not-run` and `accepted=false`; no executable gate is claimed. |
+
+
+## Round 107 implementation record
+
+The exact wire-id responsibility is source-level closed for Stage A only.
+
+- Durable spec-first checkpoint: `9d0f25b21b46ef74f4589dec1d3459117d4bdbd6`.
+- Canonical production: `e9cfc7fbd06002c6510d3bf45df9710e55ff1d57`.
+- Canonical authored-only contracts: `ceacfa08800950103c6118b6c579ef582b1e1458`.
+- Desktop provider synchronization: `385e5a261da3620733053503027c9a28c71cc221`.
+- Desktop bookkeeping: `dc671558c60f4c292e2a8bf6de8faf1000da6c89`.
+- Unique ledger status: `implemented / coverage_disposition=rewritten / validation_status=not-run / accepted=false`.
+- Coverage: `responsibilities_total=108, unknown=16172, unread=16145, omitted=0, unmapped_responsibilities=0`.
+
+No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E test, package, deployment, installation, runtime acceptance, GitHub Actions/status/check query, or CI trigger was performed.
+
+Remaining outside this responsibility: proxy/Web/TLS camouflage, quick-ACK lifecycle/correlation, broader currentDcType and TemporaryMediaCluster auth-key selection/binding/persistence/expiry/renewal, connection scheduling/racing/reconnect/send retry, arbitrary request histories, gzip, complete difference/differenceSlice decoding/application, broader fixed-U source/legal closure, Stage-B executable evidence and independent release ACCEPT.
