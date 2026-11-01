@@ -1,8 +1,8 @@
 # Telegram Direct HTTP Carrier / Staggered Reply Lifecycle Boundary — Specification
 
-Status: blocked / no-production-delta in this round  
+Status: implementation authorized / validation not run  
 Owner candidate: existing `native/telegram-network`; no parallel Telegram HTTP subsystem authorized  
-Last updated: 2026-11-01  
+Last updated: 2026-11-01 (round 94)  
 Related task: Fabushi migration task 7457eb1c-11a3-4626-8563-a3e495872536 round 87 / source-evidence round 118
 
 ## 1. Context and fixed source
@@ -128,3 +128,38 @@ All executable validation remains not-run until Stage B.
 ## 7. Provenance
 
 Behavioral provenance only; no upstream C++ is copied.
+
+
+## 8. Round 94 implementation authorization
+
+The round-87 blocker record above remains valid for the then-current `telegram-network` dependency set: no reusable first-party HTTP carrier existed. Round 94 adds a new existing-owner-first implementation **inside the same `native/telegram-network` owner** rather than borrowing another product crate.
+
+A repository-local dependency audit found an exact Web-PKI closure already pinned in `native/global-dharma/Cargo.lock`: `rustls 0.23.41`, `rustls-pki-types 1.15.0`, `rustls-webpki 0.103.13`, `ring 0.17.14`, `webpki-roots 0.26.11/1.0.8` and their platform/build dependencies. This lock is dependency-input evidence only; `global-dharma` code and lifecycle remain rejected as Telegram owners.
+
+Stage-A implementation SHALL:
+1. add a source-neutral direct HTTPS module under `native/telegram-network`;
+2. use `TcpStream` + `rustls` + `webpki-roots` for HTTPS/Web-PKI, with TLS SNI bound to the normalized URL host;
+3. never consult environment/system/PAC/Telegram proxy settings and never route through a proxy;
+4. support the fixed-U seeded GET requests only; RemoteConfig/Realtime POST reachability remains outside this slice;
+5. preserve normalized `Host`, `Accept`, and `User-Agent` headers while treating non-2xx HTTP status as response metadata so readable bodies remain observable;
+6. reuse the existing `NetworkAttemptControl` so explicit destruction can shut down the active socket, while ordinary reply finalization does not invent an explicit abort;
+7. own request handles in a first-party request owner whose drop explicitly cancels still-owned in-flight handles;
+8. provide an 800 ms stagger plan with distinct settlement policies: DomainResolver-style acceptance fences future delayed attempts and releases already-running handles without explicit abort; SpecialConfig-style acceptance does not fence the remaining schedule while the owner remains alive;
+9. bound response headers/body and reject malformed/chunk framing fail-closed;
+10. author focused contracts for no-proxy request construction, exact 800 ms scheduling, distinct settlement/finalization semantics, readable non-2xx bodies, explicit cancellation, and owner-drop cancellation, but execute none.
+
+No dependency resolver or lock generator may be executed. The exact required package records may be transcribed from the already-pinned `native/global-dharma/Cargo.lock` into `native/telegram-network/Cargo.lock`, and the root package dependency list may be edited by hand. This is a source edit, not executable validation.
+
+This round does not yet claim the higher-level RuntimeClient endpoint-acquisition/application composition is complete merely because the carrier exists. Until a real caller composes the carrier with the existing request/response normalization and special-config application chain, the aggregate parity item remains pending / validation_status=not-run / accepted=false.
+
+### Round 94 source-level acceptance criteria
+
+- R94-AC-1: exact fixed-U NoProxy, 800 ms stagger, ServiceWebRequest finalization/destruction, and DomainResolver-vs-SpecialConfig settlement semantics remain pinned.
+- R94-AC-2: concrete direct HTTPS/Web-PKI transport lives in the existing `telegram-network` owner; no second provider/runtime/network product is added.
+- R94-AC-3: direct mode cannot inherit ambient proxy configuration.
+- R94-AC-4: request ownership supports explicit cancellation and ordinary non-aborting finalization as distinct operations.
+- R94-AC-5: DomainResolver-style and SpecialConfig-style stagger settlement remain distinct.
+- R94-AC-6: exact dependency/lock inputs are source-pinned without executing dependency resolution or lock regeneration.
+- R94-AC-7: focused contracts are authored but not run.
+- R94-AC-8: aggregate carrier/application parity stays pending until runtime composition is production-wired and Stage-B evidence exists.
+- R94-AC-9: no Actions/status/check query or executable validation is performed.
