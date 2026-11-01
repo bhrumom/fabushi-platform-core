@@ -3813,3 +3813,56 @@ fn p_q_inner_data_dc_adjacent_builder_disposition_contract() {
         HandshakeError::PqFactorsDoNotMatch
     );
 }
+
+
+#[test]
+fn encrypted_envelope_wire_preserves_exact_external_header_layout() {
+    let envelope = EncryptedEnvelope {
+        auth_key_id: 0x8877_6655_4433_2211,
+        message_key: [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+            0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+        ],
+        encrypted_data: (0_u8..32).collect(),
+    };
+
+    let bytes = envelope.to_bytes();
+    assert_eq!(bytes.len(), 24 + 32);
+    assert_eq!(
+        &bytes[0..8],
+        &0x8877_6655_4433_2211_u64.to_le_bytes()
+    );
+    assert_eq!(&bytes[8..24], &envelope.message_key);
+    assert_eq!(&bytes[24..], envelope.encrypted_data.as_slice());
+    assert_eq!(EncryptedEnvelope::from_bytes(&bytes).unwrap(), envelope);
+}
+
+#[test]
+fn encrypted_envelope_wire_fails_closed_on_short_or_misaligned_ciphertext() {
+    assert_eq!(
+        EncryptedEnvelope::from_bytes(&[0_u8; 23]).unwrap_err(),
+        CryptoError::InvalidEnvelope
+    );
+    assert_eq!(
+        EncryptedEnvelope::from_bytes(&[0_u8; 25]).unwrap_err(),
+        CryptoError::InvalidEnvelope
+    );
+
+    let header_only = EncryptedEnvelope {
+        auth_key_id: 0,
+        message_key: [0; 16],
+        encrypted_data: vec![],
+    };
+    let parsed = EncryptedEnvelope::from_bytes(&header_only.to_bytes()).unwrap();
+    let auth_key = AuthKey::from_slice(&[0x5a; 256]).unwrap();
+    assert_eq!(
+        decrypt_message(
+            &auth_key,
+            CryptoDirection::ServerToClient,
+            &parsed,
+            0x0102_0304_0506_0708,
+        )
+        .unwrap_err(),
+        CryptoError::AuthenticationFailed
+    );
+}
