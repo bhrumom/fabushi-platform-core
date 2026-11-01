@@ -198,9 +198,9 @@ struct WebProxyRelay {
     carrier_wake: Condvar,
 }
 
-static RELAYS: OnceLock<Mutex<BTreeMap<String, Weak<WebProxyRelay>>>> = OnceLock::new();
+static RELAYS: OnceLock<Mutex<BTreeMap<String, Arc<WebProxyRelay>>>> = OnceLock::new();
 
-fn relay_registry() -> &'static Mutex<BTreeMap<String, Weak<WebProxyRelay>>> {
+fn relay_registry() -> &'static Mutex<BTreeMap<String, Arc<WebProxyRelay>>> {
     RELAYS.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
@@ -225,11 +225,11 @@ fn relay_for(endpoint: &NetworkProxyEndpoint) -> Result<Arc<WebProxyRelay>, Netw
     let mut registry = relay_registry()
         .lock()
         .map_err(|_| NetworkError::WebProxyRelayUnavailable)?;
-    if let Some(existing) = registry.get(&remote_url).and_then(Weak::upgrade) {
-        return Ok(existing);
+    if let Some(existing) = registry.get(&remote_url) {
+        return Ok(Arc::clone(existing));
     }
     let relay = WebProxyRelay::start(remote_url.clone())?;
-    registry.insert(remote_url, Arc::downgrade(&relay));
+    registry.insert(remote_url, Arc::clone(&relay));
     Ok(relay)
 }
 
@@ -245,7 +245,7 @@ pub fn retire_web_proxy_relay(endpoint: &NetworkProxyEndpoint) {
         return;
     };
     if let Ok(mut registry) = relay_registry().lock() {
-        if let Some(relay) = registry.remove(&key).and_then(|weak| weak.upgrade()) {
+        if let Some(relay) = registry.remove(&key) {
             relay.fail_all();
         }
     }
@@ -436,6 +436,7 @@ impl WebProxyRelay {
         let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
             .map_err(NetworkError::Io)?;
         let listener_address = listener.local_addr().map_err(NetworkError::Io)?;
+        listener.set_nonblocking(true).map_err(NetworkError::Io)?;
         let token = random_url_token(32).map_err(NetworkError::Io)?;
         let relay = Arc::new(Self {
             remote_url,
@@ -465,6 +466,10 @@ impl WebProxyRelay {
                             let _ = thread::Builder::new()
                                 .name("fabushi-web-proxy-client".into())
                                 .spawn(move || clone.serve_local_client(socket));
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            drop(relay);
+                            thread::sleep(Duration::from_millis(25));
                         }
                         Err(_) => break,
                     }
@@ -709,6 +714,12 @@ impl WebProxyRelay {
             return;
         }
 
+        let replace_active = self.inner.lock().ok()
+            .map(|guard| guard.carrier.writer.is_some() || guard.carrier.welcomed)
+            .unwrap_or(true);
+        if replace_active {
+            self.fail_all();
+        }
         let writer = match socket.try_clone() {
             Ok(value) => value,
             Err(_) => return,
@@ -718,9 +729,7 @@ impl WebProxyRelay {
                 Ok(value) => value,
                 Err(_) => return,
             };
-            if let Some(old) = guard.carrier.writer.replace(writer) {
-                let _ = old.shutdown(Shutdown::Both);
-            }
+            guard.carrier.writer = Some(writer);
             guard.carrier.input.clear();
             guard.carrier.failed = false;
             guard.carrier.welcomed = false;

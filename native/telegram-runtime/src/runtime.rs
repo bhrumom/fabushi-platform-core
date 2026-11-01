@@ -630,13 +630,15 @@ pub fn close_client(client_id: u64) -> Result<(), RuntimeError> {
     let client = clients
         .remove(&client_id)
         .ok_or(RuntimeError::ClientNotFound(client_id))?;
-    if let Some(proxy) = client
-        .network_proxy
-        .selected
-        .as_ref()
-        .filter(|proxy| proxy.kind == NetworkProxyKind::Web)
-    {
-        retire_web_proxy_relay(proxy);
+    if client.network_proxy.enabled {
+        if let Some(proxy) = client
+            .network_proxy
+            .selected
+            .as_ref()
+            .filter(|proxy| proxy.kind == NetworkProxyKind::Web)
+        {
+            retire_web_proxy_relay(proxy);
+        }
     }
     Ok(())
 }
@@ -933,13 +935,18 @@ fn apply_network_proxy_command(client_id: u64, request: &Value) -> Result<Value,
         .ok_or(RuntimeError::ClientNotFound(client_id))?;
     let changed = client.network_proxy != next;
     if changed {
-        if let Some(previous) = client
-            .network_proxy
-            .selected
-            .as_ref()
-            .filter(|proxy| proxy.kind == NetworkProxyKind::Web)
-        {
-            retire_web_proxy_relay(previous);
+        if client.network_proxy.enabled {
+            if let Some(previous) = client
+                .network_proxy
+                .selected
+                .as_ref()
+                .filter(|proxy| {
+                    proxy.kind == NetworkProxyKind::Web
+                        && (!next.enabled || next.selected.as_ref() != Some(*proxy))
+                })
+            {
+                retire_web_proxy_relay(previous);
+            }
         }
         client.sessions.invalidate_network_transport();
         client.proxy_resolution.clear();
