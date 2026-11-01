@@ -269,12 +269,13 @@ impl TransportFrameCodec {
             let Some(length_bytes) = input.get(1..4) else {
                 return Ok(None);
             };
-            (
-                usize::from(length_bytes[0])
-                    | (usize::from(length_bytes[1]) << 8)
-                    | (usize::from(length_bytes[2]) << 16),
-                4_usize,
-            )
+            let words = usize::from(length_bytes[0])
+                | (usize::from(length_bytes[1]) << 8)
+                | (usize::from(length_bytes[2]) << 16);
+            if words < 0x7f {
+                return Err(TransportError::InvalidFrameLength(words * 4));
+            }
+            (words, 4_usize)
         };
         let payload_length = words
             .checked_mul(4)

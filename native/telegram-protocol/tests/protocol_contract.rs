@@ -3972,3 +3972,39 @@ fn secure_inner_message_wire_rejects_body_above_fixed_u_16_mib_ceiling() {
         CryptoError::InvalidPlaintext
     );
 }
+
+
+#[test]
+fn abridged_transport_wire_uses_fixed_u_canonical_length_boundaries() {
+    let mut codec = TransportFrameCodec::new(TransportMode::Abridged);
+
+    let short_payload = vec![0x11_u8; 126 * 4];
+    let short_frame = codec.encode(&short_payload).unwrap();
+    assert_eq!(short_frame[0], 126);
+    assert_eq!(short_frame.len(), 1 + short_payload.len());
+    let short_decoded = codec.decode(&short_frame).unwrap().unwrap();
+    assert_eq!(short_decoded.payload, short_payload);
+    assert_eq!(short_decoded.consumed_bytes, short_frame.len());
+
+    let extended_payload = vec![0x22_u8; 127 * 4];
+    let extended_frame = codec.encode(&extended_payload).unwrap();
+    assert_eq!(&extended_frame[..4], &[0x7f, 0x7f, 0x00, 0x00]);
+    assert_eq!(extended_frame.len(), 4 + extended_payload.len());
+    let extended_decoded = codec.decode(&extended_frame).unwrap().unwrap();
+    assert_eq!(extended_decoded.payload, extended_payload);
+    assert_eq!(extended_decoded.consumed_bytes, extended_frame.len());
+}
+
+#[test]
+fn abridged_transport_wire_rejects_noncanonical_extended_small_length() {
+    let codec = TransportFrameCodec::new(TransportMode::Abridged);
+
+    assert!(codec.decode(&[0x7f, 0x7e, 0x00]).unwrap().is_none());
+
+    let mut noncanonical = vec![0x7f, 0x7e, 0x00, 0x00];
+    noncanonical.extend_from_slice(&vec![0x33_u8; 126 * 4]);
+    assert_eq!(
+        codec.decode(&noncanonical).unwrap_err(),
+        TransportError::InvalidFrameLength(126 * 4)
+    );
+}
