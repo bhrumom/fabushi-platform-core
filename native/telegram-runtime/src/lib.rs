@@ -3,7 +3,7 @@
 mod runtime;
 
 pub use runtime::{
-    authorization_snapshot, close_client, create_client, create_persistent_client, execute_json,
+    apply_resolved_special_config_endpoint, authorization_snapshot, close_client, create_client, create_persistent_client, execute_json,
     AuthorizationSnapshot, RuntimeError,
 };
 pub use fabushi_telegram_protocol::AuthorizationState;

@@ -288,6 +288,34 @@ impl DcDirectory {
         &self.endpoints
     }
 
+    pub fn replace_endpoints(&mut self, endpoints: Vec<DcEndpoint>) -> Result<Vec<i32>, DcError> {
+        let replacement = Self::new(self.this_dc, self.test_mode, endpoints)?;
+        let mut ids = BTreeSet::new();
+        for endpoint in self.endpoints.iter().chain(replacement.endpoints.iter()) {
+            ids.insert(endpoint.dc_id);
+        }
+        let changed: Vec<i32> = ids
+            .into_iter()
+            .filter(|dc_id| {
+                let current: Vec<_> = self
+                    .endpoints
+                    .iter()
+                    .filter(|endpoint| endpoint.dc_id == *dc_id)
+                    .collect();
+                let next: Vec<_> = replacement
+                    .endpoints
+                    .iter()
+                    .filter(|endpoint| endpoint.dc_id == *dc_id)
+                    .collect();
+                current != next
+            })
+            .collect();
+        if !changed.is_empty() {
+            self.endpoints = replacement.endpoints;
+        }
+        Ok(changed)
+    }
+
     pub fn update(
         &mut self,
         this_dc: i32,

@@ -27,7 +27,7 @@ pub use api::{
     build_auth_cancel_code, build_auth_check_password, build_auth_check_recovery_password,
     build_auth_request_password_recovery, build_auth_resend_code, build_auth_send_code,
     build_auth_sign_in, build_auth_sign_up, build_destroy_auth_key, build_destroy_session, build_get_future_salts,
-    build_init_connection_get_config, build_msg_resend_req, build_ping, build_ping_delay_disconnect,
+    build_help_get_config, build_init_connection_get_config, build_msg_resend_req, build_ping, build_ping_delay_disconnect,
     build_req_pq, build_req_pq_multi, build_rpc_drop_answer,
     build_msgs_ack, build_msgs_state_req, parse_bad_msg_notification, parse_bad_server_salt,
     parse_future_salts,

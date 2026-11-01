@@ -4800,3 +4800,53 @@ fn http_date_response_parser_preserves_fixed_u_validity_boundary() {
         None
     );
 }
+
+
+#[test]
+fn bare_help_get_config_is_exact_constructor_only() {
+    assert_eq!(
+        fabushi_telegram_protocol::build_help_get_config(),
+        vec![0x6b, 0x18, 0xf9, 0xc4]
+    );
+}
+
+#[test]
+fn dc_options_only_replacement_preserves_metadata_and_publishes_exact_dc_changes() {
+    use fabushi_telegram_protocol::{DcDirectory, DcEndpoint};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let endpoint = |dc_id, last_octet| {
+        DcEndpoint::new(
+            dc_id,
+            IpAddr::V4(Ipv4Addr::new(149, 154, 167, last_octet)),
+            443,
+            false,
+            false,
+            false,
+            false,
+            false,
+            None,
+        )
+        .unwrap()
+    };
+    let mut directory =
+        DcDirectory::new(2, false, vec![endpoint(2, 50), endpoint(3, 51)]).unwrap();
+
+    assert!(directory
+        .replace_endpoints(vec![endpoint(2, 50), endpoint(3, 51)])
+        .unwrap()
+        .is_empty());
+    assert_eq!(directory.this_dc(), 2);
+    assert!(!directory.test_mode());
+
+    assert_eq!(
+        directory
+            .replace_endpoints(vec![endpoint(2, 52), endpoint(4, 53)])
+            .unwrap(),
+        vec![2, 3, 4]
+    );
+    assert_eq!(directory.this_dc(), 2);
+    assert!(!directory.test_mode());
+    assert!(directory.endpoints().iter().any(|endpoint| endpoint.dc_id == 4));
+    assert!(!directory.endpoints().iter().any(|endpoint| endpoint.dc_id == 3));
+}

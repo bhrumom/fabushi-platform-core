@@ -376,6 +376,12 @@ pub enum ApiRequestError {
     Srp(#[from] SrpError),
 }
 
+pub fn build_help_get_config() -> Vec<u8> {
+    let mut writer = TlWriter::new();
+    writer.write_u32(HELP_GET_CONFIG_CONSTRUCTOR);
+    writer.into_bytes()
+}
+
 pub fn build_init_connection_get_config(
     connection: &InitConnection<'_>,
 ) -> Result<Vec<u8>, ApiRequestError> {

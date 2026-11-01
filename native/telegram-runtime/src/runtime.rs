@@ -18,6 +18,7 @@ use fabushi_telegram_protocol::build_auth_resend_code;
 use fabushi_telegram_protocol::build_auth_send_code;
 use fabushi_telegram_protocol::build_auth_sign_in;
 use fabushi_telegram_protocol::build_auth_sign_up;
+use fabushi_telegram_protocol::build_help_get_config;
 use fabushi_telegram_protocol::build_init_connection_get_config;
 use fabushi_telegram_protocol::build_updates_get_state;
 use fabushi_telegram_protocol::compute_password_srp_proof;
@@ -40,12 +41,14 @@ use fabushi_telegram_protocol::AuthorizationMachine;
 use fabushi_telegram_protocol::AuthorizationState;
 use fabushi_telegram_protocol::CodeDeliveryType;
 use fabushi_telegram_protocol::DcDirectory;
+use fabushi_telegram_protocol::DcEndpoint;
 use fabushi_telegram_protocol::EmailVerifiedResult;
 use fabushi_telegram_protocol::InitConnection;
 use fabushi_telegram_protocol::PasswordSrpParameters;
 use fabushi_telegram_protocol::ProtocolDcRole;
 use fabushi_telegram_protocol::SentCodeDelivery;
 use fabushi_telegram_protocol::SentCodeResult;
+use fabushi_telegram_protocol::SpecialConfigEndpoint;
 use fabushi_telegram_protocol::UpdateState;
 use fabushi_telegram_protocol::AUTH_AUTHORIZATION_CONSTRUCTOR;
 use fabushi_telegram_protocol::AUTH_AUTHORIZATION_SIGN_UP_REQUIRED_CONSTRUCTOR;
@@ -1179,6 +1182,109 @@ fn begin_special_config_attempt(
     )
 }
 
+fn temporary_special_config_logical_dc_id(real_dc_id: i32) -> Result<i32, RuntimeError> {
+    if !(1..1000).contains(&real_dc_id) {
+        return Err(RuntimeError::InvalidParameter("specialConfigEndpoint.dcId"));
+    }
+    real_dc_id
+        .checked_add(1000)
+        .ok_or(RuntimeError::InvalidParameter("specialConfigEndpoint.dcId"))
+}
+
+fn resolved_special_endpoint_directory(
+    endpoint: &SpecialConfigEndpoint,
+    test_mode: bool,
+) -> Result<(i32, DcDirectory), RuntimeError> {
+    let logical_dc_id = temporary_special_config_logical_dc_id(endpoint.dc_id)?;
+    let port = u16::try_from(endpoint.port)
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or(RuntimeError::InvalidParameter("specialConfigEndpoint.port"))?;
+    let secret = (!endpoint.secret.is_empty()).then(|| endpoint.secret.clone());
+    let endpoint = DcEndpoint::new(
+        logical_dc_id,
+        endpoint.ip_address.into(),
+        port,
+        false,
+        true,
+        false,
+        false,
+        false,
+        secret,
+    )
+    .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
+    let directory = DcDirectory::new(logical_dc_id, test_mode, vec![endpoint])
+        .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
+    Ok((logical_dc_id, directory))
+}
+
+fn replace_server_dc_options(
+    client: &mut RuntimeClient,
+    endpoints: Vec<DcEndpoint>,
+    test_mode: bool,
+) -> Result<Vec<i32>, RuntimeError> {
+    if let Some(directory) = client.server_directory.as_mut() {
+        return directory
+            .replace_endpoints(endpoints)
+            .map_err(|error| RuntimeError::Protocol(error.to_string()));
+    }
+    let this_dc = client
+        .persisted_transport
+        .as_ref()
+        .map(|state| state.dc_id)
+        .or_else(|| client.sessions.primary().map(|session| session.endpoint.dc_id))
+        .ok_or(RuntimeError::TransportNotConnected)?;
+    let directory = DcDirectory::new(this_dc, test_mode, endpoints)
+        .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
+    let changed = directory
+        .endpoints()
+        .iter()
+        .map(|endpoint| endpoint.dc_id)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    client.server_directory = Some(directory);
+    Ok(changed)
+}
+
+/// Applies an already-resolved special-config endpoint through the existing
+/// account-bound SessionOwner. Endpoint acquisition remains outside this API.
+pub fn apply_resolved_special_config_endpoint(
+    client_id: u64,
+    endpoint: &SpecialConfigEndpoint,
+) -> Result<Vec<i32>, RuntimeError> {
+    let test_mode = {
+        let clients = CLIENTS
+            .lock()
+            .map_err(|_| RuntimeError::RegistryUnavailable)?;
+        let client = clients
+            .get(&client_id)
+            .ok_or(RuntimeError::ClientNotFound(client_id))?;
+        client
+            .server_directory
+            .as_ref()
+            .map(DcDirectory::test_mode)
+            .or_else(|| client.persisted_transport.as_ref().map(|state| state.test_mode))
+            .unwrap_or(false)
+    };
+    let (logical_dc_id, directory) =
+        resolved_special_endpoint_directory(endpoint, test_mode)?;
+    let body = build_help_get_config();
+    let (request_id, _) = begin_special_config_attempt(client_id, logical_dc_id)?;
+    let response = invoke_owned_logical_request(client_id, request_id, &directory, &body)?;
+    let config = parse_config_dc_directory_prefix(&response)
+        .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
+    let endpoints = config.directory.endpoints().to_vec();
+
+    let mut clients = CLIENTS
+        .lock()
+        .map_err(|_| RuntimeError::RegistryUnavailable)?;
+    let client = clients
+        .get_mut(&client_id)
+        .ok_or(RuntimeError::ClientNotFound(client_id))?;
+    replace_server_dc_options(client, endpoints, test_mode)
+}
+
 fn delivery_state(delivery: &SentCodeDelivery) -> (CodeDeliveryType, u8) {
     let (delivery_type, length) = match delivery {
         SentCodeDelivery::App { length } => (CodeDeliveryType::TelegramMessage, *length),
@@ -2145,6 +2251,67 @@ mod authorization_restore_contract_tests {
     fn special_config_attempt_budget_is_exactly_6000_ms() {
         assert_eq!(SPECIAL_CONFIG_TOTAL_ATTEMPT, Duration::from_millis(6000));
     }
+
+    #[test]
+    fn special_config_temporary_route_and_endpoint_are_source_equivalent() {
+        let endpoint = SpecialConfigEndpoint {
+            dc_id: 2,
+            ip_address: "149.154.167.50".parse().unwrap(),
+            port: 443,
+            secret: vec![1, 2, 3, 4],
+        };
+        let (logical_dc_id, directory) =
+            resolved_special_endpoint_directory(&endpoint, false).unwrap();
+
+        assert_eq!(logical_dc_id, 1002);
+        assert_eq!(directory.this_dc(), 1002);
+        assert_eq!(directory.endpoints().len(), 1);
+        assert_eq!(directory.endpoints()[0].dc_id, 1002);
+        assert!(directory.endpoints()[0].tcpo_only);
+        assert_eq!(directory.endpoints()[0].secret.as_deref(), Some(&[1, 2, 3, 4][..]));
+        assert!(temporary_special_config_logical_dc_id(1002).is_err());
+        assert!(temporary_special_config_logical_dc_id(0).is_err());
+    }
+
+    #[test]
+    fn special_config_dc_options_application_changes_only_server_directory() {
+        let endpoint = |dc_id, last_octet| {
+            DcEndpoint::new(
+                dc_id,
+                format!("149.154.167.{last_octet}").parse().unwrap(),
+                443,
+                false,
+                false,
+                false,
+                false,
+                false,
+                None,
+            )
+            .unwrap()
+        };
+        let mut client = RuntimeClient::default();
+        client.persisted_transport = Some(PersistedTransportState {
+            dc_id: 2,
+            test_mode: false,
+            server_salt: 71,
+            server_time: 73,
+            auth_key: vec![17_u8; 256],
+        });
+        client.server_directory =
+            Some(DcDirectory::new(2, false, vec![endpoint(2, 50), endpoint(3, 51)]).unwrap());
+
+        let changed =
+            replace_server_dc_options(&mut client, vec![endpoint(2, 52), endpoint(4, 53)], false)
+                .unwrap();
+
+        assert_eq!(changed, vec![2, 3, 4]);
+        let directory = client.server_directory.as_ref().unwrap();
+        assert_eq!(directory.this_dc(), 2);
+        assert!(!directory.test_mode());
+        assert_eq!(client.persisted_transport.as_ref().unwrap().server_salt, 71);
+        assert_eq!(client.persisted_transport.as_ref().unwrap().server_time, 73);
+    }
+
 
     #[test]
     fn persistent_ready_authorization_restores_identity_without_opening_second_runtime() {
