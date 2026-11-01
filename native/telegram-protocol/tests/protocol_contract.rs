@@ -3654,3 +3654,38 @@ fn config_simple_public_parsers_fail_closed_at_nested_boundaries_and_strict_eof(
     config_trailing.push(0);
     assert!(fabushi_telegram_protocol::parse_help_config_simple(&config_trailing).is_err());
 }
+
+
+#[test]
+fn p_q_inner_data_dc_adjacent_builder_disposition_contract() {
+    let response = ResPq {
+        nonce: [0x11; 16],
+        server_nonce: [0x22; 16],
+        // 272953 = 499 * 547, encoded as unsigned big-endian bytes.
+        pq: vec![0x04, 0x2a, 0x39],
+        server_public_key_fingerprints: vec![],
+    };
+    let factors = factor_res_pq(&response).unwrap();
+    let body = build_p_q_inner_data_dc(&response, &factors, &[0x33; 32], -7).unwrap();
+
+    let mut reader = TlReader::new(&body);
+    assert_eq!(reader.read_u32().unwrap(), P_Q_INNER_DATA_DC_CONSTRUCTOR);
+    assert_eq!(reader.read_bytes().unwrap(), response.pq);
+    assert_eq!(reader.read_bytes().unwrap(), factors.p_bytes());
+    assert_eq!(reader.read_bytes().unwrap(), factors.q_bytes());
+    assert_eq!(reader.read_i128_bytes().unwrap(), response.nonce);
+    assert_eq!(reader.read_i128_bytes().unwrap(), response.server_nonce);
+    assert_eq!(reader.read_i256_bytes().unwrap(), [0x33; 32]);
+    assert_eq!(reader.read_i32().unwrap(), -7);
+    assert!(reader.is_finished());
+
+    let mismatched = FactoredPq {
+        pq: factors.pq,
+        p: factors.p,
+        q: factors.q + 2,
+    };
+    assert_eq!(
+        build_p_q_inner_data_dc(&response, &mismatched, &[0x33; 32], -7).unwrap_err(),
+        HandshakeError::PqFactorsDoNotMatch
+    );
+}
