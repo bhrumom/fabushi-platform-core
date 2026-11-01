@@ -11,6 +11,7 @@ pub mod dc;
 pub mod generated;
 pub mod handshake;
 pub mod request;
+pub mod response_normalization;
 pub mod schema;
 pub mod session;
 pub mod srp;
@@ -110,6 +111,10 @@ pub use handshake::{
     TELEGRAM_MAIN_RSA_MODULUS_HEX, TELEGRAM_TEST_RSA_MODULUS_HEX,
 };
 pub use request::{ProtocolRequest, RequestId, RequestSequencer};
+pub use response_normalization::{
+    normalize_dns_response, normalize_special_config_response, parse_dns_response, DnsEntry,
+    NormalizedDnsResponse, SpecialConfigResponseKind,
+};
 pub use schema::{
     audit_mtproto_api_schema, audit_schema, audit_td_api_schema, audit_telegram_api_schema,
     parse_schema_catalog, parse_td_api_schema, DeclarationKind, SchemaAudit, SchemaBaseline,

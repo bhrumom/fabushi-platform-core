@@ -4711,3 +4711,69 @@ fn special_config_payload_boundary_fails_closed_without_network_or_scheduler_fal
         Err(fabushi_telegram_protocol::SpecialConfigError::EmptyRules)
     );
 }
+
+
+#[test]
+fn doh_response_normalization_is_pure_and_source_bounded() {
+    use fabushi_telegram_protocol::{
+        normalize_dns_response, parse_dns_response, DnsEntry, NormalizedDnsResponse,
+    };
+
+    let response = br#"{"Answer":[
+        {"type":1,"data":"149.154.167.50","TTL":600},
+        {"type":1,"data":"149.154.167.51","TTL":5},
+        {"type":28,"data":"2001:db8::1","TTL":100}
+    ]}"#;
+    assert_eq!(
+        parse_dns_response(response, Some(1)),
+        vec![
+            DnsEntry {
+                data: "149.154.167.50".into(),
+                ttl_seconds: 600,
+            },
+            DnsEntry {
+                data: "149.154.167.51".into(),
+                ttl_seconds: 5,
+            },
+        ]
+    );
+    assert_eq!(
+        normalize_dns_response(response, Some(1)),
+        Some(NormalizedDnsResponse {
+            data: vec!["149.154.167.50".into(), "149.154.167.51".into()],
+            ttl_millis: 10_000,
+        })
+    );
+}
+
+#[test]
+fn special_config_carrier_response_adapters_emit_compact_payload_only() {
+    use fabushi_telegram_protocol::{
+        normalize_special_config_response, SpecialConfigResponseKind,
+    };
+
+    let doh = br#"{"Answer":[
+        {"type":16,"data":"bb"},
+        {"type":16,"data":"aaaa"},
+        {"type":16,"data":"cc"},
+        {"type":1,"data":"ignored"}
+    ]}"#;
+    assert_eq!(
+        normalize_special_config_response(SpecialConfigResponseKind::DnsTxt, doh),
+        b"aaaaccbb"
+    );
+    assert_eq!(
+        normalize_special_config_response(
+            SpecialConfigResponseKind::Firestore,
+            br#"{"fields":{"data":{"stringValue":"payload"}}}"#,
+        ),
+        b"payload"
+    );
+    assert!(
+        normalize_special_config_response(
+            SpecialConfigResponseKind::Firestore,
+            br#"{"fields":{}}"#,
+        )
+        .is_empty()
+    );
+}
