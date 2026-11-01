@@ -264,7 +264,17 @@ No upstream C++ is copied; this specification records behavioral provenance.
 
 ## 17. Spec compliance record
 
+Source-level compliance review completed in Stage A. Executable validation remains intentionally deferred and is not represented as pass.
+
 | Requirement / AC | Status | Evidence / reason |
 | --- | --- | --- |
-| R1-R14 | pending | Initial spec; implementation follows in a later commit. |
-| AC-1-AC-8 | pending | Initial spec; compliance review follows implementation/bookkeeping. |
+| R1 | passed | Fixed-U config_loader/special_config_request/RSA/DcOptions/domain-resolver/facade blobs were reread and recorded in this spec and desktop round115 evidence. |
+| R2-R6 | passed | `special_config.rs@03ea4149703942befe59132a2019bef71e92938b` implements normalization, fixed 256-byte RSA recovery, source AES-CBC layout, constant-time digest validation, declared length and existing `parse_help_config_simple` composition. |
+| R7-R9 | passed | The same module implements source expiry/empty-rules, ordered positive/negative/empty prefix evaluation and typed endpoint projection without adding later network port/secret policy. |
+| R10-R12 | passed | The API is pure and side-effect free, stays in existing telegram-protocol, and reuses existing aes/num-bigint-dig/sha2/subtle dependencies with no manifest/lock delta. |
+| R13 | passed | Internal and public contracts are authored at `protocol_contract.rs@cd51c5db0c2d92cd713eac5ddb80f589775ead43`; none were executed. |
+| R14 | passed | HTTP/DoH/Firestore acquisition, HTTP-Date mutation, temporary-DC help.getConfig scheduling and DcOptions replacement are separately tracked as mapped/pending rather than claimed implemented. |
+| AC-1-AC-5 | passed | Platform implementation commit `ba7ca87b27c3fbf7cb07ea5fa01b8d5caf67d1b4`; module `03ea4149703942befe59132a2019bef71e92938b`; lib `02853449d52bc713d6db826e88875b94c2a9c70f`. |
+| AC-6 | passed | Authored-only contract commit `0ac3bdc2b3bcb47871970b654bc50dc9cefbf21d`; executable validation intentionally remains `not-run`, accepted=false. |
+| AC-7 | passed | Carrier/application row is `mapped/pending` in the unique desktop ledger and no network/runtime production blob was changed. |
+| AC-8 | passed | Desktop mirror/bookkeeping commit `651c199fee8b3cad83e9f97b6fd92c59cd38f996`; mirrored special-config/lib/contract blobs are byte-identical and ledger/P0/source-closure/round115 evidence were synchronized. |
