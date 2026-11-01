@@ -150,4 +150,16 @@ Rollback is the immediately preceding checkpoint ref.
 
 ## 16. Spec compliance record
 
-Pending Stage-A authored-contract and bookkeeping commits. No executable validation is permitted in this round.
+| Requirement / AC | Status | Evidence / reason |
+| --- | --- | --- |
+| R1-R8 | passed | Remote source readback confirms fixed-U msgs_ack#62d6b459 and SessionPrivate::tryToSend non-empty _ackRequestData serialization. Canonical api.rs@ebfb3670b5cd097b9ce288782c7954f5cfe9fc43 preserves constructor + TL Vector + caller-ordered i64 encoding; tl.rs@89256ab35184b6dc06a095ab34abb9f44e95a264 owns vector framing/count conversion and fails length overflow before header emission; lib.rs@abab39e42f100972484191f0e52e9edd9b88c6cf exports the same builder. |
+| R9 | passed | Canonical authored-only contract commit 95508fda3420d4829eb1fb76a20bc6f589f02635 / blob 7314ad06c48f9ca87dc08c0bd3b7d08a47579797 covers empty, one, multiple signed values, exact order/EOF, and vector-count overflow/no-partial-header. Desktop mirror commit 4677ae986ea7f9e3156c57883ecfbb6fca7e2f49 has the identical blob. Contracts were not executed. |
+| AC-1 | passed | Production api/tl/lib blobs remain ebfb3670b5cd097b9ce288782c7954f5cfe9fc43 / 89256ab35184b6dc06a095ab34abb9f44e95a264 / abab39e42f100972484191f0e52e9edd9b88c6cf; no production behavior delta was made. |
+| AC-2 | passed | Authored-only contracts at 95508fda3420d4829eb1fb76a20bc6f589f02635 lock the exact request-wire/vector boundaries without execution. |
+| AC-3 | passed | Desktop provider production api/lib remain byte-identical to canonical and desktop contract mirror blob is 7314ad06c48f9ca87dc08c0bd3b7d08a47579797. |
+| AC-4 | passed | Desktop bookkeeping checkpoint a4a75364cb754e6d62ea4c02fc76dc4dc99163eb synchronizes the unique ledger, P0, source-closure and round98 evidence. |
+| AC-5 | passed | The unique ledger records TDRP-R9-MTPROTO-MSGS-ACK-REQUEST-WIRE-001 as implemented / coverage_disposition=rewritten / validation_status=not-run / accepted=false; responsibilities_total=99, unknown=16172, unread=16145, omitted=0, unmapped_responsibilities=0. |
+| AC-6 | passed | This Stage-A slice used source/blob readback and authored/saved docs/contracts only. No build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E execution, GitHub Actions/status/check query, package, deploy, install or runtime acceptance was performed. Arbitrary ACK scheduling/history/application remains open/fail-closed. |
+
+Source-level compliance is complete for this isolated request-wire slice. This is not executable verification,
+candidate readiness, release acceptance, or closure of the broader migration.
