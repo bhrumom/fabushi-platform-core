@@ -120,7 +120,12 @@ Source-level compliance review completed in Stage A. Executable validation remai
 | R11 | passed | Carrier request scheduling, HTTP Date mutation, temporary-DC lifecycle and dc-options application remain separately pending. |
 | AC-1-AC-4 | passed | Platform implementation/authored-contract commit `3d27d1aa1272bb15d39c1e2031872a1f2266c62e`; module/lib/contract blobs `9371f73669b4e6b211608f043119ca4eca56e185`, `27543d45f3825321e26c8a0b664e37c8488169e2`, `259f457eeaacce0ed09f1acf1f0fd821a0269733`. |
 | AC-5 | passed | Desktop mirror commit `4070ca2be5db0d22bd54c27857ccf84748ce8763` has the same three blob identities. |
-| AC-6 | pending bookkeeping | Unique desktop ledger/P0/source-closure/evidence synchronization follows this compliance commit. |
+| AC-6 | passed | Desktop initial bookkeeping commit `4f91cd629df720e79743885807c5da7db97042c8`: ledger `9d8a5312dd16f4343274df82e77e00c5d406e371`, P0 `f9d639209337900c67eb311e36ad2e5c3bb35151`, source-closure `2b5abb6d86955a3b7e5fa359fe5a53919af0cb89`, round116 evidence `933fc37eaec7eac1f5008ca8db22aadb0387dca9`. |
 | AC-7-AC-8 | passed | No scheduler/application production delta and no executable validation/release claim. |
 
 No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, dependency resolution, lock regeneration, unit/contract/integration/E2E execution, package, deployment, installation or runtime acceptance was performed.
+
+
+### Final source-level compliance
+
+All R1-R11 and AC-1 through AC-8 are satisfied at source/implementation/bookkeeping review level. Executable validation remains intentionally `not-run`; `accepted=false` and no release-readiness claim is made. Carrier request scheduling/application remains separately pending and is not part of this compliance claim.
