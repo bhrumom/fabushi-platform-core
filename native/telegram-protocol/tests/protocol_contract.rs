@@ -1461,13 +1461,17 @@ fn supported_transports_request_and_decode_quick_ack_tokens() {
         .unwrap();
     assert_eq!(ack.quick_ack_token, Some(0x9234_5678));
 
-    let padded = TransportFrameCodec::new(TransportMode::PaddedIntermediate);
-    let mut padded_ack = Vec::new();
-    padded_ack.extend_from_slice(&8_u32.to_le_bytes());
-    padded_ack.extend_from_slice(&[0xff; 4]);
-    padded_ack.extend_from_slice(&0xa123_4567_u32.to_le_bytes());
-    let ack = padded.decode(&padded_ack).unwrap().unwrap();
-    assert_eq!(ack.quick_ack_token, Some(0xa123_4567));
+    let mut padded = TransportFrameCodec::new(TransportMode::PaddedIntermediate);
+    assert_eq!(
+        padded
+            .encode_requesting_quick_ack(&payload, &[])
+            .unwrap_err(),
+        TransportError::QuickAckUnsupported
+    );
+    assert_eq!(
+        padded.decode(&0xa123_4567_u32.to_le_bytes()).unwrap_err(),
+        TransportError::InvalidFrameLength(0xa123_456b_usize)
+    );
 
     let mut full = TransportFrameCodec::new(TransportMode::Full);
     assert_eq!(
@@ -4007,4 +4011,82 @@ fn abridged_transport_wire_rejects_noncanonical_extended_small_length() {
         codec.decode(&noncanonical).unwrap_err(),
         TransportError::InvalidFrameLength(126 * 4)
     );
+}
+
+
+#[test]
+fn padded_intermediate_transport_wire_matches_fixed_u_version_d_boundaries() {
+    let payload = [0x11_u8, 0x22, 0x33, 0x44];
+    let mut codec = TransportFrameCodec::new(TransportMode::PaddedIntermediate);
+
+    let no_padding = codec.encode_with_padding(&payload, &[]).unwrap();
+    assert_eq!(&no_padding[..4], &4_u32.to_le_bytes());
+    assert_eq!(&no_padding[4..], &payload);
+    assert_eq!(codec.decode(&no_padding[..3]).unwrap(), None);
+    assert_eq!(codec.decode(&no_padding[..7]).unwrap(), None);
+    let decoded = codec.decode(&no_padding).unwrap().unwrap();
+    assert_eq!(decoded.payload, payload);
+    assert_eq!(decoded.consumed_bytes, 8);
+
+    let padding = [0x80_u8; 15];
+    let max_padding = codec.encode_with_padding(&payload, &padding).unwrap();
+    assert_eq!(&max_padding[..4], &19_u32.to_le_bytes());
+    assert_eq!(&max_padding[4..8], &payload);
+    assert_eq!(&max_padding[8..], &padding);
+
+    assert_eq!(
+        codec.encode_with_padding(&[1, 2, 3], &[]).unwrap_err(),
+        TransportError::PaddedIntermediatePayloadAlignment(3)
+    );
+    assert_eq!(
+        codec.encode_with_padding(&payload, &[0_u8; 16]).unwrap_err(),
+        TransportError::InvalidPaddingLength
+    );
+
+    for declared in 0_u32..4 {
+        assert_eq!(
+            codec.decode(&declared.to_le_bytes()).unwrap_err(),
+            TransportError::InvalidFrameLength(declared as usize + 4)
+        );
+    }
+
+    let highest_legal_declared = 0x03ff_fffb_u32;
+    assert_eq!(
+        codec.decode(&highest_legal_declared.to_le_bytes()).unwrap(),
+        None
+    );
+    let first_illegal_declared = 0x03ff_fffc_u32;
+    assert_eq!(
+        codec.decode(&first_illegal_declared.to_le_bytes()).unwrap_err(),
+        TransportError::InvalidFrameLength(0x0400_0000)
+    );
+}
+
+#[test]
+fn padded_intermediate_default_encode_uses_fixed_u_padding_length_domain() {
+    let payload = [0x10_u8, 0x20, 0x30, 0x40];
+    let mut codec = TransportFrameCodec::new(TransportMode::PaddedIntermediate);
+    let frame = codec.encode(&payload).unwrap();
+
+    let declared = u32::from_le_bytes(frame[..4].try_into().unwrap()) as usize;
+    assert!((payload.len()..=payload.len() + 15).contains(&declared));
+    assert_eq!(frame.len(), 4 + declared);
+    assert_eq!(&frame[4..8], &payload);
+}
+
+#[test]
+fn generic_intermediate_quick_ack_remains_separate_from_version_d() {
+    let payload = [1_u8, 2, 3, 4];
+    let mut intermediate = TransportFrameCodec::new(TransportMode::Intermediate);
+    let frame = intermediate
+        .encode_requesting_quick_ack(&payload, &[])
+        .unwrap();
+    assert_ne!(u32::from_le_bytes(frame[..4].try_into().unwrap()) & (1 << 31), 0);
+
+    let decoded = intermediate
+        .decode(&0x9234_5678_u32.to_le_bytes())
+        .unwrap()
+        .unwrap();
+    assert_eq!(decoded.quick_ack_token, Some(0x9234_5678));
+    assert!(decoded.payload.is_empty());
 }
