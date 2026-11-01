@@ -42,3 +42,23 @@ This review must not introduce a second handshake owner, a dead serializer for a
 ## Stage A acceptance state
 
 This slice may advance only to source-level `implemented`, `validation_status=not-run`, `accepted=false`. Source review can establish no-production-delta and no-independent-shipping-reachability dispositions; it is not executable verification.
+
+
+## Round 99 source-level compliance readback
+
+Desktop bookkeeping checkpoint is `798965239cb0a72176de3106e4878809b4548bca`. Unique responsibility `TDRP-R9-MTPROTO-P-Q-INNER-DATA-ADJACENT-WIRE-001` is recorded as `implemented / coverage_disposition=rewritten / validation_status=not-run / accepted=false`.
+
+| Requirement | Source-level status | Evidence / reason |
+| --- | --- | --- |
+| R1 | passed | Canonical `handshake.rs@87616f4b96a1775455da42b0bbed77711fb3c9f6` has `P_Q_INNER_DATA_DC_CONSTRUCTOR=0xa9f55f95` and `build_p_q_inner_data_dc` writing constructor, pq/p/q TL bytes, nonce, server_nonce, new_nonce and signed dc_id in exact order. |
+| R2 | passed | Fixed-U `mtproto_dc_key_creator.cpp@13c57454f14b814b5923ea253048fb881ad8cf03` persistent branch selects `MTP_p_q_inner_data_dc(..., protocolDcId)`; canonical `AuthKeyHandshake::prepare_req_dh_params*` selects `build_p_q_inner_data_dc` before existing RSA_PAD/`req_DH_params`. |
+| R3 | passed | No production source changed in this round; canonical handshake/lib production blobs remain `87616f4b96a1775455da42b0bbed77711fb3c9f6` / `abab39e42f100972484191f0e52e9edd9b88c6cf`. |
+| R4 | passed | Fixed-U shipping auth-key creation always carries `protocolDcId`; no independent call site was found for `p_q_inner_data#83c95aec`, so no dead standalone builder was added. |
+| R5 | passed | Same disposition for `p_q_inner_data_temp#3c6a84d4`; fixed-U temporary branch uses the already-closed `p_q_inner_data_temp_dc#56fddf88`. |
+| R6 | passed | Existing temporary `*_temp_dc` implementation/request-preparation remains unchanged; binding/persistence/expiry semantics were not reopened. |
+| R7 | authored / not run | Focused canonical contract commit `88cee9084231b22c3d575726c39634884a45f270` / blob `9c5ce9630c3865f19869b372d1f8f88d2d665487` covers exact layout/signed dc_id/EOF and factor mismatch. It was not executed. |
+| R8 | passed | Desktop mirror commit `8c1866bf054281a4518d605ecbdd811300b1e8c4` has the identical contract blob; no desktop handshake implementation was introduced. |
+| R9 | passed | Desktop bookkeeping commit `798965239cb0a72176de3106e4878809b4548bca` synchronizes the unique ledger, P0/source-closure and round99 evidence; coverage is `responsibilities_total=100, unknown=16172, unread=16145, omitted=0, unmapped_responsibilities=0`. |
+| R10 | passed | This Stage-A slice performed source/blob readback and authored/saved docs/contracts only. No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, unit/contract/integration/E2E execution, package, deploy, install or runtime acceptance was performed. |
+
+Source-level compliance is complete for this isolated builder/disposition slice. This is not executable verification, candidate readiness, release acceptance, or closure of the broader migration.
