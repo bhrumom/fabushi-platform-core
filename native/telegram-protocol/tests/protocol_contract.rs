@@ -4864,3 +4864,29 @@ fn dc_options_only_replacement_preserves_metadata_and_publishes_exact_dc_changes
     assert!(directory.replace_endpoints(secret_only).unwrap().is_empty());
     assert_eq!(directory.endpoints(), before.as_slice());
 }
+
+
+#[test]
+fn special_config_dc_options_parser_does_not_require_response_this_dc() {
+    use fabushi_telegram_protocol::{
+        parse_config_dc_options_prefix, TlWriter, CONFIG_CONSTRUCTOR, DC_OPTION_CONSTRUCTOR,
+    };
+
+    let mut writer = TlWriter::new();
+    writer.write_u32(CONFIG_CONSTRUCTOR);
+    writer.write_i32(0);
+    writer.write_i32(1);
+    writer.write_i32(2);
+    writer.write_bool(false);
+    writer.write_i32(2);
+    writer.write_vector_length(1).unwrap();
+    writer.write_u32(DC_OPTION_CONSTRUCTOR);
+    writer.write_i32(0);
+    writer.write_i32(4);
+    writer.write_string("149.154.167.91").unwrap();
+    writer.write_i32(443);
+
+    let parsed = parse_config_dc_options_prefix(&writer.into_bytes()).unwrap();
+    assert_eq!(parsed.endpoints.len(), 1);
+    assert_eq!(parsed.endpoints[0].dc_id, 4);
+}

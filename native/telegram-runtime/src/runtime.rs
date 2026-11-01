@@ -31,6 +31,7 @@ use fabushi_telegram_protocol::parse_auth_sent_code;
 use fabushi_telegram_protocol::parse_bool;
 use fabushi_telegram_protocol::parse_auth_authorization_user_id;
 use fabushi_telegram_protocol::parse_config_dc_directory_prefix;
+use fabushi_telegram_protocol::parse_config_dc_options_prefix;
 use fabushi_telegram_protocol::parse_update_state;
 use fabushi_telegram_protocol::try_parse_rpc_error;
 use fabushi_telegram_protocol::AccountPasswordState;
@@ -1268,9 +1269,9 @@ pub fn apply_resolved_special_config_endpoint(
     let body = build_help_get_config();
     let (request_id, _) = begin_special_config_attempt(client_id, logical_dc_id)?;
     let response = invoke_owned_logical_request(client_id, request_id, &directory, &body)?;
-    let config = parse_config_dc_directory_prefix(&response)
+    let config = parse_config_dc_options_prefix(&response)
         .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
-    let endpoints = config.directory.endpoints().to_vec();
+    let endpoints = config.endpoints;
 
     let mut clients = CLIENTS
         .lock()
