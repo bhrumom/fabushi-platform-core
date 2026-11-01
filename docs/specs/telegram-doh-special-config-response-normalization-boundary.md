@@ -23,6 +23,7 @@ The fixed-U code contains a deterministic response codec that is independent of 
 2. Address resolution projects answer data in source order and derives a bounded cache TTL.
 3. Special-config DoH restricts answers to type 16 (TXT), orders TXT fragments by the source `QMultiMap` length key and concatenates them into the compact payload text.
 4. Firestore extracts `fields.data.stringValue` and converts it to Latin-1 bytes.
+5. `ParseHttpDate` independently parses the response `Date` text into a valid UTC timestamp; only the later global clock update is side-effectful.
 
 ## 2. Goal
 
@@ -40,7 +41,7 @@ No second network runtime, settings owner, bootstrap provider or DC directory is
 
 - Creating HTTP/DoH/Firestore requests, headers, host camouflage or random padding.
 - Racing, retrying, cancelling or timing carrier attempts.
-- Updating global time from HTTP `Date`.
+- Updating global time from HTTP `Date`; the pure `Date` text parser itself is in scope.
 - Caching state, wall-clock expiry mutation or callback scheduling.
 - Temporary-DC insertion, `help.getConfig`, timeout/cancel/kill lifecycle or `DcOptions::setFromList`.
 - Proxy settings/suppression.
@@ -60,6 +61,7 @@ No second network runtime, settings owner, bootstrap provider or DC directory is
 - **R9 — Dependency discipline.** No dependency or lock delta is required.
 - **R10 — Deferred validation.** Author internal/public contracts but do not execute them in Stage A.
 - **R11 — Scheduler split.** Keep actual carrier acquisition, HTTP Date mutation, temporary-DC lifecycle and dc-options application mapped/pending.
+- **R12 — HTTP Date parsing.** Reproduce fixed-U `ParseHttpDate`: locate the source `www, dd Mmm yyyy hh:mm:ss GMT` shape, accept only the twelve source month abbreviations, reject invalid civil dates/times, and return UTC Unix seconds without mutating any global clock.
 
 ## 6. Target API
 
@@ -71,6 +73,7 @@ Add `response_normalization.rs` to the existing protocol crate with:
 - `normalize_dns_response(bytes, type_restriction)`
 - `SpecialConfigResponseKind::{DnsTxt, Firestore}`
 - `normalize_special_config_response(kind, bytes)`
+- `parse_http_date_unix_seconds(date)`
 
 The result of `SpecialConfigResponseKind::DnsTxt` or `Firestore` is the compact text bytes consumed by the already implemented special-config payload decoder.
 
@@ -91,12 +94,13 @@ Author only; do not run:
 - TXT descending-length and equal-length duplicate ordering.
 - Firestore nested extraction plus malformed/missing fields.
 - Latin-1 replacement behavior.
+- HTTP Date valid/invalid/month/date/time and unanchored-match vectors.
 - Public composition contract showing response normalization is independent of network scheduling.
 
 ## 9. Acceptance criteria
 
 - **AC-1:** Pure DoH parser and address normalizer are implemented in the existing protocol owner.
-- **AC-2:** TXT and Firestore special-config adapters are implemented without I/O.
+- **AC-2:** TXT, Firestore and HTTP Date response adapters are implemented without I/O or clock mutation.
 - **AC-3:** Existing `serde_json` is reused; no manifest/lock change.
 - **AC-4:** Internal and public contracts are authored and remain not-run.
 - **AC-5:** Canonical platform and desktop source mirrors are byte-identical for the new/changed protocol files.
@@ -118,6 +122,7 @@ Source-level compliance review completed in Stage A. Executable validation remai
 | R7-R9 | passed | The codec is pure, lives in existing `telegram-protocol`, reuses existing `serde_json`, and makes no Cargo/lock delta. |
 | R10 | passed | Internal and public authored-only contracts are in `response_normalization.rs@9371f73669b4e6b211608f043119ca4eca56e185` and `protocol_contract.rs@259f457eeaacce0ed09f1acf1f0fd821a0269733`; none were executed. |
 | R11 | passed | Carrier request scheduling, HTTP Date mutation, temporary-DC lifecycle and dc-options application remain separately pending. |
+| R12 | pending implementation | Pure fixed-U HTTP Date parsing was identified during final round116 source reread and must be added without clock mutation. |
 | AC-1-AC-4 | passed | Platform implementation/authored-contract commit `3d27d1aa1272bb15d39c1e2031872a1f2266c62e`; module/lib/contract blobs `9371f73669b4e6b211608f043119ca4eca56e185`, `27543d45f3825321e26c8a0b664e37c8488169e2`, `259f457eeaacce0ed09f1acf1f0fd821a0269733`. |
 | AC-5 | passed | Desktop mirror commit `4070ca2be5db0d22bd54c27857ccf84748ce8763` has the same three blob identities. |
 | AC-6 | passed | Desktop initial bookkeeping commit `4f91cd629df720e79743885807c5da7db97042c8`: ledger `9d8a5312dd16f4343274df82e77e00c5d406e371`, P0 `f9d639209337900c67eb311e36ad2e5c3bb35151`, source-closure `2b5abb6d86955a3b7e5fa359fe5a53919af0cb89`, round116 evidence `933fc37eaec7eac1f5008ca8db22aadb0387dca9`. |
@@ -128,4 +133,4 @@ No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema 
 
 ### Final source-level compliance
 
-All R1-R11 and AC-1 through AC-8 are satisfied at source/implementation/bookkeeping review level. Executable validation remains intentionally `not-run`; `accepted=false` and no release-readiness claim is made. Carrier request scheduling/application remains separately pending and is not part of this compliance claim.
+R1-R11 remain source-review satisfied; R12 and the HTTP-Date portion of AC-2 are pending implementation after the final round116 source reread. Executable validation remains intentionally `not-run`; `accepted=false` and no release-readiness claim is made. Carrier request scheduling/application remains separately pending and is not part of this compliance claim.
