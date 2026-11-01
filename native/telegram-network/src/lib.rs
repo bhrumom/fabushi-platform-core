@@ -191,7 +191,7 @@ impl TcpTransport {
         &mut self,
         request: &PlaintextEnvelope,
     ) -> Result<PlaintextEnvelope, NetworkError> {
-        self.send_payload(&request.encode()?)?;
+        self.send_payload(&request.encode_with_random_padding()?)?;
         PlaintextEnvelope::decode(&self.receive_payload()?).map_err(NetworkError::from)
     }
 

@@ -26,6 +26,7 @@ pub const KNOWN_DH_PRIME_HEX: &str = "C71CAEB9C6B1C9048E6C522F70F13F73980D40238E
 pub const TELEGRAM_MAIN_RSA_MODULUS_HEX: &str = "E8BB3305C0B52C6CF2AFDF7637313489E63E05268E5BADB601AF417786472E5F93B85438968E20E6729A301C0AFC121BF7151F834436F7FDA680847A66BF64ACCEC78EE21C0B316F0EDAFE2F41908DA7BD1F4A5107638EEB67040ACE472A14F90D9F7C2B7DEF99688BA3073ADB5750BB02964902A359FE745D8170E36876D4FD8A5D41B2A76CBFF9A13267EB9580B2D06D10357448D20D9DA2191CB5D8C93982961CDFDEDA629E37F1FB09A0722027696032FE61ED663DB7A37F6F263D370F69DB53A0DC0A1748BDAAFF6209D5645485E6E001D1953255757E4B8E42813347B11DA6AB500FD0ACE7E6DFA3736199CCAF9397ED0745A427DCFA6CD67BCB1ACFF3";
 pub const TELEGRAM_TEST_RSA_MODULUS_HEX: &str = "C8C11D635691FAC091DD9489AEDCED2932AA8A0BCEFEF05FA800892D9B52ED03200865C9E97211CB2EE6C7AE96D3FB0E15AEFFD66019B44A08A240CFDD2868A85E1F54D6FA5DEAA041F6941DDF302690D61DC476385C2FA655142353CB4E4B59F6E5B6584DB76FE8B1370263246C010C93D011014113EBDF987D093F9D37C2BE48352D69A1683F8F6E6C2167983C761E3AB169FDE5DAAA12123FA1BEAB621E4DA5935E9C198F82F35EAE583A99386D8110EA6BD1ABB0F568759F62694419EA5F69847C43462ABEF858B4CB5EDC84E7B9226CD7BD7E183AA974A712C079DDE85B9DC063B8A5C08E8F859C0EE5DCD824C7807F20153361A7F63CFD2A433A1BE7F5";
 pub const DEFAULT_MAX_PLAINTEXT_BODY: usize = 16 * 1024 * 1024;
+pub const MAX_PLAINTEXT_PADDING_BYTES: usize = 63 * 4;
 
 pub type Nonce = [u8; 16];
 
@@ -37,22 +38,59 @@ pub struct PlaintextEnvelope {
 
 impl PlaintextEnvelope {
     pub fn encode(&self) -> Result<Vec<u8>, HandshakeError> {
-        if self.body.len() > DEFAULT_MAX_PLAINTEXT_BODY {
+        self.encode_with_padding(&[])
+    }
+
+    pub fn encode_with_random_padding(&self) -> Result<Vec<u8>, HandshakeError> {
+        self.encode_with_random_padding_with(secure_random_fill)
+    }
+
+    pub fn encode_with_random_padding_with<F>(
+        &self,
+        mut fill_random: F,
+    ) -> Result<Vec<u8>, HandshakeError>
+    where
+        F: FnMut(&mut [u8]) -> Result<(), HandshakeError>,
+    {
+        let mut selector = [0_u8; 1];
+        fill_random(&mut selector)?;
+        let padding_length = usize::from(selector[0] & 0x3f) * 4;
+        let mut padding = vec![0_u8; padding_length];
+        if !padding.is_empty() {
+            fill_random(&mut padding)?;
+        }
+        self.encode_with_padding(&padding)
+    }
+
+    pub fn encode_with_padding(&self, padding: &[u8]) -> Result<Vec<u8>, HandshakeError> {
+        if self.body.is_empty() || !self.body.len().is_multiple_of(4) {
+            return Err(HandshakeError::InvalidBodyLength(
+                i64::try_from(self.body.len()).unwrap_or(i64::MAX),
+            ));
+        }
+        if padding.len() > MAX_PLAINTEXT_PADDING_BYTES || !padding.len().is_multiple_of(4) {
+            return Err(HandshakeError::InvalidPlaintextPaddingLength(padding.len()));
+        }
+        let message_data_length = self
+            .body
+            .len()
+            .checked_add(padding.len())
+            .ok_or(HandshakeError::InvalidBodyLength(i64::MAX))?;
+        if message_data_length > DEFAULT_MAX_PLAINTEXT_BODY {
             return Err(HandshakeError::BodyTooLarge {
-                length: self.body.len(),
+                length: message_data_length,
                 maximum: DEFAULT_MAX_PLAINTEXT_BODY,
             });
         }
-        let body_length: i32 = self
-            .body
-            .len()
+        let body_length: i32 = message_data_length
             .try_into()
             .map_err(|_| HandshakeError::InvalidBodyLength(i64::MAX))?;
-        let mut encoded = Vec::with_capacity(20 + self.body.len());
+        let mut encoded = Vec::with_capacity(20 + message_data_length);
         encoded.extend_from_slice(&0_i64.to_le_bytes());
         encoded.extend_from_slice(&self.message_id.to_le_bytes());
         encoded.extend_from_slice(&body_length.to_le_bytes());
         encoded.extend_from_slice(&self.body);
+        encoded.extend_from_slice(padding);
         Ok(encoded)
     }
 
@@ -72,7 +110,7 @@ impl PlaintextEnvelope {
         }
         let message_id = i64::from_le_bytes(input[8..16].try_into().expect("checked length"));
         let raw_length = i32::from_le_bytes(input[16..20].try_into().expect("checked length"));
-        if raw_length < 0 {
+        if raw_length <= 0 || raw_length % 4 != 0 {
             return Err(HandshakeError::InvalidBodyLength(i64::from(raw_length)));
         }
         let body_length = raw_length as usize;
@@ -1180,6 +1218,8 @@ pub enum HandshakeError {
     InvalidBodyLength(i64),
     #[error("plaintext MTProto body length {length} exceeds maximum {maximum}")]
     BodyTooLarge { length: usize, maximum: usize },
+    #[error("plaintext MTProto random padding length {0} is invalid")]
+    InvalidPlaintextPaddingLength(usize),
     #[error("plaintext MTProto body declared {declared} bytes but carried {actual}")]
     EnvelopeLengthMismatch { declared: usize, actual: usize },
     #[error("auth-key handshake state does not permit this operation: {0}")]

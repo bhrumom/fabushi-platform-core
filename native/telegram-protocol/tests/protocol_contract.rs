@@ -1701,6 +1701,112 @@ fn plaintext_envelope_and_req_pq_multi_begin_auth_key_exchange() {
 }
 
 #[test]
+fn plaintext_handshake_envelope_matches_fixed_u_padding_and_rejects_invalid_lengths() {
+    let envelope = PlaintextEnvelope {
+        message_id: 0x0102_0304_0506_0708,
+        body: build_req_pq_multi(&[0x11; 16]),
+    };
+
+    let no_padding = envelope.encode().unwrap();
+    assert_eq!(&no_padding[0..8], &0_i64.to_le_bytes());
+    assert_eq!(
+        i64::from_le_bytes(no_padding[8..16].try_into().unwrap()),
+        envelope.message_id
+    );
+    assert_eq!(
+        i32::from_le_bytes(no_padding[16..20].try_into().unwrap()),
+        20
+    );
+    assert_eq!(&no_padding[20..], envelope.body.as_slice());
+    assert_eq!(PlaintextEnvelope::decode(&no_padding).unwrap(), envelope);
+
+    let mut random_call = 0;
+    let padded = envelope
+        .encode_with_random_padding_with(|output| {
+            match random_call {
+                0 => {
+                    assert_eq!(output.len(), 1);
+                    output[0] = 0x42;
+                }
+                1 => {
+                    assert_eq!(output.len(), 8);
+                    output.copy_from_slice(&[0xa1, 0xa2, 0xa3, 0xa4, 0xb1, 0xb2, 0xb3, 0xb4]);
+                }
+                _ => panic!("unexpected random-fill call"),
+            }
+            random_call += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(random_call, 2);
+    assert_eq!(
+        i32::from_le_bytes(padded[16..20].try_into().unwrap()),
+        28
+    );
+    assert_eq!(&padded[20..40], envelope.body.as_slice());
+    assert_eq!(
+        &padded[40..],
+        &[0xa1, 0xa2, 0xa3, 0xa4, 0xb1, 0xb2, 0xb3, 0xb4]
+    );
+    assert_eq!(
+        PlaintextEnvelope::decode(&padded).unwrap(),
+        PlaintextEnvelope {
+            message_id: envelope.message_id,
+            body: padded[20..].to_vec(),
+        }
+    );
+
+    assert_eq!(
+        PlaintextEnvelope {
+            message_id: 1,
+            body: Vec::new(),
+        }
+        .encode()
+        .unwrap_err(),
+        HandshakeError::InvalidBodyLength(0)
+    );
+    assert_eq!(
+        PlaintextEnvelope {
+            message_id: 1,
+            body: vec![1, 2, 3],
+        }
+        .encode()
+        .unwrap_err(),
+        HandshakeError::InvalidBodyLength(3)
+    );
+    assert_eq!(
+        envelope.encode_with_padding(&[0; 2]).unwrap_err(),
+        HandshakeError::InvalidPlaintextPaddingLength(2)
+    );
+    assert_eq!(
+        envelope.encode_with_padding(&[0; 256]).unwrap_err(),
+        HandshakeError::InvalidPlaintextPaddingLength(256)
+    );
+
+    let mut zero_length = no_padding.clone();
+    zero_length[16..20].copy_from_slice(&0_i32.to_le_bytes());
+    assert_eq!(
+        PlaintextEnvelope::decode(&zero_length).unwrap_err(),
+        HandshakeError::InvalidBodyLength(0)
+    );
+
+    let mut misaligned_length = no_padding.clone();
+    misaligned_length[16..20].copy_from_slice(&18_i32.to_le_bytes());
+    assert_eq!(
+        PlaintextEnvelope::decode(&misaligned_length).unwrap_err(),
+        HandshakeError::InvalidBodyLength(18)
+    );
+
+    assert_eq!(
+        PlaintextEnvelope::decode_with_limit(&no_padding, 16).unwrap_err(),
+        HandshakeError::BodyTooLarge {
+            length: 20,
+            maximum: 16,
+        }
+    );
+}
+
+#[test]
 fn res_pq_validates_nonce_pq_and_server_key_fingerprints() {
     let nonce = [0x31; 16];
     let server_nonce = [0x42; 16];
