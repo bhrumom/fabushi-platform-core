@@ -126,19 +126,23 @@ Source-level evidence records fixed-U blob identities, canonical/desktop changed
 
 ## 17. Spec compliance record
 
+Source-level compliance was reviewed at the canonical production commit `dc16f388756d681ef4ee6683b98525edef869e1f`, with desktop provider mirror/bookkeeping checkpoint `734e37f377e7fe58b7a646a6b64b29a92bf9629e`. This is Stage-A source evidence only; executable verification remains deferred to Stage B.
+
 | Requirement / AC | Status | Evidence / reason |
 | --- | --- | --- |
-| R1 | pending | implementation follows this spec |
-| R2 | pending | implementation follows this spec |
-| R3 | pending | implementation follows this spec |
-| R4 | pending | implementation follows this spec |
-| R5 | pending | existing fail-closed carrier behavior plus source review |
-| R6 | pending | RuntimeClient source review |
-| R7 | pending | existing secret-free status projection source review |
-| AC-1 | pending | implementation pending |
-| AC-2 | pending | implementation pending |
-| AC-3 | pending | authored-only contracts pending |
-| AC-4 | pending | desktop mirror pending |
-| AC-5 | pending | bookkeeping/evidence pending |
-| AC-6 | pending | source review pending |
-| AC-7 | pending | evidence must preserve open adjacency |
+| R1 | passed | Existing `NetworkAttemptControl::register_stream/cancel` retains exact active socket ownership through controlled connect/proxy/auth-handshake. |
+| R2 | passed | `resume_auth_key_controlled_with_proxy` and `establish_auth_key_controlled_with_proxy` now call `clear_attempt_control` only after successful establishment, releasing active-stream registration without cancelling the adopted connection. |
+| R3 | passed | Existing `EstablishedSession::invoke_raw_controlled` attaches the owned request control, invokes the RPC, then clears it; focused re-ownership contract authored. |
+| R4 | passed | `flush_bounded` now calls the underlying stream flush after applying the write bound, and `send_payload` delegates final flush to `flush_bounded`. |
+| R5 | passed | Existing direct/proxy connect and handshake paths return typed `NetworkError`; enabled proxy carrier branches remain fail-closed and do not enter the disabled/direct branch on error. Executable fault validation is still not-run. |
+| R6 | passed | RuntimeClient `SessionOwner::invalidate_network_transport` remains unchanged: it cancels owned controls and clears live sessions before `apply_network_proxy_command` replaces the projection. |
+| R7 | passed | Runtime status continues to expose only enabled/type/route metadata; proxy credentials, sockets and control internals are not projected. |
+| AC-1 | passed | Canonical network blob `63f9c4a26385a776fbdd42af3d0de44a37857691`. |
+| AC-2 | passed | Same canonical network blob contains bounded underlying flush and `send_payload -> flush_bounded`. |
+| AC-3 | passed | Two lifecycle contracts are authored in the existing telegram-network test module; per Stage A they were not executed. |
+| AC-4 | passed | Desktop provider network mirror at checkpoint `e4fe918b8e8ba5589d1ab3d2cdae888087933719` is byte-identical at blob `63f9c4a26385a776fbdd42af3d0de44a37857691`; desktop spec mirror is synchronized by the round-104 checkpoint line. |
+| AC-5 | passed | Unique ledger/P0/source-closure/evidence checkpoint `734e37f377e7fe58b7a646a6b64b29a92bf9629e` records `implemented / validation_status=not-run / accepted=false`, responsibilities=123, unknown=16172, unread=16145. |
+| AC-6 | passed | RuntimeClient fencing source remains unchanged at blob `3a3da0eb4bf004569a3989e05e55c8b86a199c41`; no settings/runtime/session owner was added. |
+| AC-7 | passed | `protocolForFiles` SendBuffer/ReceiveBuffer socket-option tuning is explicitly excluded from this slice and remains open in round135 evidence. |
+
+Stage-B build/unit/contract/integration/packaged validation remains `not-run`; this source-level compliance record does not mark the responsibility verified or accepted.
