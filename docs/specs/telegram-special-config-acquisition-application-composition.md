@@ -107,3 +107,16 @@ Authored-only contracts:
 - RuntimeClient remains settings-stateless with respect to durable proxy mode/list/selection.
 
 Validation remains deliberately not run in Stage A.
+
+
+## 9. Round 96 source-compliance record
+
+Spec-first commit: cb9b53d2574c012fe90e03df81b8b1336859ee2b.
+Production implementation commit: 1c315c155eb0ba0c49871c08547bb7e67977aa87.
+Runtime implementation blob: 871ebe40ecbd284828b0c16ab64547eefeb3c3a3.
+
+The existing `telegram.refreshSpecialConfig` command now requires the source-neutral `proxyEnabled` projection. `true` is handled before phone resolution, request seeding, request normalization, DirectHttpsRace construction, endpoint decode/application, or temporary MTProto request/session creation, and returns `SpecialConfigRefreshReport { suppressed_by_proxy: true, ...zero work... }`. The public Rust `refresh_special_config` function carries the same explicit projection, so callers cannot bypass the command boundary and accidentally start special-config acquisition while the canonical proxy mode is enabled.
+
+No durable proxy mode/list/selection was added to RuntimeClient. The current checkpoint still lacks a canonical product Settings/application persistence owner, so this implementation deliberately stops at the typed Settings-to-runtime projection boundary rather than fabricating a Telegram settings store. The previously mapped `TDRP-R9-PROXY-MTPROTO-CONSUMER-001` therefore remains pending for its upstream Settings publication edge, while its special-config suppression consumer is now implemented in the real RuntimeClient composition.
+
+Three contracts were authored in `native/telegram-runtime/src/runtime.rs` for direct suppression, strict boolean command parsing, and suppressed command response without phone/network work. They were not executed. No build, typecheck, lint, validator, generator, dependency resolution, lock regeneration, test, package, deployment, installation, runtime acceptance, Actions query, status query, or check query was performed.
