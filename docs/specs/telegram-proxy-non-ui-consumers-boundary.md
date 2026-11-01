@@ -242,3 +242,27 @@ The implementation must author, but Stage A must not execute, contracts proving:
 ### 12.5 Round 100 acceptance
 
 This responsibility may advance to `implemented / validation_status=not-run / accepted=false` only when the platform network/runtime implementation, desktop mirrored production sources, ProductSettingsOwner publication, TelegramClientLease adapter and the authored contracts are all committed into the existing shipping composition. Stage B executable validation remains the only validation blocker for the implemented MTProto selected-proxy/custom-resolution slice; unsupported proxy carrier types remain explicitly fail-closed under their separate carrier responsibilities.
+
+
+## 13. Round 100 source-level implementation record
+
+The Stage-A implementation described in section 12 is now present in the existing owners. No executable validation was run.
+
+Platform implementation commit:
+- `2a4e9542f8b102eeaac8cc28f123e1a62648235d`
+- `native/telegram-protocol/src/web_proxy.rs@98e65d426242f9ff1ca0a3a2213dae1e41eca824`: shared MTProto secret decoding accepts fixed-U 16-byte, 0xdd and 0xee forms while the WebProxy parser continues to reject 0xee.
+- `native/telegram-network/src/domain_resolver.rs@ef6b36c26257ee375df0a690e63dae814656e545`: transient hostname cache, direct no-proxy normalized DoH attempts, source-bounded TTL and successful-IP promotion.
+- `native/telegram-network/src/lib.rs@cf1247b3ec2486ce5e05f5a08ceb30b1e460e1db`: source-neutral NetworkProxyProjection, MTProto proxy carrier connection, unsupported enabled carrier fail-closed behavior and proxy-aware auth-key resume/bootstrap.
+- `native/telegram-runtime/src/runtime.rs@b605b13c110b545d0c703b7fae1cc27d3d10afab`: transient projection command, session/request invalidation on projection change, reusable auth-material preservation and proxy-aware session opening.
+
+Desktop production composition commit:
+- `5d816f224c21019f75725b56b6f8c759871f5295`
+- provider protocol/network/runtime files mirror the platform implementation blobs above;
+- `mahayana-telegram/src/lib.rs@8df8e7286f161452336727d7e5750e45b67c413f` adds only a typed carrier projection adapter on the existing process-lifetime TelegramClientLease;
+- `mahayana-app-host/src/lib.rs@aa10fcfde5f47fc4b56223ff466cd9f128300b33` derives the carrier projection from the canonical ProductSettingsOwner v2, publishes restored settings at startup, and republishes mode/selected/IPv6 changes only after authoritative persistence.
+
+Ownership remains unchanged: ProductSettingsOwner is the only durable proxy settings owner; RuntimeClient and telegram-network hold transient connection state only. No Telegram-specific settings/store/runtime root was added. Enabled SOCKS5/HTTP/Web selections fail closed under their separately open carrier responsibilities instead of falling back to direct Telegram transport.
+
+Authored contracts live next to the production owners and cover fail-closed unsupported carriers, transient resolver promotion, source-neutral carrier DTOs, publication mutation surface, session invalidation and secret-free response projections. They are intentionally not executed in Stage A.
+
+Round-100 source-level disposition for `TDRP-R9-PROXY-MTPROTO-CONSUMER-001`: `implemented / validation_status=not-run / accepted=false`. The implemented slice is MTProto selected-proxy/custom-resolution consumption. Stage-B executable validation remains open; SOCKS5/HTTP/Web carrier implementation remains tracked by their separate responsibilities.
