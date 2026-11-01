@@ -56,3 +56,29 @@ No build, lint, typecheck, dependency resolution, unit/contract/integration/E2E,
 ## 6. Acceptance state
 
 Source implementation may advance to implemented / validation_status=not-run / accepted=false only after the real RuntimeClient command path composes the existing network/protocol owners into apply_resolved_special_config_endpoint. Stage-B executable evidence remains required for verified/accepted.
+
+## 7. Round 95 source-compliance record
+
+Fixed-U reread:
+- special_config_request.cpp blob fdb65506b0a886bc2daeccb61090bc44be7e2d88
+- config_loader.cpp blob 5d07404ba07223016c6728b986dcba10628d7194
+- mtproto_config.cpp blob e8fc605ca197d2bc82a9f73da18eeb945967a99f
+
+Implementation sequence:
+- spec-first authorization: bab99fd54de1cf98dd781f335dad666b3fa2b3ab
+- attempt seeding/shuffle owner: 2224fd041f99e3153be80c8b667270fbbd6ce3c5
+- RuntimeClient acquisition/application composition: 87bb86ae509ca09c46d1b9e26f5177f81bb54830
+- endpoint-queue timing/source-review correction: 602b67b2c2c4b11f197ec968e8bc964e89af7695
+
+Final implementation blobs before this documentation commit:
+- telegram-network special_config_acquisition.rs: 9c8ef0ee0176a78eaa98266b5f92db1757b5db7c
+- telegram-network lib.rs: b073f01ab05e692b46afa4fc931cd3e8dd0893cf
+- telegram-runtime runtime.rs: df8ed7c3cebed632f6591c5809c28753ede9bba0
+- telegram-runtime lib.rs: 9acba52c16de3085a3dbfa61dc3e9f6ba5cdb689
+
+Source review confirms that the shipping RuntimeClient command path now composes the existing request-normalization, direct HTTPS race, HTTP Date/time owner, response-normalization, special-config decode/select, endpoint queue, and apply_resolved_special_config_endpoint owners. Endpoint queue draining begins after each decoded response while the independent HTTP stagger remains live, preserving the source distinction that a decodable SpecialConfigRequest reply does not fence later HTTP attempts. Pending/tried dedupe and randomized dequeue are source-owned in the existing runtime, while temporary-session/help.getConfig/dc_options application remains solely in apply_resolved_special_config_endpoint.
+
+Authored contracts exist in the network seeding module and RuntimeClient queue module. They were not executed. No build, typecheck, lint, validator, generator, dependency resolution, lock regeneration, unit/contract/integration/E2E, package, deployment, installation, runtime acceptance, Actions query, status query, or check query was performed.
+
+Stage-A disposition for TDRP-R9-MTPROTO-SPECIAL-CONFIG-CARRIER-APPLICATION-001: implementation_status=implemented, validation_status=not-run, accepted=false. Stage-B executable evidence remains required before verified/accepted.
+
