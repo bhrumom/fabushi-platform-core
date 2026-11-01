@@ -163,5 +163,9 @@ Behavioral provenance only; no upstream C++ is copied.
 
 | Requirement / AC | Status | Evidence / reason |
 | --- | --- | --- |
-| R1-R13 | pending | Implementation follows this spec in the next Stage-A source commit; executable validation remains deferred. |
-| AC-1-AC-8 | pending | To be updated after source implementation, mirror synchronization and remote CAS evidence. |
+| R1-R11 | passed | `native/telegram-network/src/network_time.rs@cdbd2187aae5f010fa822ab0ce2f8b2dbd0247ea` implements thread-safe MTProto/base and HTTP shifts plus validity, checked failure semantics, and public carrier-independent mutation APIs. `native/telegram-network/src/lib.rs@e0dc33a728916fb7be916956f44cfb0b670486c6` makes the real TLS camouflage handshake consume `http_time_now` and makes auth/bad-message trusted time correction invalidate HTTP calibration. No manifest or lock changed. |
+| R12 | passed | Six focused module contracts are authored in `network_time.rs@cdbd2187aae5f010fa822ab0ce2f8b2dbd0247ea`; none were executed in Stage A. |
+| R13 | passed | The direct HTTP carrier remains blocked under `telegram-doh-special-config-http-carrier-lifecycle-boundary.md`; temporary-DC `help.getConfig` and `dc_options` application remain pending and were not fabricated. |
+| AC-1-AC-5 | passed | Canonical implementation commit `16e9ea2297b4a8d6d8d41177f74bec927d93f11f`; network-time blob `cdbd2187aae5f010fa822ab0ce2f8b2dbd0247ea`; network lib blob `e0dc33a728916fb7be916956f44cfb0b670486c6`. Executable validation remains `not-run`, accepted=false. |
+| AC-6 | passed | Carrier plus temporary-DC config application remain separately mapped/pending. |
+| AC-7-AC-8 | blocked | Desktop provider mirror and unique ledger/P0/source-closure/evidence synchronization are completed in the paired desktop checkpoint commit for this round; this platform spec is finalized before that cross-repository SHA exists and therefore does not embed the later desktop commit identity. Remote cross-repository identity is recorded in the desktop round119 evidence. |
