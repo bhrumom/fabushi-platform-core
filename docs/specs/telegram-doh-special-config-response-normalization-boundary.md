@@ -110,4 +110,17 @@ Behavioral provenance only; no upstream C++ is copied.
 
 ## 11. Compliance record
 
-Initial spec only. Implementation, authored-contract and bookkeeping evidence will be recorded after the spec-first commit. Executable validation remains intentionally not-run.
+Source-level compliance review completed in Stage A. Executable validation remains intentionally deferred and is not represented as pass.
+
+| Requirement / AC | Status | Evidence / reason |
+| --- | --- | --- |
+| R1-R6 | passed | Fixed-U domain-resolver/special-config blobs were reread. `response_normalization.rs@9371f73669b4e6b211608f043119ca4eca56e185` implements structural DoH filtering, TTL projection, TXT ordering/Latin-1 projection and Firestore nested extraction. |
+| R7-R9 | passed | The codec is pure, lives in existing `telegram-protocol`, reuses existing `serde_json`, and makes no Cargo/lock delta. |
+| R10 | passed | Internal and public authored-only contracts are in `response_normalization.rs@9371f73669b4e6b211608f043119ca4eca56e185` and `protocol_contract.rs@259f457eeaacce0ed09f1acf1f0fd821a0269733`; none were executed. |
+| R11 | passed | Carrier request scheduling, HTTP Date mutation, temporary-DC lifecycle and dc-options application remain separately pending. |
+| AC-1-AC-4 | passed | Platform implementation/authored-contract commit `3d27d1aa1272bb15d39c1e2031872a1f2266c62e`; module/lib/contract blobs `9371f73669b4e6b211608f043119ca4eca56e185`, `27543d45f3825321e26c8a0b664e37c8488169e2`, `259f457eeaacce0ed09f1acf1f0fd821a0269733`. |
+| AC-5 | passed | Desktop mirror commit `4070ca2be5db0d22bd54c27857ccf84748ce8763` has the same three blob identities. |
+| AC-6 | pending bookkeeping | Unique desktop ledger/P0/source-closure/evidence synchronization follows this compliance commit. |
+| AC-7-AC-8 | passed | No scheduler/application production delta and no executable validation/release claim. |
+
+No GitHub Actions/status/check query or trigger, build, typecheck, lint, schema validator, generator, dependency resolution, lock regeneration, unit/contract/integration/E2E execution, package, deployment, installation or runtime acceptance was performed.
