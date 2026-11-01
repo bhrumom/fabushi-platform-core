@@ -363,6 +363,7 @@ impl Drop for SessionOwner {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SpecialConfigRefreshReport {
+    pub suppressed_by_proxy: bool,
     pub seeded_attempts: usize,
     pub finished_attempts: usize,
     pub decoded_responses: usize,
@@ -1355,6 +1356,7 @@ pub fn apply_resolved_special_config_endpoint(
 pub fn refresh_special_config(
     client_id: u64,
     phone: &str,
+    proxy_enabled: bool,
 ) -> Result<SpecialConfigRefreshReport, RuntimeError> {
     let test_mode = {
         let clients = CLIENTS
@@ -1363,6 +1365,18 @@ pub fn refresh_special_config(
         let client = clients
             .get(&client_id)
             .ok_or(RuntimeError::ClientNotFound(client_id))?;
+        if proxy_enabled {
+            return Ok(SpecialConfigRefreshReport {
+                suppressed_by_proxy: true,
+                seeded_attempts: 0,
+                finished_attempts: 0,
+                decoded_responses: 0,
+                selected_endpoints: 0,
+                applied_endpoints: 0,
+                changed_dc_ids: Vec::new(),
+                failures: Vec::new(),
+            });
+        }
         client
             .server_directory
             .as_ref()
@@ -1394,6 +1408,7 @@ pub fn refresh_special_config(
     );
     let mut queue = SpecialConfigEndpointQueue::default();
     let mut report = SpecialConfigRefreshReport {
+        suppressed_by_proxy: false,
         seeded_attempts,
         finished_attempts: 0,
         decoded_responses: 0,
@@ -1500,6 +1515,17 @@ fn refresh_special_config_command(
     client_id: u64,
     request: &Value,
 ) -> Result<Value, RuntimeError> {
+    let proxy_enabled = request
+        .get("proxyEnabled")
+        .and_then(Value::as_bool)
+        .ok_or(RuntimeError::InvalidParameter("proxyEnabled"))?;
+    if proxy_enabled {
+        let report = refresh_special_config(client_id, "", true)?;
+        return Ok(json!({
+            "@type": "telegram.specialConfigRefresh",
+            "report": report,
+        }));
+    }
     let phone = if let Some(phone) = request
         .get("phoneNumber")
         .and_then(Value::as_str)
@@ -1521,7 +1547,7 @@ fn refresh_special_config_command(
                 .ok_or(RuntimeError::InvalidParameter("phoneNumber"))?,
         )
     };
-    let report = refresh_special_config(client_id, &phone)?;
+    let report = refresh_special_config(client_id, &phone, false)?;
     Ok(json!({
         "@type": "telegram.specialConfigRefresh",
         "report": report,
@@ -2564,6 +2590,84 @@ mod authorization_restore_contract_tests {
         assert_eq!(client.persisted_transport.as_ref().unwrap().server_time, 73);
     }
 
+
+
+    #[test]
+    fn special_config_proxy_enabled_projection_suppresses_before_acquisition() {
+        let client_id = create_client();
+        let report = refresh_special_config(client_id, "", true).unwrap();
+
+        assert!(report.suppressed_by_proxy);
+        assert_eq!(report.seeded_attempts, 0);
+        assert_eq!(report.finished_attempts, 0);
+        assert_eq!(report.decoded_responses, 0);
+        assert_eq!(report.selected_endpoints, 0);
+        assert_eq!(report.applied_endpoints, 0);
+        assert!(report.changed_dc_ids.is_empty());
+        assert!(report.failures.is_empty());
+
+        close_client(client_id).unwrap();
+    }
+
+    #[test]
+    fn special_config_command_requires_explicit_boolean_proxy_projection() {
+        let client_id = create_client();
+        let missing: Value = serde_json::from_str(&execute_json(
+            client_id,
+            &json!({
+                "@type": "telegram.refreshSpecialConfig",
+                "phoneNumber": "+12025550123"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+        assert_eq!(missing["ok"], false);
+        assert_eq!(missing["errorCode"], "invalid_parameter");
+        assert!(missing["message"]
+            .as_str()
+            .unwrap()
+            .contains("proxyEnabled"));
+
+        let wrong_type: Value = serde_json::from_str(&execute_json(
+            client_id,
+            &json!({
+                "@type": "telegram.refreshSpecialConfig",
+                "proxyEnabled": "enabled",
+                "phoneNumber": "+12025550123"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+        assert_eq!(wrong_type["ok"], false);
+        assert_eq!(wrong_type["errorCode"], "invalid_parameter");
+
+        close_client(client_id).unwrap();
+    }
+
+    #[test]
+    fn special_config_command_reports_proxy_suppression_without_phone_or_network_work() {
+        let client_id = create_client();
+        let response: Value = serde_json::from_str(&execute_json(
+            client_id,
+            &json!({
+                "@type": "telegram.refreshSpecialConfig",
+                "proxyEnabled": true
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+        assert_eq!(response["ok"], true);
+        assert_eq!(
+            response["data"]["@type"],
+            "telegram.specialConfigRefresh"
+        );
+        assert_eq!(response["data"]["report"]["suppressedByProxy"], true);
+        assert_eq!(response["data"]["report"]["seededAttempts"], 0);
+        assert_eq!(response["data"]["report"]["appliedEndpoints"], 0);
+
+        close_client(client_id).unwrap();
+    }
 
     #[test]
     fn special_config_endpoint_queue_deduplicates_pending_and_tried_entries() {
