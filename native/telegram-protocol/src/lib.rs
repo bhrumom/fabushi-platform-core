@@ -14,6 +14,7 @@ pub mod request;
 pub mod schema;
 pub mod session;
 pub mod srp;
+pub mod special_config;
 pub mod tl;
 pub mod tls;
 pub mod transport;
@@ -122,6 +123,10 @@ pub use session::{MessageIdError, MessageIdGuard, SequenceError, SessionSequence
 pub use srp::{
     compute_password_srp_proof, compute_password_srp_proof_with_random, PasswordSrpParameters,
     PasswordSrpProof, SrpError, INPUT_CHECK_PASSWORD_SRP_CONSTRUCTOR,
+};
+pub use special_config::{
+    decode_and_select_special_config, decode_special_config_payload,
+    select_special_config_endpoints, SpecialConfigEndpoint, SpecialConfigError,
 };
 pub use tl::{TlError, TlReader, TlWriter, BOOL_FALSE_CONSTRUCTOR, BOOL_TRUE_CONSTRUCTOR};
 pub use tls::{
