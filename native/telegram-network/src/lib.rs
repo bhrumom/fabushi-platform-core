@@ -6,6 +6,7 @@
 
 mod direct_https;
 mod network_time;
+mod special_config_acquisition;
 pub mod request_normalization;
 
 pub use direct_https::{
@@ -14,6 +15,10 @@ pub use direct_https::{
 };
 pub use network_time::{
     http_time_now, http_time_valid, invalidate_http_time, update_http_time, NetworkTimeError,
+};
+pub use special_config_acquisition::{
+    seed_special_config_attempts, seed_special_config_attempts_with_entropy, secure_random_index,
+    SpecialConfigAttempt, SpecialConfigAttemptKind,
 };
 pub use request_normalization::{
     generate_dns_random_padding, generate_dns_random_padding_with_entropy,
