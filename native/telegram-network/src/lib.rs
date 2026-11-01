@@ -34,7 +34,7 @@ pub use request_normalization::{
 
 use std::{
     io::{self, Read, Write},
-    net::{Shutdown, SocketAddr, TcpStream},
+    net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -331,6 +331,10 @@ pub enum NetworkError {
     InvalidProxyEndpoint,
     #[error("selected network proxy carrier is not implemented")]
     UnsupportedProxyCarrier,
+    #[error("network proxy handshake failed")]
+    ProxyHandshakeFailed,
+    #[error("network proxy authentication failed")]
+    ProxyAuthenticationFailed,
     #[error("selected MTProto proxy secret is invalid")]
     InvalidProxySecret,
     #[error("selected proxy hostname could not be resolved")]
@@ -493,6 +497,57 @@ impl TcpTransport {
         }
     }
 
+    fn connect_forward_proxy_obfuscated_with_attempt(
+        proxy: &NetworkProxyEndpoint,
+        proxy_address: SocketAddr,
+        target: SocketAddr,
+        secret: &[u8],
+        protocol_dc_id: i16,
+        config: &NetworkConfig,
+        control: Option<&NetworkAttemptControl>,
+    ) -> Result<Self, NetworkError> {
+        let connect_timeout = if let Some(control) = control {
+            control.bounded_timeout(config.connect_timeout)?
+        } else {
+            config.connect_timeout
+        };
+        let mut stream = TcpStream::connect_timeout(&proxy_address, connect_timeout)?;
+        stream.set_nodelay(true)?;
+        if let Some(control) = control {
+            control.register_stream(&stream)?;
+            stream.set_read_timeout(Some(control.bounded_timeout(config.read_timeout)?))?;
+            stream.set_write_timeout(Some(control.bounded_timeout(config.write_timeout)?))?;
+        } else {
+            stream.set_read_timeout(Some(config.read_timeout))?;
+            stream.set_write_timeout(Some(config.write_timeout))?;
+        }
+
+        match proxy.kind {
+            NetworkProxyKind::Socks5 => socks5_connect(&mut stream, proxy, target, control)?,
+            NetworkProxyKind::Http => http_connect(&mut stream, proxy, target, control)?,
+            _ => return Err(NetworkError::UnsupportedProxyCarrier),
+        }
+
+        let tls_camouflage = secret.len() >= 21 && secret[0] == 0xee;
+        let tls_read_buffer = if tls_camouflage {
+            perform_tls_camouflage_handshake(&mut stream, secret, control)?
+        } else {
+            Vec::new()
+        };
+        let obfuscated = ObfuscatedConnectionStart::random(secret, protocol_dc_id)?;
+        let mode = obfuscated.mode();
+        Ok(Self {
+            stream: TransportSocket::Tcp(stream),
+            codec: TransportFrameCodec::new(mode),
+            read_buffer: Vec::with_capacity(DEFAULT_READ_CHUNK_BYTES),
+            initialized: false,
+            obfuscated: Some(obfuscated),
+            tls_camouflage,
+            tls_read_buffer,
+            attempt_control: control.cloned(),
+        })
+    }
+
     fn attach_attempt_control(
         &mut self,
         control: NetworkAttemptControl,
@@ -646,6 +701,228 @@ impl TcpTransport {
             attempt_control: control.cloned(),
         })
     }
+}
+
+
+fn proxy_addresses(
+    proxy: &NetworkProxyEndpoint,
+    prefer_ipv6: bool,
+    resolution: &mut ProxyResolutionCache,
+) -> Result<Vec<SocketAddr>, NetworkError> {
+    if proxy.kind == NetworkProxyKind::Socks5 {
+        return Ok(resolution
+            .candidates(&proxy.host, prefer_ipv6)?
+            .into_iter()
+            .map(|ip| SocketAddr::new(ip, proxy.port))
+            .collect());
+    }
+    let mut addresses = (proxy.host.as_str(), proxy.port)
+        .to_socket_addrs()?
+        .collect::<Vec<_>>();
+    addresses.sort_by_key(|address| address.is_ipv6() != prefer_ipv6);
+    if addresses.is_empty() {
+        return Err(NetworkError::ProxyResolutionFailed);
+    }
+    Ok(addresses)
+}
+
+fn socks5_connect(
+    stream: &mut TcpStream,
+    proxy: &NetworkProxyEndpoint,
+    target: SocketAddr,
+    control: Option<&NetworkAttemptControl>,
+) -> Result<(), NetworkError> {
+    let authenticate = !proxy.user.is_empty() || !proxy.password.is_empty();
+    let greeting: &[u8] = if authenticate {
+        &[0x05, 0x02, 0x00, 0x02]
+    } else {
+        &[0x05, 0x01, 0x00]
+    };
+    set_proxy_write_timeout(stream, control)?;
+    stream.write_all(greeting)?;
+    stream.flush()?;
+
+    let mut selection = [0_u8; 2];
+    set_proxy_read_timeout(stream, control)?;
+    stream.read_exact(&mut selection)?;
+    if selection[0] != 0x05 || selection[1] == 0xff {
+        return Err(NetworkError::ProxyHandshakeFailed);
+    }
+    if selection[1] == 0x02 {
+        let user = proxy.user.as_bytes();
+        let password = proxy.password.as_bytes();
+        if user.len() > u8::MAX as usize || password.len() > u8::MAX as usize {
+            return Err(NetworkError::InvalidProxyEndpoint);
+        }
+        let mut request = Vec::with_capacity(3 + user.len() + password.len());
+        request.extend_from_slice(&[0x01, user.len() as u8]);
+        request.extend_from_slice(user);
+        request.push(password.len() as u8);
+        request.extend_from_slice(password);
+        set_proxy_write_timeout(stream, control)?;
+        stream.write_all(&request)?;
+        stream.flush()?;
+        let mut reply = [0_u8; 2];
+        set_proxy_read_timeout(stream, control)?;
+        stream.read_exact(&mut reply)?;
+        if reply != [0x01, 0x00] {
+            return Err(NetworkError::ProxyAuthenticationFailed);
+        }
+    } else if selection[1] != 0x00 {
+        return Err(NetworkError::ProxyAuthenticationFailed);
+    }
+
+    let request = socks5_connect_request(target);
+    set_proxy_write_timeout(stream, control)?;
+    stream.write_all(&request)?;
+    stream.flush()?;
+    let mut head = [0_u8; 4];
+    set_proxy_read_timeout(stream, control)?;
+    stream.read_exact(&mut head)?;
+    if head[0] != 0x05 || head[1] != 0x00 || head[2] != 0x00 {
+        return Err(NetworkError::ProxyHandshakeFailed);
+    }
+    match head[3] {
+        0x01 => read_proxy_exact(stream, 4, control)?,
+        0x04 => read_proxy_exact(stream, 16, control)?,
+        0x03 => {
+            let mut length = [0_u8; 1];
+            set_proxy_read_timeout(stream, control)?;
+            stream.read_exact(&mut length)?;
+            read_proxy_exact(stream, usize::from(length[0]), control)?;
+        }
+        _ => return Err(NetworkError::ProxyHandshakeFailed),
+    }
+    read_proxy_exact(stream, 2, control)?;
+    Ok(())
+}
+
+fn socks5_connect_request(target: SocketAddr) -> Vec<u8> {
+    let mut request = vec![0x05, 0x01, 0x00];
+    match target.ip() {
+        std::net::IpAddr::V4(ip) => {
+            request.push(0x01);
+            request.extend_from_slice(&ip.octets());
+        }
+        std::net::IpAddr::V6(ip) => {
+            request.push(0x04);
+            request.extend_from_slice(&ip.octets());
+        }
+    }
+    request.extend_from_slice(&target.port().to_be_bytes());
+    request
+}
+
+fn http_connect(
+    stream: &mut TcpStream,
+    proxy: &NetworkProxyEndpoint,
+    target: SocketAddr,
+    control: Option<&NetworkAttemptControl>,
+) -> Result<(), NetworkError> {
+    let request = http_connect_request(proxy, target);
+    set_proxy_write_timeout(stream, control)?;
+    stream.write_all(request.as_bytes())?;
+    stream.flush()?;
+
+    const MAX_HEADER: usize = 32 * 1024;
+    let mut response = Vec::with_capacity(512);
+    while response.len() < MAX_HEADER && !response.ends_with(b"\r\n\r\n") {
+        let mut byte = [0_u8; 1];
+        set_proxy_read_timeout(stream, control)?;
+        stream.read_exact(&mut byte)?;
+        response.push(byte[0]);
+    }
+    if !response.ends_with(b"\r\n\r\n") {
+        return Err(NetworkError::ProxyHandshakeFailed);
+    }
+    let first_line = response
+        .split(|byte| *byte == b'\n')
+        .next()
+        .ok_or(NetworkError::ProxyHandshakeFailed)?;
+    let first_line = std::str::from_utf8(first_line)
+        .map_err(|_| NetworkError::ProxyHandshakeFailed)?
+        .trim_end_matches('\r');
+    let mut fields = first_line.split_whitespace();
+    let protocol = fields.next().ok_or(NetworkError::ProxyHandshakeFailed)?;
+    let status = fields.next().ok_or(NetworkError::ProxyHandshakeFailed)?;
+    if !protocol.starts_with("HTTP/") || status != "200" {
+        return Err(if status == "407" {
+            NetworkError::ProxyAuthenticationFailed
+        } else {
+            NetworkError::ProxyHandshakeFailed
+        });
+    }
+    Ok(())
+}
+
+fn http_connect_request(proxy: &NetworkProxyEndpoint, target: SocketAddr) -> String {
+    let authority = target.to_string();
+    let mut request = format!(
+        "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Connection: Keep-Alive\r\n"
+    );
+    if !proxy.user.is_empty() || !proxy.password.is_empty() {
+        let credentials = format!("{}:{}", proxy.user, proxy.password);
+        request.push_str("Proxy-Authorization: Basic ");
+        request.push_str(&base64_standard(credentials.as_bytes()));
+        request.push_str("\r\n");
+    }
+    request.push_str("\r\n");
+    request
+}
+
+fn base64_standard(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(((input.len() + 2) / 3) * 4);
+    for chunk in input.chunks(3) {
+        let a = chunk[0];
+        let b = *chunk.get(1).unwrap_or(&0);
+        let c = *chunk.get(2).unwrap_or(&0);
+        output.push(TABLE[(a >> 2) as usize] as char);
+        output.push(TABLE[(((a & 0x03) << 4) | (b >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            output.push(TABLE[(((b & 0x0f) << 2) | (c >> 6)) as usize] as char);
+        } else {
+            output.push('=');
+        }
+        if chunk.len() > 2 {
+            output.push(TABLE[(c & 0x3f) as usize] as char);
+        } else {
+            output.push('=');
+        }
+    }
+    output
+}
+
+fn read_proxy_exact(
+    stream: &mut TcpStream,
+    length: usize,
+    control: Option<&NetworkAttemptControl>,
+) -> Result<(), NetworkError> {
+    let mut discard = vec![0_u8; length];
+    set_proxy_read_timeout(stream, control)?;
+    stream.read_exact(&mut discard)?;
+    Ok(())
+}
+
+fn set_proxy_read_timeout(
+    stream: &TcpStream,
+    control: Option<&NetworkAttemptControl>,
+) -> Result<(), NetworkError> {
+    if let Some(control) = control {
+        stream.set_read_timeout(Some(control.remaining()?))?;
+    }
+    Ok(())
+}
+
+fn set_proxy_write_timeout(
+    stream: &TcpStream,
+    control: Option<&NetworkAttemptControl>,
+) -> Result<(), NetworkError> {
+    if let Some(control) = control {
+        stream.set_write_timeout(Some(control.remaining()?))?;
+    }
+    Ok(())
 }
 
 fn perform_tls_camouflage_handshake(
@@ -1424,6 +1701,52 @@ fn connect_directory_with_projection(
                 transport,
             ));
         }
+        if matches!(proxy.kind, NetworkProxyKind::Socks5 | NetworkProxyKind::Http) {
+            let proxy_addresses = proxy_addresses(proxy, projection.prefer_ipv6, resolution)?;
+            let candidates = directory.candidates(
+                protocol_dc.directory_dc_id,
+                purpose,
+                config.prefer_ipv6,
+            )?;
+            let mut attempts = Vec::new();
+            for candidate in candidates {
+                let target = SocketAddr::new(candidate.ip_address, candidate.port);
+                let secret = candidate.secret.as_deref().unwrap_or(&[]);
+                for proxy_address in proxy_addresses.iter().copied() {
+                    let effective = bounded_config(config, control)?;
+                    match TcpTransport::connect_forward_proxy_obfuscated_with_attempt(
+                        proxy,
+                        proxy_address,
+                        target,
+                        secret,
+                        protocol_dc.wire_id,
+                        &effective,
+                        control,
+                    ) {
+                        Ok(transport) => {
+                            if proxy.kind == NetworkProxyKind::Socks5 {
+                                resolution.promote(&proxy.host, proxy_address.ip());
+                            }
+                            return Ok((
+                                ConnectedEndpoint {
+                                    dc_id: protocol_dc.directory_dc_id,
+                                    address: target,
+                                },
+                                transport,
+                            ));
+                        }
+                        Err(error) => attempts.push(format!(
+                            "{target} via {} proxy: {error}",
+                            proxy_kind_name(proxy.kind)
+                        )),
+                    }
+                }
+            }
+            if let Some(control) = control {
+                control.remaining()?;
+            }
+            return Err(NetworkError::ConnectFailed { attempts });
+        }
         if proxy.kind != NetworkProxyKind::Mtproto {
             return Err(NetworkError::UnsupportedProxyCarrier);
         }
@@ -1493,6 +1816,15 @@ fn connect_directory_with_projection(
         control.remaining()?;
     }
     Err(NetworkError::ConnectFailed { attempts })
+}
+
+fn proxy_kind_name(kind: NetworkProxyKind) -> &'static str {
+    match kind {
+        NetworkProxyKind::Socks5 => "SOCKS5",
+        NetworkProxyKind::Http => "HTTP",
+        NetworkProxyKind::Mtproto => "MTProto",
+        NetworkProxyKind::Web => "Web",
+    }
 }
 
 fn bounded_config(
@@ -2142,28 +2474,22 @@ mod proxy_projection_contracts {
             ),
             Err(NetworkError::MissingSelectedProxy)
         ));
-        for kind in [
-            NetworkProxyKind::Socks5,
-            NetworkProxyKind::Http,
-        ] {
-            let unsupported = NetworkProxyProjection {
-                enabled: true,
-                selected: Some(endpoint(kind)),
-                prefer_ipv6: false,
-            };
-            assert!(matches!(
-                connect_directory_with_projection(
-                    &directory,
-                    2,
-                    DcPurpose::Main,
-                    &config,
-                    None,
-                    &unsupported,
-                    &mut resolution,
-                ),
-                Err(NetworkError::UnsupportedProxyCarrier)
-            ));
-        }
+        let socks_request = socks5_connect_request("149.154.167.50:443".parse().unwrap());
+        assert_eq!(&socks_request[..4], &[0x05, 0x01, 0x00, 0x01]);
+        assert_eq!(&socks_request[socks_request.len() - 2..], &443_u16.to_be_bytes());
+
+        let mut http_proxy = endpoint(NetworkProxyKind::Http);
+        http_proxy.user = "alice".into();
+        http_proxy.password = "secret".into();
+        let http_request = http_connect_request(
+            &http_proxy,
+            "149.154.167.50:443".parse().unwrap(),
+        );
+        assert!(http_request.starts_with(
+            "CONNECT 149.154.167.50:443 HTTP/1.1\r\nHost: 149.154.167.50:443\r\n"
+        ));
+        assert!(http_request.contains("Proxy-Authorization: Basic YWxpY2U6c2VjcmV0\r\n"));
+        assert!(http_request.ends_with("\r\n\r\n"));
     }
 
     #[test]
