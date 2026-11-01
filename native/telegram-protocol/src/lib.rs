@@ -18,6 +18,7 @@ pub mod tl;
 pub mod tls;
 pub mod transport;
 pub mod updates;
+pub mod web_proxy;
 
 pub use api::{
     build_account_get_password, build_account_send_verify_email_code, build_account_verify_email,
@@ -139,4 +140,10 @@ pub use updates::{
     UPDATES_DIFFERENCE_EMPTY_CONSTRUCTOR, UPDATES_DIFFERENCE_TOO_LONG_CONSTRUCTOR,
     NEW_SESSION_CREATED_CONSTRUCTOR, UPDATES_GET_DIFFERENCE_CONSTRUCTOR,
     UPDATES_GET_STATE_CONSTRUCTOR, UPDATES_STATE_CONSTRUCTOR,
+};
+
+pub use web_proxy::{
+    decode_web_proxy_link_secret, encode_web_proxy_link_secret, normalize_web_proxy_base_path,
+    parse_web_proxy_secret_text, validate_canonical_web_proxy_host, web_proxy_bridge_capability,
+    web_proxy_bridge_path, web_proxy_bridge_url, WebProxyConfigError,
 };

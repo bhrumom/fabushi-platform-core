@@ -4481,3 +4481,165 @@ fn tls_camouflage_application_records_preserve_fixed_u_prefix_chunking_and_lengt
         Some(fabushi_telegram_protocol::DecodedTlsRecord::Empty { consumed_bytes: 5 })
     );
 }
+
+
+#[test]
+fn web_proxy_bridge_capability_preserves_fixed_u_domain_separation_and_vectors() {
+    let plain = "000102030405060708090a0b0c0d0e0f";
+    let padded = "dd000102030405060708090a0b0c0d0e0f";
+    let path = "dobry-cola-super-app";
+
+    assert_eq!(
+        fabushi_telegram_protocol::web_proxy_bridge_capability(
+            "proxy.example.com",
+            "",
+            plain,
+        )
+        .unwrap(),
+        "MHLEY5PmW1GWqJkSrlmJpvJUiLhBH_QKy6yKg8a0JPk"
+    );
+    assert_eq!(
+        fabushi_telegram_protocol::web_proxy_bridge_capability(
+            "proxy.example.com",
+            "",
+            padded,
+        )
+        .unwrap(),
+        "IpJrt3e7sKtzPyoXy6w-Zj6GGEvsvclN66JzQEfPYLA"
+    );
+    assert_eq!(
+        fabushi_telegram_protocol::web_proxy_bridge_capability(
+            "proxy.example.com",
+            path,
+            plain,
+        )
+        .unwrap(),
+        "hHz99Xs93EN1j91G9gpNepXwGNNt5YdAFkEVk_LlqdQ"
+    );
+    assert_eq!(
+        fabushi_telegram_protocol::web_proxy_bridge_capability(
+            "proxy.example.com",
+            path,
+            padded,
+        )
+        .unwrap(),
+        "TGUkZaevsavLbHvlNWipnRoYxgzZ51ioWvbxgGT3wHo"
+    );
+    assert_ne!(
+        fabushi_telegram_protocol::web_proxy_bridge_capability(
+            "proxy.example.com",
+            "",
+            plain,
+        )
+        .unwrap(),
+        fabushi_telegram_protocol::web_proxy_bridge_capability(
+            "proxy.example.com",
+            path,
+            plain,
+        )
+        .unwrap()
+    );
+}
+
+#[test]
+fn web_proxy_bridge_path_and_url_preserve_fixed_u_canonical_boundary() {
+    assert_eq!(
+        fabushi_telegram_protocol::normalize_web_proxy_base_path(" /two/segments/ ").unwrap(),
+        "two/segments"
+    );
+    assert_eq!(
+        fabushi_telegram_protocol::web_proxy_bridge_path("").unwrap(),
+        "/"
+    );
+    assert_eq!(
+        fabushi_telegram_protocol::web_proxy_bridge_path("MixedCase").unwrap(),
+        "/MixedCase/"
+    );
+    assert_eq!(
+        fabushi_telegram_protocol::web_proxy_bridge_url(
+            "proxy.example.com",
+            "dobry-cola-super-app",
+            "000102030405060708090a0b0c0d0e0f",
+        )
+        .unwrap(),
+        "https://proxy.example.com/dobry-cola-super-app/?bridge=hHz99Xs93EN1j91G9gpNepXwGNNt5YdAFkEVk_LlqdQ"
+    );
+
+    for invalid in [
+        "-lead",
+        "_lead",
+        "with space",
+        "empty//segment",
+        "trailing//",
+        "a/-lead",
+        "per%20cent",
+        "dot.ted",
+        "..",
+    ] {
+        assert!(
+            fabushi_telegram_protocol::normalize_web_proxy_base_path(invalid).is_err(),
+            "{invalid}"
+        );
+    }
+    assert!(fabushi_telegram_protocol::normalize_web_proxy_base_path(&"a".repeat(129)).is_err());
+    assert_eq!(
+        fabushi_telegram_protocol::normalize_web_proxy_base_path(&"a".repeat(128)).unwrap(),
+        "a".repeat(128)
+    );
+
+    assert!(fabushi_telegram_protocol::validate_canonical_web_proxy_host("proxy.example.com").is_ok());
+    for invalid in [
+        "Proxy.Example.COM",
+        "localhost",
+        "127.0.0.1",
+        "127.1",
+        "0x7f.1",
+        "0177.0.0.1",
+        "1.2.3",
+        "site.example:443",
+        "site..example",
+        "site.example.",
+    ] {
+        assert!(
+            fabushi_telegram_protocol::validate_canonical_web_proxy_host(invalid).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
+fn web_proxy_link_secret_marker_is_path_aware_and_fail_closed() {
+    let plain = "8561944064fc730cbfa4473562d8ec59";
+    let marked = fabushi_telegram_protocol::encode_web_proxy_link_secret(
+        "dobry-cola-super-app",
+        plain,
+    )
+    .unwrap();
+    assert_eq!(marked, "cIVhlEBk_HMMv6RHNWLY7Fk");
+    assert_eq!(
+        fabushi_telegram_protocol::decode_web_proxy_link_secret(&marked, true).unwrap(),
+        plain
+    );
+    assert_eq!(
+        fabushi_telegram_protocol::decode_web_proxy_link_secret(&marked, false).unwrap(),
+        plain
+    );
+    assert_eq!(
+        fabushi_telegram_protocol::encode_web_proxy_link_secret("", plain).unwrap(),
+        plain
+    );
+    assert_eq!(
+        fabushi_telegram_protocol::decode_web_proxy_link_secret(plain, false).unwrap(),
+        plain
+    );
+    assert!(matches!(
+        fabushi_telegram_protocol::decode_web_proxy_link_secret(plain, true),
+        Err(fabushi_telegram_protocol::WebProxyConfigError::UnmarkedPathSecret)
+    ));
+
+    let tls_secret = format!("ee{}746573742e6578616d706c65", "11".repeat(16));
+    assert!(matches!(
+        fabushi_telegram_protocol::parse_web_proxy_secret_text(&tls_secret),
+        Err(fabushi_telegram_protocol::WebProxyConfigError::UnsupportedSecret)
+    ));
+}
