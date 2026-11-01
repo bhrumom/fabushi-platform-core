@@ -101,3 +101,74 @@ Future contracts, only after the missing lifecycle exists, must cover secondary 
 | Desktop mirror/bookkeeping | source-identical / recorded | desktop mirror commit 8f04c5f35cc6674b33f27edb09fe66fb1db7d6f0 carries runtime blob d531db9176a09e973690b3a44da52208e09e33b5. Desktop bookkeeping commit b8b5505c71c7e72806ded1255daaeac68163b039 adds the unique ledger row and round121 evidence with validation_status=not-run and accepted=false. |
 
 The canonical multi-session owner is implemented only at source level. Executable verification and acceptance remain deferred to Stage B/C.
+
+
+## 11. Round 91 per-real-DC auth-material and secondary-session extension
+
+This addendum narrows the next carrier-independent sub-responsibility. It supersedes only the Round 90 statements that secondary session creation/auth sharing were wholly future work; request cancellation, total-attempt timing, endpoint-only config application, and HTTP acquisition remain open.
+
+### 11.1 Additional fixed-U source
+
+- Telegram/SourceFiles/mtproto/details/mtproto_dcenter.h@651dcf171544745efc0b5d53afd8af4a57fa5a88
+- Telegram/SourceFiles/mtproto/details/mtproto_dcenter.cpp@ef0df612db798338d166f47087bb35c1d29ff72b
+- Telegram/SourceFiles/mtproto/session.h@d6f197d233fa4dcc6d2b19745e6d2787c5227911
+- Telegram/SourceFiles/mtproto/session.cpp@40d7048c3057c7c5523b786048670524c8bebe4c
+- Telegram/SourceFiles/mtproto/session_private.cpp@13cbc76ec723386027b5b4dcac79999b791c4614
+- Telegram/SourceFiles/mtproto/mtp_instance.cpp@d25fe3b72298fab371854f80186ee8e4777ea087
+
+Fixed-U `getDcById` maps temporary logical 1000+d to the same real Dcenter d used by ordinary logical d. SessionData/Session delegate key access to that Dcenter. Dcenter keeps auth-key state independently of any one Session, and SessionPrivate first reuses the real-DC key before initiating key creation. Therefore closing the source-neutral runtime equivalent requires auth material to be owned per real/auth DC, not duplicated per logical session.
+
+### 11.2 Existing-owner-first target
+
+The existing `RuntimeClient::sessions` remains the only session/auth-material lifecycle owner. Add an in-memory auth-material table keyed by `SessionRoute.auth_dc_id`. Each material record contains the existing `AuthKey`, server salt/time needed by `resume_auth_key`, and the environment bit needed to prevent production/test cross-reuse.
+
+No new runtime, provider, account, persistence namespace, DC directory, or source-named Telegram subsystem is permitted.
+
+### 11.3 Required behavior
+
+1. Primary live-session insertion SHALL refresh auth material for its real/auth DC.
+2. Restored `PersistedTransportState` SHALL seed the same owner lazily before a reconnect. The encrypted `transport.v1` format remains unchanged.
+3. A generic logical-session take/open primitive SHALL:
+   - reuse an already-owned logical session when present;
+   - otherwise derive the logical route and look up auth material by real/auth DC;
+   - call existing `resume_auth_key` with the requested logical DC and caller-supplied `DcDirectory` when reusable material exists;
+   - otherwise call existing `establish_auth_key` for that logical DC and directory;
+   - record the resulting auth material back under the real/auth DC before returning the EstablishedSession.
+4. Real 2 and temporary 1002 SHALL therefore be able to hold distinct EstablishedSession instances while sharing one real-DC auth-material record.
+5. A production/test environment mismatch for an existing real-DC material SHALL fail closed rather than reuse the key across environments.
+6. Removing or killing a non-primary logical session SHALL remove that EstablishedSession only. The real-DC auth material remains owned by RuntimeClient for reuse, matching fixed-U Dcenter lifetime being broader than Session lifetime.
+7. Secondary auth material remains memory-only. This round MUST NOT extend the storage schema or persist temporary routing overrides/non-primary sessions.
+8. The primitive accepts a caller-supplied directory, so a future special-config caller can supply a one-endpoint temporary directory without coupling this owner to HTTP/DoH/Firestore acquisition.
+
+### 11.4 Authored-only contracts
+
+Author but do not execute contracts proving:
+- persisted primary DC 2 seeds auth material addressable by logical 1002/auth DC 2;
+- logical 2 and 1002 resolve to the same material slot while remaining distinct session keys;
+- removing logical 1002 does not discard the shared real-DC material;
+- environment mismatch is rejected;
+- primary take/put continues to use the same owner and unchanged persisted transport format.
+
+No executable network handshake is required in Stage A; the production open path itself must call the real existing `resume_auth_key` / `establish_auth_key` functions.
+
+### 11.5 Remaining blockers after this extension
+
+Even after the auth-material/open primitive is implemented, `TDRP-R9-MTPROTO-SPECIAL-CONFIG-CARRIER-APPLICATION-001` remains pending for:
+- an independently cancellable in-flight request owner;
+- the fixed 6000 ms total-attempt termination lifecycle;
+- bare help.getConfig dispatch orchestration on the temporary session;
+- dc_options-only replacement/change publication;
+- the separately blocked direct NoProxy HTTPS/Web-PKI carrier.
+
+No synchronous read-timeout surrogate or special-config-only public command is introduced.
+
+### 11.6 Round 91 source-level acceptance criteria
+
+- R91-AC-1: the additional Dcenter/Session key reuse/creation source is pinned by exact fixed-U blob SHA.
+- R91-AC-2: RuntimeClient SessionOwner becomes the sole per-real-DC auth-material owner.
+- R91-AC-3: the generic production open path can return an actual secondary EstablishedSession using resume_auth_key when material exists or establish_auth_key when absent.
+- R91-AC-4: persisted primary auth material can seed secondary temporary logical routing without a storage-schema delta.
+- R91-AC-5: logical-session teardown retains auth material and production/test reuse fails closed.
+- R91-AC-6: focused contracts are authored but not run.
+- R91-AC-7: HTTP carrier, request cancellation/6000 ms, help.getConfig orchestration, and dc_options-only application remain explicitly pending.
+- R91-AC-8: no Actions/status/check query, build, typecheck, lint, validator, generator, dependency resolution, lock regeneration, test execution, package, deploy, install, or runtime acceptance is performed.
