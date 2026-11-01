@@ -16,5 +16,7 @@ path = "src/bin/telegram-auth-key-probe.rs"
 [dependencies]
 fabushi-telegram-protocol = { path = "../telegram-protocol" }
 getrandom = "0.2"
+rustls = { version = "0.23.41", default-features = false, features = ["ring", "std", "tls12"] }
 thiserror = "1"
+webpki-roots = "0.26.11"
 zeroize = "1"

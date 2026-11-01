@@ -4,9 +4,14 @@
 //! cryptography, and authorization state remain in `telegram-protocol` so the
 //! same protocol implementation can be reused by native and Web transports.
 
+mod direct_https;
 mod network_time;
 pub mod request_normalization;
 
+pub use direct_https::{
+    execute_direct_https_get, DirectHttpsError, DirectHttpsRace, DirectHttpsReply,
+    DirectHttpsResponse, StaggerSettlementPolicy, SERVICE_REQUEST_STAGGER,
+};
 pub use network_time::{
     http_time_now, http_time_valid, invalidate_http_time, update_http_time, NetworkTimeError,
 };
