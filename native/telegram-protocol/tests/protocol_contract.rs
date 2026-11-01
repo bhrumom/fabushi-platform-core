@@ -4875,6 +4875,15 @@ fn dc_options_only_replacement_preserves_metadata_and_publishes_exact_dc_changes
     ];
     assert!(directory.replace_endpoints(duplicate).unwrap().is_empty());
     assert_eq!(directory.endpoints(), before.as_slice());
+
+    let without_current_dc = vec![before[1].clone()];
+    assert_eq!(
+        directory.replace_endpoints(without_current_dc).unwrap(),
+        vec![2]
+    );
+    assert_eq!(directory.this_dc(), 2);
+    assert_eq!(directory.endpoints().len(), 1);
+    assert_eq!(directory.endpoints()[0].dc_id, 4);
 }
 
 

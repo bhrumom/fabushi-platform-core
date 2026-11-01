@@ -2310,6 +2310,15 @@ mod authorization_restore_contract_tests {
         assert!(!directory.test_mode());
         assert_eq!(client.persisted_transport.as_ref().unwrap().server_salt, 71);
         assert_eq!(client.persisted_transport.as_ref().unwrap().server_time, 73);
+
+        let changed = replace_server_dc_options(&mut client, vec![endpoint(4, 53)], false).unwrap();
+        assert_eq!(changed, vec![2]);
+        let directory = client.server_directory.as_ref().unwrap();
+        assert_eq!(directory.this_dc(), 2);
+        assert_eq!(directory.endpoints().len(), 1);
+        assert_eq!(directory.endpoints()[0].dc_id, 4);
+        assert_eq!(client.persisted_transport.as_ref().unwrap().server_salt, 71);
+        assert_eq!(client.persisted_transport.as_ref().unwrap().server_time, 73);
     }
 
 
