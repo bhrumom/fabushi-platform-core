@@ -266,3 +266,16 @@ Ownership remains unchanged: ProductSettingsOwner is the only durable proxy sett
 Authored contracts live next to the production owners and cover fail-closed unsupported carriers, transient resolver promotion, source-neutral carrier DTOs, publication mutation surface, session invalidation and secret-free response projections. They are intentionally not executed in Stage A.
 
 Round-100 source-level disposition for `TDRP-R9-PROXY-MTPROTO-CONSUMER-001`: `implemented / validation_status=not-run / accepted=false`. The implemented slice is MTProto selected-proxy/custom-resolution consumption. Stage-B executable validation remains open; SOCKS5/HTTP/Web carrier implementation remains tracked by their separate responsibilities.
+
+
+## 14. Round 100 startup publication correction
+
+Desktop manual source review after the initial production composition found that startup restore must publish only the transient carrier projection. Calling `refreshSpecialConfig(false)` during AppHost construction can require authorization phone context and is not required to restore the carrier route.
+
+Desktop correction commit: `2f0798e8709b3a3ea6b200f092060db6c1dccb62`; corrected AppHost blob: `1fe55278a834b828b6ffdd8e2ca933fd2eaa3ef9`.
+
+The final publication split is therefore:
+- startup restore: ProductSettingsOwner snapshot -> `TelegramClientLease::apply_network_proxy` only, before normal Telegram host use;
+- persisted mode/selected/IPv6 mutations: carrier projection publication, and the existing mode-derived `refreshSpecialConfig` publication where the settings mutation surface already performs it.
+
+This preserves the source-neutral carrier restore without introducing an authorization-context dependency into startup. The correction was source-reviewed only; no executable validation was run.
