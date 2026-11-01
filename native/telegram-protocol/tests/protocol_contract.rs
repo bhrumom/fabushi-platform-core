@@ -4642,4 +4642,10 @@ fn web_proxy_link_secret_marker_is_path_aware_and_fail_closed() {
         fabushi_telegram_protocol::parse_web_proxy_secret_text(&tls_secret),
         Err(fabushi_telegram_protocol::WebProxyConfigError::UnsupportedSecret)
     ));
+    for malformed in ["A", "!!!!", "YWJjZA==="] {
+        assert!(
+            fabushi_telegram_protocol::parse_web_proxy_secret_text(malformed).is_err(),
+            "{malformed}"
+        );
+    }
 }
