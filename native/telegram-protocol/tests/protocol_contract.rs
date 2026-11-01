@@ -4330,3 +4330,154 @@ fn protocol_dc_identity_keeps_cdn_and_regular_roles_positive() {
         4
     );
 }
+
+
+#[test]
+fn tls_camouflage_secret_and_client_hello_preserve_fixed_u_wire_contract() {
+    let mut secret = vec![0xee];
+    secret.extend_from_slice(&[0x11; 16]);
+    secret.extend_from_slice(b"test.example");
+
+    let parsed = fabushi_telegram_protocol::TlsCamouflageSecret::parse(&secret).unwrap();
+    assert_eq!(parsed.key(), &[0x11; 16]);
+    assert_eq!(parsed.domain(), b"test.example");
+    assert!(fabushi_telegram_protocol::TlsCamouflageSecret::parse(&secret[..20]).is_err());
+
+    let mut counter = 0_u8;
+    let hello = fabushi_telegram_protocol::prepare_tls_client_hello_with_entropy(
+        &secret,
+        0x1234_5678,
+        &mut |output| {
+            for byte in output {
+                *byte = counter;
+                counter = counter.wrapping_add(17);
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert!(hello.bytes.len() <= 2048);
+    assert_eq!(&hello.bytes[..3], b"\x16\x03\x01");
+    assert!(hello
+        .bytes
+        .windows(b"test.example".len())
+        .any(|window| window == b"test.example"));
+    assert_eq!(&hello.bytes[11..43], &hello.digest);
+
+    let mut zeroed = hello.bytes.clone();
+    zeroed[11..43].fill(0);
+    let mut expected =
+        fabushi_telegram_protocol::tls_camouflage_hmac(&[0x11; 16], &zeroed);
+    let mut tail = u32::from_le_bytes(expected[28..32].try_into().unwrap());
+    tail ^= 0x1234_5678;
+    expected[28..32].copy_from_slice(&tail.to_le_bytes());
+    assert_eq!(hello.digest, expected);
+}
+
+#[test]
+fn tls_camouflage_server_hello_is_incremental_authenticated_and_fail_closed() {
+    let mut secret = vec![0xee];
+    secret.extend_from_slice(&[0x22; 16]);
+    secret.extend_from_slice(b"domain");
+    let client_digest = [0x44; 32];
+
+    let mut server = Vec::new();
+    server.extend_from_slice(b"\x16\x03\x03");
+    server.extend_from_slice(&40_u16.to_be_bytes());
+    server.extend_from_slice(&[0_u8; 40]);
+    server.extend_from_slice(b"\x14\x03\x03\x00\x01\x01\x17\x03\x03");
+    server.extend_from_slice(&0_u16.to_be_bytes());
+
+    let mut authenticated = Vec::new();
+    authenticated.extend_from_slice(&client_digest);
+    authenticated.extend_from_slice(&server);
+    let digest = fabushi_telegram_protocol::tls_camouflage_hmac(&[0x22; 16], &authenticated);
+    server[11..43].copy_from_slice(&digest);
+
+    for cut in 0..server.len() {
+        assert_eq!(
+            fabushi_telegram_protocol::inspect_tls_server_hello(
+                &secret,
+                &client_digest,
+                &server[..cut],
+            )
+            .unwrap(),
+            None
+        );
+    }
+    assert_eq!(
+        fabushi_telegram_protocol::inspect_tls_server_hello(
+            &secret,
+            &client_digest,
+            &server,
+        )
+        .unwrap(),
+        Some(server.len())
+    );
+
+    let mut corrupted = server.clone();
+    corrupted[20] ^= 0x01;
+    assert!(matches!(
+        fabushi_telegram_protocol::inspect_tls_server_hello(
+            &secret,
+            &client_digest,
+            &corrupted,
+        ),
+        Err(fabushi_telegram_protocol::TlsCamouflageError::ServerHelloAuthenticationFailed)
+    ));
+
+    let mut wrong_marker = server;
+    wrong_marker[0] = 0x15;
+    assert!(matches!(
+        fabushi_telegram_protocol::inspect_tls_server_hello(
+            &secret,
+            &client_digest,
+            &wrong_marker,
+        ),
+        Err(fabushi_telegram_protocol::TlsCamouflageError::InvalidServerHello)
+    ));
+}
+
+#[test]
+fn tls_camouflage_application_records_preserve_fixed_u_prefix_chunking_and_lengths() {
+    let prefix = [0x33_u8; 64];
+    let payload = vec![0x55_u8; 3000];
+    let encoded =
+        fabushi_telegram_protocol::encode_tls_client_records(&prefix, &payload).unwrap();
+
+    assert_eq!(&encoded[..6], b"\x14\x03\x03\x00\x01\x01");
+    assert_eq!(&encoded[6..9], b"\x17\x03\x03");
+    let first_length = u16::from_be_bytes(encoded[9..11].try_into().unwrap()) as usize;
+    assert_eq!(first_length, 2878);
+    assert_eq!(&encoded[11..75], &prefix);
+    assert_eq!(&encoded[75..11 + first_length], &payload[..2814]);
+
+    let second = 11 + first_length;
+    assert_eq!(&encoded[second..second + 3], b"\x17\x03\x03");
+    let second_length =
+        u16::from_be_bytes(encoded[second + 3..second + 5].try_into().unwrap()) as usize;
+    assert_eq!(second_length, payload.len() - 2814);
+    assert_eq!(
+        &encoded[second + 5..second + 5 + second_length],
+        &payload[2814..]
+    );
+
+    let server_record = [b"\x17\x03\x03".as_slice(), &4_u16.to_be_bytes(), b"pong"].concat();
+    assert_eq!(
+        fabushi_telegram_protocol::decode_tls_server_record(&server_record).unwrap(),
+        Some(fabushi_telegram_protocol::DecodedTlsRecord::Payload {
+            payload: b"pong".to_vec(),
+            consumed_bytes: 9,
+        })
+    );
+    assert_eq!(
+        fabushi_telegram_protocol::decode_tls_server_record(&server_record[..8]).unwrap(),
+        None
+    );
+    assert!(fabushi_telegram_protocol::decode_tls_server_record(b"\x16\x03\x03\x00\x00").is_err());
+    assert_eq!(
+        fabushi_telegram_protocol::decode_tls_server_record(b"\x17\x03\x03\x00\x00").unwrap(),
+        Some(fabushi_telegram_protocol::DecodedTlsRecord::Empty { consumed_bytes: 5 })
+    );
+}

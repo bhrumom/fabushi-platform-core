@@ -271,3 +271,80 @@ fn unsolicited_abridged_quick_ack_fails_closed_without_correlation_owner() {
     ));
     server.join().unwrap();
 }
+
+
+#[test]
+fn tls_camouflage_shipping_handshake_wraps_obfuscated_transport_without_scheduler_state() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut secret = vec![0xee];
+    secret.extend_from_slice(&[0x31; 16]);
+    secret.extend_from_slice(b"test");
+    let server_secret = secret.clone();
+
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+
+        let mut hello_header = [0_u8; 5];
+        stream.read_exact(&mut hello_header).unwrap();
+        assert_eq!(&hello_header[..3], b"\x16\x03\x01");
+        let hello_body = u16::from_be_bytes(hello_header[3..5].try_into().unwrap()) as usize;
+        let mut client_hello = hello_header.to_vec();
+        client_hello.resize(5 + hello_body, 0);
+        stream.read_exact(&mut client_hello[5..]).unwrap();
+        let client_digest: [u8; 32] = client_hello[11..43].try_into().unwrap();
+
+        let mut server_hello = Vec::new();
+        server_hello.extend_from_slice(b"\x16\x03\x03");
+        server_hello.extend_from_slice(&40_u16.to_be_bytes());
+        server_hello.extend_from_slice(&[0_u8; 40]);
+        server_hello.extend_from_slice(b"\x14\x03\x03\x00\x01\x01\x17\x03\x03");
+        server_hello.extend_from_slice(&0_u16.to_be_bytes());
+        let mut authenticated = Vec::new();
+        authenticated.extend_from_slice(&client_digest);
+        authenticated.extend_from_slice(&server_hello);
+        let digest =
+            fabushi_telegram_protocol::tls_camouflage_hmac(&[0x31; 16], &authenticated);
+        server_hello[11..43].copy_from_slice(&digest);
+        stream.write_all(&server_hello).unwrap();
+
+        let mut client_prefix = [0_u8; 6];
+        stream.read_exact(&mut client_prefix).unwrap();
+        assert_eq!(client_prefix, *b"\x14\x03\x03\x00\x01\x01");
+
+        let mut record_header = [0_u8; 5];
+        stream.read_exact(&mut record_header).unwrap();
+        assert_eq!(&record_header[..3], b"\x17\x03\x03");
+        let record_length = u16::from_be_bytes(record_header[3..5].try_into().unwrap()) as usize;
+        let mut record = vec![0_u8; record_length];
+        stream.read_exact(&mut record).unwrap();
+        assert!(record.len() > 64);
+
+        let prefix: [u8; 64] = record[..64].try_into().unwrap();
+        let mut reconstructed_nonce = [0x77_u8; 64];
+        reconstructed_nonce[..56].copy_from_slice(&prefix[..56]);
+        let mut peer =
+            ObfuscatedConnectionStart::from_nonce(&server_secret, 2, reconstructed_nonce).unwrap();
+
+        let mut encrypted_request = record[64..].to_vec();
+        peer.encrypt_outbound(&mut encrypted_request);
+        let encoded_length =
+            u32::from_le_bytes(encrypted_request[..4].try_into().unwrap()) as usize;
+        assert!(encoded_length >= 12);
+        assert_eq!(&encrypted_request[4..16], &[0x41; 12]);
+
+        let mut response_codec = TransportFrameCodec::new(TransportMode::PaddedIntermediate);
+        let mut response = response_codec.encode_with_padding(&[0x42; 12], &[]).unwrap();
+        peer.decrypt_inbound(&mut response);
+        let response_record =
+            fabushi_telegram_protocol::encode_tls_client_records(&[], &response).unwrap();
+        stream.write_all(&response_record).unwrap();
+    });
+
+    let config = NetworkConfig::default();
+    let mut transport =
+        TcpTransport::connect_obfuscated(address, &secret, 2, &config).unwrap();
+    transport.send_payload(&[0x41; 12]).unwrap();
+    assert_eq!(transport.receive_payload().unwrap(), vec![0x42; 12]);
+    server.join().unwrap();
+}
