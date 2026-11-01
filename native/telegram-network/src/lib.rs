@@ -585,7 +585,7 @@ impl TcpTransport {
 
     fn flush_bounded(&mut self) -> Result<(), NetworkError> {
         self.apply_write_bound()?;
-        self.flush_bounded()?;
+        self.stream.flush()?;
         Ok(())
     }
 
@@ -613,7 +613,7 @@ impl TcpTransport {
             self.write_all_bounded(&frame)?;
         }
         self.initialized = true;
-        self.stream.flush()?;
+        self.flush_bounded()?;
         Ok(())
     }
 
@@ -1886,7 +1886,7 @@ pub fn resume_auth_key_controlled_with_proxy(
     projection: &NetworkProxyProjection,
     resolution: &mut ProxyResolutionCache,
 ) -> Result<EstablishedSession, NetworkError> {
-    let (endpoint, transport) = connect_directory_with_projection(
+    let (endpoint, mut transport) = connect_directory_with_projection(
         directory,
         dc_id,
         DcPurpose::Main,
@@ -1895,6 +1895,7 @@ pub fn resume_auth_key_controlled_with_proxy(
         projection,
         resolution,
     )?;
+    transport.clear_attempt_control();
     Ok(EstablishedSession {
         endpoint,
         transport,
@@ -1992,14 +1993,16 @@ pub fn establish_auth_key_controlled_with_proxy(
     projection: &NetworkProxyProjection,
     resolution: &mut ProxyResolutionCache,
 ) -> Result<EstablishedSession, NetworkError> {
-    establish_auth_key_with_projection(
+    let mut session = establish_auth_key_with_projection(
         directory,
         dc_id,
         config,
         Some(control),
         projection,
         resolution,
-    )
+    )?;
+    session.transport.clear_attempt_control();
+    Ok(session)
 }
 
 fn establish_auth_key_with_projection(
@@ -2436,6 +2439,61 @@ mod network_attempt_control_contract_tests {
             Err(NetworkError::AttemptDeadlineExceeded)
         ));
     }
+
+    #[test]
+    fn successful_connect_handoff_releases_attempt_stream_without_cancelling_control() {
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let accept = thread::spawn(move || listener.accept().unwrap().0);
+        let stream = TcpStream::connect(address).unwrap();
+        let _peer = accept.join().unwrap();
+
+        let control = NetworkAttemptControl::new(Duration::from_secs(60));
+        let mut transport = TcpTransport::from_stream(stream, TransportMode::Abridged);
+        transport.attach_attempt_control(control.clone()).unwrap();
+
+        assert!(transport.attempt_control.is_some());
+        assert!(control.inner.active_stream.lock().unwrap().is_some());
+
+        transport.clear_attempt_control();
+
+        assert!(transport.attempt_control.is_none());
+        assert!(control.inner.active_stream.lock().unwrap().is_none());
+        assert!(!control.is_cancelled());
+        assert!(control.remaining().is_ok());
+    }
+
+    #[test]
+    fn request_control_can_be_reowned_after_connect_handoff_and_cleared_again() {
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let accept = thread::spawn(move || listener.accept().unwrap().0);
+        let stream = TcpStream::connect(address).unwrap();
+        let _peer = accept.join().unwrap();
+
+        let connect_control = NetworkAttemptControl::new(Duration::from_secs(60));
+        let request_control = NetworkAttemptControl::new(Duration::from_secs(60));
+        let mut transport = TcpTransport::from_stream(stream, TransportMode::Abridged);
+
+        transport.attach_attempt_control(connect_control.clone()).unwrap();
+        transport.clear_attempt_control();
+        assert!(connect_control.inner.active_stream.lock().unwrap().is_none());
+
+        transport.attach_attempt_control(request_control.clone()).unwrap();
+        assert!(transport.attempt_control.is_some());
+        assert!(request_control.inner.active_stream.lock().unwrap().is_some());
+
+        transport.clear_attempt_control();
+        assert!(request_control.inner.active_stream.lock().unwrap().is_none());
+        assert!(!request_control.is_cancelled());
+    }
+
 }
 
 #[cfg(test)]
