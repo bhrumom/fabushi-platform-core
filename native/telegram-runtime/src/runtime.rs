@@ -166,9 +166,19 @@ impl SessionOwner {
         test_mode: bool,
     ) -> Result<(), RuntimeError> {
         let logical_dc_id = session.endpoint.dc_id;
-        self.remember_auth_material(logical_dc_id, test_mode, &session)?;
         let route = SessionRoute::new(logical_dc_id)?;
         self.primary_logical_dc_id = Some(route.logical_dc_id);
+        self.put(logical_dc_id, session, test_mode)
+    }
+
+    fn put(
+        &mut self,
+        logical_dc_id: i32,
+        session: EstablishedSession,
+        test_mode: bool,
+    ) -> Result<(), RuntimeError> {
+        self.remember_auth_material(logical_dc_id, test_mode, &session)?;
+        let route = SessionRoute::new(logical_dc_id)?;
         self.sessions.insert(
             route.logical_dc_id,
             OwnedSession {
@@ -1833,7 +1843,10 @@ mod authorization_restore_contract_tests {
         };
 
         owner.seed_persisted(&persisted).unwrap();
-        let error = owner.auth_material(1002, true).unwrap_err();
+        let error = match owner.auth_material(1002, true) {
+            Err(error) => error,
+            Ok(_) => panic!("environment-mismatched auth material must fail closed"),
+        };
 
         assert!(error
             .to_string()
