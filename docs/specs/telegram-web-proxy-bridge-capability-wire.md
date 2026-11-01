@@ -153,9 +153,25 @@ No upstream C++ is copied into Fabushi.
 
 ## 17. Spec compliance record
 
+Source-level review only; executable validation intentionally remains not-run.
+
 | Requirement / AC | Status | Evidence / reason |
 | --- | --- | --- |
-| R1-R14 | pending | Implementation/source review not yet committed. |
-| AC-1 | passed | This spec records exact fixed-U provenance and split boundary. |
-| AC-2-AC-6 | pending | Await implementation/mirror/bookkeeping. |
-| AC-7 | passed | Stage-A executable validation remains prohibited/not-run. |
+| R1 | passed | Fixed-U provenance is recorded for mtproto_proxy_data.cpp/header plus webview/transport/connection_box consumers; relay carrier remains a separate ledger row. |
+| R2 | passed | Existing canonical `native/telegram-protocol` owns the pure module; no new provider/runtime/scheduler was introduced. |
+| R3 | passed | `validate_canonical_web_proxy_host` and `normalize_web_proxy_base_path` enforce the canonical ASCII wire boundary; Unicode/IDNA input normalization remains out of scope. |
+| R4-R6 | passed | `web_proxy_bridge_capability` in `web_proxy.rs@4c91f6e4e6b8d37d84afd40aae6af9fbbe7d80d4` preserves exact v1/v2 contexts and existing RustCrypto HMAC-SHA256 with unpadded base64url. |
+| R7-R8 | passed | Base-path grammar plus exact bridge path/URL are implemented in the same canonical source blob. |
+| R9-R12 | passed | 16-byte and 0xDD 17-byte WebProxy secrets, 0xEE rejection, 0x70 link marker, root fallback and path fail-closed behavior are implemented; exact fixed-U vectors are authored in `protocol_contract.rs@2f4fed5e9d6f9103d3598ef94089dbede6d226af`. |
+| R13 | passed | Canonical telegram-network production remains unchanged at `241cd8ec792070a8de8af9ec6ca5b317e34376d1`; no nonce/bootstrap/window/carrier/scheduler behavior was added. |
+| R14 | passed | Stage A authored source/contracts only; no Actions/status/check query or trigger, build, typecheck, lint, validator, generator, test execution, packaging, deployment, installation or runtime acceptance occurred. |
+| AC-1 | passed | Initial spec commit `4da2078cae694e8aadc45a5a03d8f206701d1ead` / blob `cae43055ab17dd8c24aed6ebf06e0c8873efb16a`. |
+| AC-2 | passed | Production source review closes at `de586fc446d7ac36d7542c5b23736964de70019b`; module blob `4c91f6e4e6b8d37d84afd40aae6af9fbbe7d80d4`, lib blob `42601393105e0ad49b8da97ee8cfd2acc6cf031e`. |
+| AC-3 | passed | No dependency delta; existing hmac/sha2/hex dependencies are reused and no bespoke HMAC was introduced. |
+| AC-4 | passed | Authored-only contracts commit `d87483eae204ba18aac503e2fa1f4e059b9f784f` / blob `2f4fed5e9d6f9103d3598ef94089dbede6d226af`; not executed. |
+| AC-5 | passed | Desktop source sync `7ebdbd7cd9ea4edb0b793be4cd7c616e15d80f71` and contract sync `3d6489da4056a65d5dedc7a4094474863cbe3af6` are byte-identical to canonical source/lib/test blobs. |
+| AC-6 | passed | Desktop bookkeeping `8e81014db9f01831e6a3b91816f8278280b660b6`: unique ledger row, ledger blob `6fcd06dbce83ec99fe3dba1ae1b8631b4faf973c`, P0 `e62b24991ed1ea7d9351ec7dd9e0ae0a04cb1ee2`, source-closure `348d7dcf5f0486a8f99bb979cb89adcb8b89f082`, round111 evidence `765e0c0ace8ffef4edd6225404f65575986b21a8`. Relay carrier/window row remains mapped/pending. |
+| AC-7 | passed | Unique responsibility is `implemented / rewritten / validation_status=not-run / accepted=false`; no executable evidence is claimed. |
+
+Remaining outside this responsibility: shipping WebProxy carrier/window/WebView bootstrap lifecycle, Unicode/IDNA user-input/UI/settings integration, broader connection scheduling/racing/reconnect/send retry, arbitrary request history, auth-key binding/persistence, gzip, complete difference decoding/application, remaining fixed-U unknown/unread and source/legal closure, Stage-B executable evidence, and independent release ACCEPT.
+
