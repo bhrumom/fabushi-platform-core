@@ -3,6 +3,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 
+const IGNORE_TIME_DIFFERENCE_SECONDS: u64 = 3;
+
 static NETWORK_TIME: NetworkTimeState = NetworkTimeState::new();
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
@@ -14,6 +16,7 @@ pub enum NetworkTimeError {
 }
 
 struct NetworkTimeState {
+    mtproto_updated: AtomicBool,
     mtproto_shift_seconds: AtomicI64,
     http_shift_seconds: AtomicI64,
     http_valid: AtomicBool,
@@ -22,6 +25,7 @@ struct NetworkTimeState {
 impl NetworkTimeState {
     const fn new() -> Self {
         Self {
+            mtproto_updated: AtomicBool::new(false),
             mtproto_shift_seconds: AtomicI64::new(0),
             http_shift_seconds: AtomicI64::new(0),
             http_valid: AtomicBool::new(false),
@@ -45,9 +49,23 @@ impl NetworkTimeState {
         server_unix_seconds: i64,
         local_unix_seconds: i64,
     ) -> Result<(), NetworkTimeError> {
+        if self.mtproto_updated.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         let shift = server_unix_seconds
             .checked_sub(local_unix_seconds)
             .ok_or(NetworkTimeError::OutOfRange)?;
+        let current_shift = self.mtproto_shift_seconds.load(Ordering::SeqCst);
+        if shift.abs_diff(current_shift) < IGNORE_TIME_DIFFERENCE_SECONDS {
+            return Ok(());
+        }
+        if self
+            .mtproto_updated
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Ok(());
+        }
         self.mtproto_shift_seconds.store(shift, Ordering::SeqCst);
         self.http_shift_seconds.store(0, Ordering::SeqCst);
         self.http_valid.store(false, Ordering::SeqCst);
@@ -153,6 +171,25 @@ mod contracts {
 
         assert!(!state.http_valid());
         assert_eq!(state.http_now_at(1_700_000_110), Ok(1_700_000_210));
+    }
+
+    #[test]
+    fn non_forced_mtproto_update_is_one_shot_after_a_material_shift() {
+        let state = NetworkTimeState::new();
+        state.update_mtproto_at(1_100, 1_000).unwrap();
+        state.update_mtproto_at(1_300, 1_000).unwrap();
+
+        assert_eq!(state.http_now_at(1_010), Ok(1_110));
+    }
+
+    #[test]
+    fn sub_three_second_mtproto_shift_is_ignored_without_locking_future_update() {
+        let state = NetworkTimeState::new();
+        state.update_mtproto_at(1_002, 1_000).unwrap();
+        assert_eq!(state.http_now_at(1_010), Ok(1_010));
+
+        state.update_mtproto_at(1_100, 1_000).unwrap();
+        assert_eq!(state.http_now_at(1_010), Ok(1_110));
     }
 
     #[test]

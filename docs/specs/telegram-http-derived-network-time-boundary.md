@@ -39,7 +39,7 @@ Implement the fixed-U global HTTP-derived time mutation as an extension of the e
 
 - **R1 — Existing-owner-first.** Add the responsibility to `native/telegram-network`; do not create a new runtime, provider, settings subsystem, or time service crate.
 - **R2 — Thread-safe global state.** Maintain a process-global MTProto/base Unix-time shift, HTTP shift, and HTTP-valid bit using thread-safe primitives.
-- **R3 — MTProto update semantics.** A trusted MTProto server-time update computes the base shift from local wall time and invalidates HTTP calibration by setting HTTP shift to zero and valid=false.
+- **R3 — MTProto update semantics.** Match fixed-U non-forced `base::unixtime::update`: ignore a candidate whose shift differs from the current base shift by less than three seconds without locking future updates; after the first material trusted MTProto update, retain that base shift for subsequent non-forced updates. A material accepted update invalidates HTTP calibration by setting HTTP shift to zero and valid=false.
 - **R4 — HTTP update semantics.** A parsed HTTP Unix second updates only the HTTP shift relative to the current MTProto/base-adjusted time and marks HTTP time valid. No HTTP object or carrier handle is required.
 - **R5 — HTTP now semantics.** `http_now` returns current MTProto/base-adjusted Unix time plus the stored HTTP shift. It does not require valid=true, matching fixed-U `http_now()`.
 - **R6 — Invalidate semantics.** Explicit HTTP invalidation clears valid=false without rewriting the stored HTTP shift, matching fixed-U `http_invalidate()`.
@@ -122,7 +122,8 @@ Author only; do not run:
 - default state: base/http now equals injected local wall time and HTTP valid=false;
 - HTTP update computes shift relative to MTProto/base-adjusted time and sets valid=true;
 - explicit invalidation preserves shift but clears validity;
-- MTProto update resets HTTP shift and validity;
+- sub-three-second MTProto candidate is ignored without locking later correction;
+- first material MTProto update resets HTTP shift/validity and later non-forced candidates do not rewrite the global base;
 - repeated HTTP updates replace the previous calibration;
 - checked-overflow failure;
 - source review contract that TLS handshake obtains its timestamp from `http_time_now` and uses injected secure randomness.
@@ -164,7 +165,7 @@ Behavioral provenance only; no upstream C++ is copied.
 | Requirement / AC | Status | Evidence / reason |
 | --- | --- | --- |
 | R1-R11 | passed | `native/telegram-network/src/network_time.rs@cdbd2187aae5f010fa822ab0ce2f8b2dbd0247ea` implements thread-safe MTProto/base and HTTP shifts plus validity, checked failure semantics, and public carrier-independent mutation APIs. `native/telegram-network/src/lib.rs@e0dc33a728916fb7be916956f44cfb0b670486c6` makes the real TLS camouflage handshake consume `http_time_now` and makes auth/bad-message trusted time correction invalidate HTTP calibration. No manifest or lock changed. |
-| R12 | passed | Six focused module contracts are authored in `network_time.rs@cdbd2187aae5f010fa822ab0ce2f8b2dbd0247ea`; none were executed in Stage A. |
+| R12 | passed | Eight focused module contracts are authored in `network_time.rs@cdbd2187aae5f010fa822ab0ce2f8b2dbd0247ea`; none were executed in Stage A. |
 | R13 | passed | The direct HTTP carrier remains blocked under `telegram-doh-special-config-http-carrier-lifecycle-boundary.md`; temporary-DC `help.getConfig` and `dc_options` application remain pending and were not fabricated. |
 | AC-1-AC-5 | passed | Canonical implementation commit `16e9ea2297b4a8d6d8d41177f74bec927d93f11f`; network-time blob `cdbd2187aae5f010fa822ab0ce2f8b2dbd0247ea`; network lib blob `e0dc33a728916fb7be916956f44cfb0b670486c6`. Executable validation remains `not-run`, accepted=false. |
 | AC-6 | passed | Carrier plus temporary-DC config application remain separately mapped/pending. |
