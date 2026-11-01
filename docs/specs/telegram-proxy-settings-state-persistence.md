@@ -270,3 +270,12 @@ R1-R12/R15 and AC-1..AC-8 are source-review passed except R13-R14, which remain 
 The round-82 blocked/no-production-delta disposition in sections 11 and 13 is superseded for the specific owner-absence blocker by `docs/specs/fabushi-product-settings-owner.md`. Re-review at platform-core@ef4edd0df2a9b74e3ac2cc3e088493e08ef75432 and desktop@36bbe14d8f0fd7cb6008149e5fe9931f9e06891a reconfirmed that no existing shipping canonical product Settings owner exists. Under the master existing-owner-first rule, the shipping AppHost composition is therefore extended with one minimal source-neutral `ProductSettingsOwner`; no Telegram-specific settings store is created.
 
 This round is allowed to implement only the canonical product `network.proxyEnabled` preference plus its authoritative publication into the already-existing `telegram.refreshSpecialConfig` RuntimeClient boundary. The full proxy list/selection/rotation/migration scope in this specification remains pending unless separately implemented. Stage-A executable validation remains not-run and accepted=false.
+
+
+## 19. Round 97 canonical owner / proxyEnabled implementation evidence
+
+The owner-absence blocker recorded earlier is now closed for the minimal authoritative boolean projection. Platform spec-first owner decision is `206fa124fec1512bba4fca7f19602a1b691732b2`; desktop implementation is `b1b5dd027497c39a355e9e64e64de0b6c190fd66` with AppHost blob `5b74723e12884ea218e1f9de634b88d4357b2099` and Mahayana Telegram adapter blob `e4410652fe500144d93ff227b10d149d2c0fc2c7`.
+
+The existing shipping AppHost now contains one source-neutral `ProductSettingsOwner`, separately persists `network.proxyEnabled`, exposes typed Settings snapshot/mutation methods, and publishes the authoritative boolean through the same embedded Telegram client into the existing `telegram.refreshSpecialConfig` RuntimeClient boundary. `ui_state`, telegram-storage, account-service, telegram-network and RuntimeClient remain non-owners of durable product Settings.
+
+This does **not** close the entire `TDRP-R9-PROXY-SETTINGS-STATE-PERSISTENCE-001` responsibility: fixed-U proxy mode/list/selected/rotation, migration/import semantics, and their eventual unified Settings UI projection remain pending. The row therefore remains mapped/pending, with the missing-owner blocker replaced by those remaining scope items. Stage-A contracts are authored but not executed; `validation_status=not-run`, `accepted=false`.

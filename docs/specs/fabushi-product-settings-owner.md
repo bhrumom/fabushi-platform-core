@@ -122,3 +122,20 @@ Validation status remains `not-run`; acceptance remains false.
 - contracts are authored but not executed;
 - desktop ledger/P0/source-closure/evidence record exact commits/blobs and Stage-A status;
 - no CI/build/test/lint/package/deploy execution occurs.
+
+
+## 11. Round 97 implementation / source-compliance evidence
+
+Source-level implementation review against desktop commit `b1b5dd027497c39a355e9e64e64de0b6c190fd66` records:
+
+- shipping AppHost blob: `5b74723e12884ea218e1f9de634b88d4357b2099`;
+- shipping Mahayana Telegram adapter blob: `e4410652fe500144d93ff227b10d149d2c0fc2c7`;
+- mirrored owner spec blob: `2b807499beecd2d912de82aa36a27d24291d8521`;
+- `ProductSettingsOwner` is composed into the existing `AppHost`, owns versioned `network.proxyEnabled`, and persists `feature-host/product-settings.json` via temporary-file replacement;
+- the existing `feature.persistence.* / ui_state` path is unchanged and is not used as Settings truth;
+- `settings.setNetworkProxyEnabled` requires an explicit boolean, persists canonical state first, then publishes the authoritative value through the existing `TelegramClientLease`;
+- `TelegramClientLease::refresh_special_config` forwards exactly `telegram.refreshSpecialConfig` plus explicit boolean `proxyEnabled` into the already-existing RuntimeClient command boundary;
+- no proxy Settings field was added to RuntimeClient and no Telegram-specific Settings store/root was introduced;
+- source-authored contracts cover persistence/reopen, malformed-data fail-closed, source-neutral host method names, and exact boolean RuntimeClient request shape.
+
+Source-level requirements in sections 1-8 and Stage-A implementation portions of section 10 are satisfied. Executable validation is deliberately not performed in Stage A, so validation remains `not-run`, acceptance remains false, and no release/verification claim is made. The broader fixed-U proxy list/selected/mode/rotation migration remains outside this minimal owner slice and continues under `telegram-proxy-settings-state-persistence.md`.
