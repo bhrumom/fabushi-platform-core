@@ -1132,9 +1132,6 @@ pub fn parse_config_dc_options_prefix(
             secret,
         )?);
     }
-    if endpoints.is_empty() {
-        return Err(ApiRequestError::Dc(DcError::EmptyDirectory));
-    }
     Ok(ConfigDcOptions { endpoints })
 }
 

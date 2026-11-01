@@ -288,16 +288,22 @@ impl DcDirectory {
         &self.endpoints
     }
 
-    pub fn replace_endpoints(&mut self, mut endpoints: Vec<DcEndpoint>) -> Result<Vec<i32>, DcError> {
+    pub fn replace_endpoints(&mut self, endpoints: Vec<DcEndpoint>) -> Result<Vec<i32>, DcError> {
         if endpoints.is_empty() {
             return Err(DcError::EmptyDirectory);
         }
-        let mut unique = BTreeSet::new();
-        for endpoint in &endpoints {
-            if !unique.insert(endpoint.clone()) {
-                return Err(DcError::DuplicateEndpoint);
+        let mut normalized = Vec::with_capacity(endpoints.len());
+        for endpoint in endpoints {
+            if normalized.iter().any(|candidate: &DcEndpoint| {
+                candidate.dc_id == endpoint.dc_id
+                    && candidate.ip_address == endpoint.ip_address
+                    && candidate.port == endpoint.port
+            }) {
+                continue;
             }
+            normalized.push(endpoint);
         }
+        let mut endpoints = normalized;
         endpoints.sort_by_key(|endpoint| {
             (
                 endpoint.dc_id,

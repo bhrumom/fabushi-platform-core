@@ -1271,6 +1271,9 @@ pub fn apply_resolved_special_config_endpoint(
     let response = invoke_owned_logical_request(client_id, request_id, &directory, &body)?;
     let config = parse_config_dc_options_prefix(&response)
         .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
+    if config.endpoints.is_empty() {
+        return Ok(Vec::new());
+    }
     let endpoints = config.endpoints;
 
     let mut clients = CLIENTS

@@ -4863,6 +4863,18 @@ fn dc_options_only_replacement_preserves_metadata_and_publishes_exact_dc_changes
         .collect();
     assert!(directory.replace_endpoints(secret_only).unwrap().is_empty());
     assert_eq!(directory.endpoints(), before.as_slice());
+
+    let duplicate = vec![
+        before[0].clone(),
+        {
+            let mut endpoint = before[0].clone();
+            endpoint.secret = Some(vec![0x22; 16]);
+            endpoint
+        },
+        before[1].clone(),
+    ];
+    assert!(directory.replace_endpoints(duplicate).unwrap().is_empty());
+    assert_eq!(directory.endpoints(), before.as_slice());
 }
 
 
@@ -4889,4 +4901,17 @@ fn special_config_dc_options_parser_does_not_require_response_this_dc() {
     let parsed = parse_config_dc_options_prefix(&writer.into_bytes()).unwrap();
     assert_eq!(parsed.endpoints.len(), 1);
     assert_eq!(parsed.endpoints[0].dc_id, 4);
+
+    let mut empty = TlWriter::new();
+    empty.write_u32(CONFIG_CONSTRUCTOR);
+    empty.write_i32(0);
+    empty.write_i32(1);
+    empty.write_i32(2);
+    empty.write_bool(false);
+    empty.write_i32(2);
+    empty.write_vector_length(0).unwrap();
+    assert!(parse_config_dc_options_prefix(&empty.into_bytes())
+        .unwrap()
+        .endpoints
+        .is_empty());
 }
