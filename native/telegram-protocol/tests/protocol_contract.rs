@@ -4649,3 +4649,65 @@ fn web_proxy_link_secret_marker_is_path_aware_and_fail_closed() {
         );
     }
 }
+
+
+#[test]
+fn special_config_selector_preserves_fixed_u_expiry_prefix_and_endpoint_policy() {
+    use std::net::Ipv4Addr;
+    use fabushi_telegram_protocol::{
+        select_special_config_endpoints, AccessPointRule, HelpConfigSimple, IpPort,
+        SpecialConfigEndpoint, SpecialConfigError,
+    };
+
+    let config = HelpConfigSimple {
+        date: 200,
+        expires: 300,
+        rules: vec![
+            AccessPointRule {
+                phone_prefix_rules: "+1,-1555".into(),
+                dc_id: 1,
+                ips: vec![IpPort::Plain { ipv4: 0x0102_0304, port: -1 }],
+            },
+            AccessPointRule {
+                phone_prefix_rules: ",-44".into(),
+                dc_id: 2,
+                ips: vec![IpPort::Secret {
+                    ipv4: 0x7f00_0001,
+                    port: 443,
+                    secret: vec![0xdd; 17],
+                }],
+            },
+        ],
+    };
+
+    assert_eq!(
+        select_special_config_endpoints(&config, "+1 (212) 555-0100", 100).unwrap(),
+        vec![SpecialConfigEndpoint {
+            dc_id: 2,
+            ip_address: Ipv4Addr::new(127, 0, 0, 1),
+            port: 443,
+            secret: vec![0xdd; 17],
+        }]
+    );
+    assert!(matches!(
+        select_special_config_endpoints(&config, "+1", 301),
+        Err(SpecialConfigError::Expired { .. })
+    ));
+}
+
+#[test]
+fn special_config_payload_boundary_fails_closed_without_network_or_scheduler_fallback() {
+    assert!(matches!(
+        fabushi_telegram_protocol::decode_special_config_payload(b"not enough payload"),
+        Err(fabushi_telegram_protocol::SpecialConfigError::InvalidEncodedLength { .. })
+    ));
+    let empty = fabushi_telegram_protocol::HelpConfigSimple {
+        date: 0,
+        expires: i32::MAX,
+        rules: Vec::new(),
+    };
+    assert_eq!(
+        fabushi_telegram_protocol::select_special_config_endpoints(&empty, "+1", 0),
+        Err(fabushi_telegram_protocol::SpecialConfigError::EmptyRules)
+    );
+}
