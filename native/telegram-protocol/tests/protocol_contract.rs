@@ -4244,3 +4244,89 @@ fn version_d_dd_and_ee_secrets_share_only_the_fixed_u_secret16_key_material() {
     assert_eq!(dd_payload, ee_a_payload);
     assert_eq!(ee_a_payload, ee_b_payload);
 }
+
+
+#[test]
+fn protocol_dc_identity_matches_fixed_u_temporary_test_and_media_sign_rules() {
+    use fabushi_telegram_protocol::{
+        derive_protocol_dc_identity, DcError, ProtocolDcIdentity, ProtocolDcRole,
+    };
+
+    assert_eq!(
+        derive_protocol_dc_identity(2, false, ProtocolDcRole::Regular).unwrap(),
+        ProtocolDcIdentity {
+            directory_dc_id: 2,
+            wire_id: 2,
+        }
+    );
+    assert_eq!(
+        derive_protocol_dc_identity(2, true, ProtocolDcRole::Regular).unwrap(),
+        ProtocolDcIdentity {
+            directory_dc_id: 2,
+            wire_id: 10_002,
+        }
+    );
+    assert_eq!(
+        derive_protocol_dc_identity(1_002, false, ProtocolDcRole::Regular).unwrap(),
+        ProtocolDcIdentity {
+            directory_dc_id: 1_002,
+            wire_id: 2,
+        }
+    );
+    assert_eq!(
+        derive_protocol_dc_identity(1_002, true, ProtocolDcRole::Regular).unwrap(),
+        ProtocolDcIdentity {
+            directory_dc_id: 1_002,
+            wire_id: 10_002,
+        }
+    );
+    assert_eq!(
+        derive_protocol_dc_identity(160_002, false, ProtocolDcRole::MediaCluster).unwrap(),
+        ProtocolDcIdentity {
+            directory_dc_id: 2,
+            wire_id: -2,
+        }
+    );
+    assert_eq!(
+        derive_protocol_dc_identity(160_002, true, ProtocolDcRole::MediaCluster).unwrap(),
+        ProtocolDcIdentity {
+            directory_dc_id: 2,
+            wire_id: -10_002,
+        }
+    );
+    assert_eq!(
+        derive_protocol_dc_identity(161_002, false, ProtocolDcRole::MediaCluster).unwrap(),
+        ProtocolDcIdentity {
+            directory_dc_id: 1_002,
+            wire_id: -2,
+        }
+    );
+    assert_eq!(
+        derive_protocol_dc_identity(161_002, true, ProtocolDcRole::MediaCluster).unwrap(),
+        ProtocolDcIdentity {
+            directory_dc_id: 1_002,
+            wire_id: -10_002,
+        }
+    );
+
+    assert_eq!(
+        derive_protocol_dc_identity(10_000, false, ProtocolDcRole::Regular).unwrap_err(),
+        DcError::InvalidDcId
+    );
+    assert_eq!(
+        derive_protocol_dc_identity(1_000, false, ProtocolDcRole::Regular).unwrap_err(),
+        DcError::InvalidProtocolDcId { dc_id: 0 }
+    );
+}
+
+#[test]
+fn protocol_dc_identity_keeps_cdn_and_regular_roles_positive() {
+    use fabushi_telegram_protocol::{derive_protocol_dc_identity, ProtocolDcRole};
+
+    assert_eq!(
+        derive_protocol_dc_identity(50_004, false, ProtocolDcRole::Regular)
+            .unwrap()
+            .wire_id,
+        4
+    );
+}

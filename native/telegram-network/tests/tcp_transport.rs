@@ -135,3 +135,91 @@ fn obfuscated_tcp_transport_writes_prefix_and_keeps_bidirectional_ctr_streams_co
     assert_eq!(transport.receive_payload().unwrap(), vec![0x42; 16]);
     server.join().unwrap();
 }
+
+
+#[test]
+fn connect_directory_uses_bare_media_directory_id_and_negative_protocol_wire_id() {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use fabushi_telegram_network::connect_directory;
+    use fabushi_telegram_protocol::{DcEndpoint, DcPurpose};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut prefix = [0_u8; 64];
+        stream.read_exact(&mut prefix).unwrap();
+
+        let mut reconstructed_nonce = [0x77_u8; 64];
+        reconstructed_nonce[..56].copy_from_slice(&prefix[..56]);
+        let expected =
+            ObfuscatedConnectionStart::from_nonce(&[], -2, reconstructed_nonce).unwrap();
+        assert_eq!(&prefix[56..62], &expected.prefix()[56..62]);
+    });
+
+    let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let directory = DcDirectory::new(
+        2,
+        false,
+        vec![
+            DcEndpoint::new(2, ip, address.port(), false, false, false, true, true, None).unwrap(),
+            DcEndpoint::new(2, ip, address.port(), true, false, false, true, true, None).unwrap(),
+        ],
+    )
+    .unwrap();
+
+    let (endpoint, mut transport) =
+        connect_directory(&directory, 160_002, DcPurpose::Media, &NetworkConfig::default())
+            .unwrap();
+    assert_eq!(endpoint.dc_id, 2);
+    transport.send_payload(&[0x41; 12]).unwrap();
+    server.join().unwrap();
+}
+
+#[test]
+fn connect_directory_normalizes_temporary_id_only_for_the_protocol_wire() {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use fabushi_telegram_network::connect_directory;
+    use fabushi_telegram_protocol::{DcEndpoint, DcPurpose};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut prefix = [0_u8; 64];
+        stream.read_exact(&mut prefix).unwrap();
+
+        let mut reconstructed_nonce = [0x66_u8; 64];
+        reconstructed_nonce[..56].copy_from_slice(&prefix[..56]);
+        let expected =
+            ObfuscatedConnectionStart::from_nonce(&[], 2, reconstructed_nonce).unwrap();
+        assert_eq!(&prefix[56..62], &expected.prefix()[56..62]);
+    });
+
+    let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let directory = DcDirectory::new(
+        1_002,
+        false,
+        vec![DcEndpoint::new(
+            1_002,
+            ip,
+            address.port(),
+            false,
+            false,
+            false,
+            true,
+            true,
+            None,
+        )
+        .unwrap()],
+    )
+    .unwrap();
+
+    let (endpoint, mut transport) =
+        connect_directory(&directory, 1_002, DcPurpose::Main, &NetworkConfig::default()).unwrap();
+    assert_eq!(endpoint.dc_id, 1_002);
+    transport.send_payload(&[0x41; 12]).unwrap();
+    server.join().unwrap();
+}
