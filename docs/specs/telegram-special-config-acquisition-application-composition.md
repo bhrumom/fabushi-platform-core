@@ -82,3 +82,28 @@ Authored contracts exist in the network seeding module and RuntimeClient queue m
 
 Stage-A disposition for TDRP-R9-MTPROTO-SPECIAL-CONFIG-CARRIER-APPLICATION-001: implementation_status=implemented, validation_status=not-run, accepted=false. Stage-B executable evidence remains required before verified/accepted.
 
+
+
+## 8. Round 96 proxy-enabled suppression contract
+
+Additional fixed-U anchors:
+- Telegram/SourceFiles/mtproto/config_loader.cpp@5d07404ba07223016c6728b986dcba10628d7194: `refreshSpecialLoader()` resets the special loader when `_proxyEnabled` is true; `sendSpecialRequest()` terminates owned special MTProto work and resets the loader when the same projection is true; `setProxyEnabled()` only updates that projection.
+- Telegram/SourceFiles/mtproto/mtp_instance.cpp@d25fe3b72298fab371854f80186ee8e4777ea087: `Core::SettingsProxy::connectionTypeChanges()` projects `SettingsProxy::isEnabled()` into an existing ConfigLoader, while initial ConfigLoader construction receives the same `isEnabled()` value.
+- Telegram/SourceFiles/core/core_settings_proxy.cpp@18e7ab8ce60865409dbaff267ee192e272622d26: `isEnabled()` means exactly `ProxyData::Settings::Enabled`; System and Disabled do not assert this special-config suppression flag.
+
+Existing-owner-first rule for Fabushi:
+- durable proxy mode/list/selection remains a Settings/application responsibility and MUST NOT be persisted in telegram-runtime or telegram-network;
+- the current checkpoint still has no canonical product Settings/application state owner, as recorded by telegram-proxy-settings-state-persistence.md and telegram-proxy-non-ui-consumers-boundary.md;
+- therefore RuntimeClient accepts only a caller-supplied boolean projection on `telegram.refreshSpecialConfig`; it does not become a proxy settings owner;
+- when `proxyEnabled=true`, the refresh command returns a source-equivalent suppressed report before seeding, normalizing, or dispatching any special-config HTTP attempt, and before creating any temporary special-config MTProto request;
+- when `proxyEnabled=false` (including the source-equivalent System/Disabled cases), the existing acquisition/application composition is unchanged;
+- the lower-level Rust function takes the same projection explicitly so no bypassing public path silently starts acquisition under an enabled proxy;
+- a future canonical Settings owner may publish this boolean into the command boundary, but this round MUST NOT fabricate a second settings store, cache, or durable proxy state.
+
+Authored-only contracts:
+- enabled proxy => suppressed report, zero seeded/finished/decoded/selected/applied endpoints, no changed DC ids, no failures;
+- disabled/System projection => suppression is false and the ordinary acquisition path remains eligible;
+- command parsing requires a boolean `proxyEnabled` field and rejects non-boolean input;
+- RuntimeClient remains settings-stateless with respect to durable proxy mode/list/selection.
+
+Validation remains deliberately not run in Stage A.
