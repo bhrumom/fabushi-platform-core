@@ -111,5 +111,14 @@ GitHub immutable commit/blob identities plus desktop parity-ledger/P0/source-clo
 | --- | --- | --- |
 | R1-R6 | passed | Source/bookkeeping boundary defined in this spec; no executable validation required for the disposition itself. |
 | AC-1-AC-5 | passed | Fixed-U and live canonical source inspection; no production delta. |
-| AC-6 | blocked | Desktop bookkeeping sync is performed after this spec commit and must reference the resulting immutable SHA. |
+| AC-6 | passed | Desktop bookkeeping is saved at `918837f0456ea3745bd24d8bf11fd72e379b5069`. |
 | AC-7 | passed | Stage A explicitly forbids executable validation; none is run in this round. |
+
+
+## Round 66 final source-level compliance
+
+Desktop bookkeeping is now durably saved at `bhrumom/fabushi-desktop checkpoint/tdrp-stage-a-msg-mutations-7457eb1c-r1@918837f0456ea3745bd24d8bf11fd72e379b5069`: unique ledger row `TDRP-R9-MTPROTO-TLS-CLIENT-HELLO-TEMPLATE-001`, P0/source-closure, and round97 evidence are synchronized. The row is deliberately `mapped / coverage_disposition=blocked / validation_status=not-run / accepted=false`, not implemented.
+
+R1-R6 and AC-1-AC-7 are satisfied for this disposition at source/spec/bookkeeping level. The production disposition remains **no production delta**: canonical and desktop telegram-protocol api/lib blobs remain `ebfb3670b5cd097b9ce288782c7954f5cfe9fc43` / `abab39e42f100972484191f0e52e9edd9b88c6cf`. A real implementation remains blocked on the missing canonical telegram-network TLS camouflage ClientHello generator/socket lifecycle; no dead protocol API is accepted as closure.
+
+No executable validation was performed. Stage-B evidence remains not-run by design.
