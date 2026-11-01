@@ -299,7 +299,7 @@ The fixed schema declares `help.getConfig#c4f9186b = Config`; because it has no 
 - The RPC body is bare `help.getConfig`; no initConnection/layer wrapper is used on this secondary special-config attempt.
 - A malformed/failed/empty Config response does not mutate the canonical server directory. Existing owned-request failure teardown remains in force.
 - A valid special Config replaces only canonical dc options. Current `this_dc`, test-mode/environment state, authorization state, other Config metadata and persistence remain unchanged.
-- Change publication contains sorted unique real DC ids whose endpoint lists were added, removed or changed. No-op replacement yields an empty publication and does not replace the stored option vector.
+- Change publication follows fixed-U CountOptionsDifference exactly: per DC, only endpoint count and IP+port membership participate in equality; flags/secret-only differences do not publish and do not replace the stored option vector. Added/removed DC ids or changed IP+port membership publish sorted unique real DC ids. No-op replacement yields an empty publication.
 - Successful or failed temporary attempts leave no temporary request/session state, while shared real-DC AuthMaterial remains reusable.
 
 ### 15.4 Authored-only contracts
@@ -307,7 +307,7 @@ The fixed schema declares `help.getConfig#c4f9186b = Config`; because it has no 
 Author but do not execute contracts proving:
 - the bare request is exactly the constructor bytes and contains no wrapper;
 - temporary id mapping rejects invalid/already-temporary ids and maps real dc 2 to logical 1002;
-- dc-options-only replacement preserves current directory metadata, reports added/removed/changed DC ids, and reports an empty change for identical options;
+- dc-options-only replacement preserves current directory metadata, reports added/removed/IP+port-changed DC ids, and treats flags/secret-only differences as a no-op exactly like fixed-U CountOptionsDifference;
 - a resolved endpoint is converted to one temporary `tcpo_only` endpoint with secret preservation;
 - the runtime application uses the owned special-config request and updates only `server_directory` dc options;
 - Stage A performs no executable validation.
