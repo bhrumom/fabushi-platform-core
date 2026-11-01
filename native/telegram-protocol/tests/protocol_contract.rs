@@ -4090,3 +4090,157 @@ fn generic_intermediate_quick_ack_remains_separate_from_version_d() {
     assert_eq!(decoded.quick_ack_token, Some(0x9234_5678));
     assert!(decoded.payload.is_empty());
 }
+
+
+#[test]
+fn obfuscated_connection_start_secret_shapes_match_fixed_u_versions() {
+    use fabushi_telegram_protocol::{ObfuscatedTransportSecret, TransportError, TransportMode};
+
+    let plain = ObfuscatedTransportSecret::parse(&[]).unwrap();
+    assert_eq!(plain.mode(), TransportMode::Abridged);
+    assert_eq!(plain.protocol_id(), 0xefef_efef);
+
+    let v1 = ObfuscatedTransportSecret::parse(&[0x11; 16]).unwrap();
+    assert_eq!(v1.mode(), TransportMode::Abridged);
+    assert_eq!(v1.protocol_id(), 0xefef_efef);
+
+    let mut dd = vec![0xdd];
+    dd.extend_from_slice(&[0x44; 16]);
+    let version_d_dd = ObfuscatedTransportSecret::parse(&dd).unwrap();
+    assert_eq!(version_d_dd.mode(), TransportMode::PaddedIntermediate);
+    assert_eq!(version_d_dd.protocol_id(), 0xdddd_dddd);
+
+    let mut ee = vec![0xee];
+    ee.extend_from_slice(&[0x44; 16]);
+    ee.extend_from_slice(&[0x99, 0x88, 0x77, 0x66]);
+    let version_d_ee = ObfuscatedTransportSecret::parse(&ee).unwrap();
+    assert_eq!(version_d_ee.mode(), TransportMode::PaddedIntermediate);
+    assert_eq!(version_d_ee.protocol_id(), 0xdddd_dddd);
+
+    for invalid in [
+        vec![0_u8; 1],
+        vec![0_u8; 15],
+        vec![0_u8; 17],
+        {
+            let mut value = vec![0xee];
+            value.extend_from_slice(&[0x22; 19]);
+            value
+        },
+        {
+            let mut value = vec![0xdd];
+            value.extend_from_slice(&[0x22; 17]);
+            value
+        },
+        {
+            let mut value = vec![0x01];
+            value.extend_from_slice(&[0x22; 20]);
+            value
+        },
+    ] {
+        assert_eq!(
+            ObfuscatedTransportSecret::parse(&invalid).unwrap_err(),
+            TransportError::InvalidObfuscatedSecret(invalid.len())
+        );
+    }
+}
+
+#[test]
+fn direct_tcp_connection_start_nonce_rejects_every_fixed_u_reserved_prefix() {
+    let base = [0x11_u8; 64];
+    assert!(fabushi_telegram_protocol::is_good_direct_start_nonce(&base));
+
+    let mut first_byte = base;
+    first_byte[0] = 0xef;
+    assert!(!fabushi_telegram_protocol::is_good_direct_start_nonce(&first_byte));
+
+    for reserved in [
+        0x4441_4548_u32,
+        0x5453_4f50,
+        0x2054_4547,
+        0xeeee_eeee,
+        0xdddd_dddd,
+        0x0201_0316,
+    ] {
+        let mut nonce = base;
+        nonce[..4].copy_from_slice(&reserved.to_le_bytes());
+        assert!(!fabushi_telegram_protocol::is_good_direct_start_nonce(&nonce));
+    }
+
+    let mut zero_second_word = base;
+    zero_second_word[4..8].copy_from_slice(&0_u32.to_le_bytes());
+    assert!(!fabushi_telegram_protocol::is_good_direct_start_nonce(
+        &zero_second_word
+    ));
+}
+
+#[test]
+fn obfuscated_connection_start_prefix_partition_and_ctr_continuity_match_fixed_u() {
+    use fabushi_telegram_protocol::{ObfuscatedConnectionStart, TransportMode};
+
+    let nonce = [0x11_u8; 64];
+    let mut one_shot = ObfuscatedConnectionStart::from_nonce(&[], 2, nonce).unwrap();
+    assert_eq!(one_shot.mode(), TransportMode::Abridged);
+    assert_eq!(&one_shot.prefix()[..56], &nonce[..56]);
+    assert_ne!(&one_shot.prefix()[56..64], &nonce[56..64]);
+
+    let dc_three = ObfuscatedConnectionStart::from_nonce(&[], 3, nonce).unwrap();
+    assert_eq!(&dc_three.prefix()[..56], &nonce[..56]);
+    assert_ne!(&one_shot.prefix()[56..64], &dc_three.prefix()[56..64]);
+
+    let mut whole = [0xa5_u8; 37];
+    one_shot.encrypt_outbound(&mut whole);
+
+    let mut split_state = ObfuscatedConnectionStart::from_nonce(&[], 2, nonce).unwrap();
+    let mut split = [0xa5_u8; 37];
+    split_state.encrypt_outbound(&mut split[..7]);
+    split_state.encrypt_outbound(&mut split[7..19]);
+    split_state.encrypt_outbound(&mut split[19..]);
+    assert_eq!(whole, split);
+
+    let mut v1 = ObfuscatedConnectionStart::from_nonce(&[0x42; 16], 2, nonce).unwrap();
+    assert_ne!(&v1.prefix()[56..64], &dc_three.prefix()[56..64]);
+    let mut v1_payload = [0x5a_u8; 32];
+    v1.encrypt_outbound(&mut v1_payload);
+    assert_ne!(v1_payload, [0x5a_u8; 32]);
+
+    let mut outbound = ObfuscatedConnectionStart::from_nonce(&[], 2, nonce).unwrap();
+    let mut outgoing = [0x33_u8; 16];
+    outbound.encrypt_outbound(&mut outgoing);
+    let mut inbound = ObfuscatedConnectionStart::from_nonce(&[], 2, nonce).unwrap();
+    let mut incoming = [0x33_u8; 16];
+    inbound.decrypt_inbound(&mut incoming);
+    assert_ne!(outgoing, incoming);
+}
+
+#[test]
+fn version_d_dd_and_ee_secrets_share_only_the_fixed_u_secret16_key_material() {
+    use fabushi_telegram_protocol::ObfuscatedConnectionStart;
+
+    let nonce = [0x23_u8; 64];
+    let mut dd = vec![0xdd];
+    dd.extend_from_slice(&[0x7c; 16]);
+
+    let mut ee_a = vec![0xee];
+    ee_a.extend_from_slice(&[0x7c; 16]);
+    ee_a.extend_from_slice(&[1, 2, 3, 4]);
+
+    let mut ee_b = vec![0xee];
+    ee_b.extend_from_slice(&[0x7c; 16]);
+    ee_b.extend_from_slice(&[9, 8, 7, 6, 5, 4, 3, 2]);
+
+    let mut from_dd = ObfuscatedConnectionStart::from_nonce(&dd, 10_002, nonce).unwrap();
+    let mut from_ee_a = ObfuscatedConnectionStart::from_nonce(&ee_a, 10_002, nonce).unwrap();
+    let mut from_ee_b = ObfuscatedConnectionStart::from_nonce(&ee_b, 10_002, nonce).unwrap();
+
+    assert_eq!(from_dd.prefix(), from_ee_a.prefix());
+    assert_eq!(from_ee_a.prefix(), from_ee_b.prefix());
+
+    let mut dd_payload = [0x90_u8; 48];
+    let mut ee_a_payload = dd_payload;
+    let mut ee_b_payload = dd_payload;
+    from_dd.encrypt_outbound(&mut dd_payload);
+    from_ee_a.encrypt_outbound(&mut ee_a_payload);
+    from_ee_b.encrypt_outbound(&mut ee_b_payload);
+    assert_eq!(dd_payload, ee_a_payload);
+    assert_eq!(ee_a_payload, ee_b_payload);
+}

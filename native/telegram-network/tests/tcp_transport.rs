@@ -7,7 +7,7 @@ use std::{
 
 use fabushi_telegram_network::{establish_auth_key, NetworkConfig, TcpTransport};
 use fabushi_telegram_protocol::{
-    DcDirectory, PlaintextEnvelope, TransportFrameCodec, TransportMode,
+    DcDirectory, ObfuscatedConnectionStart, PlaintextEnvelope, TransportFrameCodec, TransportMode,
 };
 
 #[test]
@@ -92,4 +92,46 @@ fn live_session_exchanges_encrypted_ping_and_service_rpc() {
         u32::from_le_bytes(result.body[..4].try_into().unwrap()),
         0xae50_0895
     );
+}
+
+
+#[test]
+fn obfuscated_tcp_transport_writes_prefix_and_keeps_bidirectional_ctr_streams_contiguous() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+
+        let mut prefix = [0_u8; 64];
+        stream.read_exact(&mut prefix).unwrap();
+        assert!(fabushi_telegram_protocol::is_good_direct_start_nonce(
+            &prefix
+        ));
+
+        // Fixed-U leaves nonce[0..56] plaintext. The remaining random tail does
+        // not participate in key/IV derivation, so any bytes there can rebuild
+        // the same post-prefix send/receive stream positions for this fixture.
+        let mut reconstructed_nonce = [0x55_u8; 64];
+        reconstructed_nonce[..56].copy_from_slice(&prefix[..56]);
+        let mut peer = ObfuscatedConnectionStart::from_nonce(&[], 2, reconstructed_nonce).unwrap();
+
+        let mut encrypted_request = [0_u8; 13];
+        stream.read_exact(&mut encrypted_request).unwrap();
+        peer.encrypt_outbound(&mut encrypted_request);
+        assert_eq!(encrypted_request[0], 3);
+        assert_eq!(&encrypted_request[1..], &[0x41; 12]);
+
+        let mut response_codec = TransportFrameCodec::new(TransportMode::Abridged);
+        let mut response = response_codec.encode(&[0x42; 16]).unwrap();
+        peer.decrypt_inbound(&mut response);
+        for fragment in response.chunks(3) {
+            stream.write_all(fragment).unwrap();
+        }
+    });
+
+    let config = NetworkConfig::default();
+    let mut transport = TcpTransport::connect_obfuscated(address, &[], 2, &config).unwrap();
+    transport.send_payload(&[0x41; 12]).unwrap();
+    assert_eq!(transport.receive_payload().unwrap(), vec![0x42; 16]);
+    server.join().unwrap();
 }
