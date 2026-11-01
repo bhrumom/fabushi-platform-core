@@ -8,6 +8,7 @@ mod direct_https;
 mod domain_resolver;
 mod network_time;
 mod special_config_acquisition;
+mod web_proxy_relay;
 pub mod request_normalization;
 
 pub use direct_https::{
@@ -22,6 +23,7 @@ pub use special_config_acquisition::{
     seed_special_config_attempts, seed_special_config_attempts_with_entropy, secure_random_index,
     SpecialConfigAttempt, SpecialConfigAttemptKind,
 };
+pub use web_proxy_relay::{prepare_web_proxy_relay, retire_web_proxy_relay, WebProxyBootstrap};
 pub use request_normalization::{
     generate_dns_random_padding, generate_dns_random_padding_with_entropy,
     normalize_domain_resolver_request, normalize_special_config_doh_request,
@@ -41,7 +43,7 @@ use std::{
 };
 
 use fabushi_telegram_protocol::{
-    decrypt_message, encrypt_message, parse_mtproto_proxy_secret_text, AuthKey, AuthKeyHandshake, CryptoDirection, CryptoError,
+    decrypt_message, encrypt_message, parse_mtproto_proxy_secret_text, parse_web_proxy_secret_text, AuthKey, AuthKeyHandshake, CryptoDirection, CryptoError,
     derive_protocol_dc_identity, DcDirectory, DcError, DcPurpose, DhGenAction, EncryptedEnvelope,
     HandshakeError, ProtocolDcRole,
     MessageIdError, MessageIdGuard, ObfuscatedConnectionStart, PlainMessage, PlaintextEnvelope,
@@ -124,10 +126,26 @@ pub struct NetworkAttemptControl {
     inner: Arc<NetworkAttemptInner>,
 }
 
+enum ActiveNetworkStream {
+    Tcp(TcpStream),
+    Web(web_proxy_relay::WebProxyRelayCancel),
+}
+
+impl ActiveNetworkStream {
+    fn cancel(&self) {
+        match self {
+            Self::Tcp(stream) => {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+            Self::Web(stream) => stream.cancel(),
+        }
+    }
+}
+
 struct NetworkAttemptInner {
     deadline: Instant,
     cancelled: AtomicBool,
-    active_stream: Mutex<Option<TcpStream>>,
+    active_stream: Mutex<Option<ActiveNetworkStream>>,
 }
 
 impl NetworkAttemptControl {
@@ -145,7 +163,7 @@ impl NetworkAttemptControl {
         self.inner.cancelled.store(true, Ordering::SeqCst);
         if let Ok(active) = self.inner.active_stream.lock() {
             if let Some(stream) = active.as_ref() {
-                let _ = stream.shutdown(Shutdown::Both);
+                stream.cancel();
             }
         }
     }
@@ -183,8 +201,36 @@ impl NetworkAttemptControl {
             let _ = clone.shutdown(Shutdown::Both);
             return Err(NetworkError::AttemptCancelled);
         }
-        *active = Some(clone);
+        *active = Some(ActiveNetworkStream::Tcp(clone));
         Ok(())
+    }
+
+    pub(crate) fn register_web_stream(
+        &self,
+        stream: web_proxy_relay::WebProxyRelayCancel,
+    ) -> Result<(), NetworkError> {
+        if self.is_cancelled() {
+            stream.cancel();
+            return Err(NetworkError::AttemptCancelled);
+        }
+        let mut active = self
+            .inner
+            .active_stream
+            .lock()
+            .map_err(|_| NetworkError::AttemptCancelled)?;
+        if self.is_cancelled() {
+            stream.cancel();
+            return Err(NetworkError::AttemptCancelled);
+        }
+        *active = Some(ActiveNetworkStream::Web(stream));
+        Ok(())
+    }
+
+    fn register_transport(&self, stream: &TransportSocket) -> Result<(), NetworkError> {
+        match stream {
+            TransportSocket::Tcp(stream) => self.register_stream(stream),
+            TransportSocket::Web(stream) => self.register_web_stream(stream.cancel_handle()),
+        }
     }
 
     fn clear_stream(&self) {
@@ -289,10 +335,78 @@ pub enum NetworkError {
     InvalidProxySecret,
     #[error("selected proxy hostname could not be resolved")]
     ProxyResolutionFailed,
+    #[error("WebProxy relay carrier is unavailable")]
+    WebProxyRelayUnavailable,
+    #[error("WebProxy browser bootstrap capability expired")]
+    WebProxyBootstrapExpired,
+    #[error("WebProxy relay did not reach Welcome before the deadline")]
+    WebProxyWelcomeTimeout,
+}
+
+enum TransportSocket {
+    Tcp(TcpStream),
+    Web(web_proxy_relay::WebProxyRelayStream),
+}
+
+impl TransportSocket {
+    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.set_read_timeout(timeout),
+            Self::Web(stream) => {
+                stream.set_read_timeout(timeout);
+                Ok(())
+            }
+        }
+    }
+
+    fn set_write_timeout(&mut self, timeout: Option<Duration>) -> io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.set_write_timeout(timeout),
+            Self::Web(stream) => {
+                stream.set_write_timeout(timeout);
+                Ok(())
+            }
+        }
+    }
+
+    fn shutdown(&self) -> io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.shutdown(Shutdown::Both),
+            Self::Web(stream) => {
+                stream.shutdown();
+                Ok(())
+            }
+        }
+    }
+}
+
+impl Read for TransportSocket {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Tcp(stream) => stream.read(output),
+            Self::Web(stream) => stream.read(output),
+        }
+    }
+}
+
+impl Write for TransportSocket {
+    fn write(&mut self, input: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Tcp(stream) => stream.write(input),
+            Self::Web(stream) => stream.write(input),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.flush(),
+            Self::Web(stream) => stream.flush(),
+        }
+    }
 }
 
 pub struct TcpTransport {
-    stream: TcpStream,
+    stream: TransportSocket,
     codec: TransportFrameCodec,
     read_buffer: Vec<u8>,
     initialized: bool,
@@ -355,7 +469,7 @@ impl TcpTransport {
         let obfuscated = ObfuscatedConnectionStart::random(secret, protocol_dc_id)?;
         let mode = obfuscated.mode();
         Ok(Self {
-            stream,
+            stream: TransportSocket::Tcp(stream),
             codec: TransportFrameCodec::new(mode),
             read_buffer: Vec::with_capacity(DEFAULT_READ_CHUNK_BYTES),
             initialized: false,
@@ -368,7 +482,7 @@ impl TcpTransport {
 
     pub fn from_stream(stream: TcpStream, mode: TransportMode) -> Self {
         Self {
-            stream,
+            stream: TransportSocket::Tcp(stream),
             codec: TransportFrameCodec::new(mode),
             read_buffer: Vec::with_capacity(DEFAULT_READ_CHUNK_BYTES),
             initialized: false,
@@ -383,7 +497,7 @@ impl TcpTransport {
         &mut self,
         control: NetworkAttemptControl,
     ) -> Result<(), NetworkError> {
-        control.register_stream(&self.stream)?;
+        control.register_transport(&self.stream)?;
         self.attempt_control = Some(control);
         Ok(())
     }
@@ -394,14 +508,14 @@ impl TcpTransport {
         }
     }
 
-    fn apply_read_bound(&self) -> Result<(), NetworkError> {
+    fn apply_read_bound(&mut self) -> Result<(), NetworkError> {
         if let Some(control) = self.attempt_control.as_ref() {
             self.stream.set_read_timeout(Some(control.remaining()?))?;
         }
         Ok(())
     }
 
-    fn apply_write_bound(&self) -> Result<(), NetworkError> {
+    fn apply_write_bound(&mut self) -> Result<(), NetworkError> {
         if let Some(control) = self.attempt_control.as_ref() {
             self.stream.set_write_timeout(Some(control.remaining()?))?;
         }
@@ -505,8 +619,32 @@ impl TcpTransport {
     }
 
     pub fn shutdown(&self) -> Result<(), NetworkError> {
-        self.stream.shutdown(Shutdown::Both)?;
+        self.stream.shutdown()?;
         Ok(())
+    }
+
+    fn connect_web_proxy_with_attempt(
+        proxy: &NetworkProxyEndpoint,
+        secret: &[u8],
+        protocol_dc_id: i16,
+        config: &NetworkConfig,
+        control: Option<&NetworkAttemptControl>,
+    ) -> Result<Self, NetworkError> {
+        let mut stream = web_proxy_relay::WebProxyRelayStream::connect(proxy, config, control)?;
+        stream.set_read_timeout(Some(config.read_timeout));
+        stream.set_write_timeout(Some(config.write_timeout));
+        let obfuscated = ObfuscatedConnectionStart::random(secret, protocol_dc_id)?;
+        let mode = obfuscated.mode();
+        Ok(Self {
+            stream: TransportSocket::Web(stream),
+            codec: TransportFrameCodec::new(mode),
+            read_buffer: Vec::with_capacity(DEFAULT_READ_CHUNK_BYTES),
+            initialized: false,
+            obfuscated: Some(obfuscated),
+            tls_camouflage: false,
+            tls_read_buffer: Vec::new(),
+            attempt_control: control.cloned(),
+        })
     }
 }
 
@@ -1262,6 +1400,30 @@ fn connect_directory_with_projection(
         if proxy.port == 0 || proxy.host.trim() != proxy.host || proxy.host.is_empty() {
             return Err(NetworkError::InvalidProxyEndpoint);
         }
+        if proxy.kind == NetworkProxyKind::Web {
+            let secret = parse_web_proxy_secret_text(&proxy.password)
+                .map_err(|_| NetworkError::InvalidProxySecret)?;
+            let effective = bounded_config(config, control)?;
+            let transport = TcpTransport::connect_web_proxy_with_attempt(
+                proxy,
+                &secret,
+                protocol_dc.wire_id,
+                &effective,
+                control,
+            )?;
+            let logical = directory
+                .candidates(protocol_dc.directory_dc_id, purpose, config.prefer_ipv6)?
+                .into_iter()
+                .next()
+                .ok_or(NetworkError::ConnectFailed { attempts: Vec::new() })?;
+            return Ok((
+                ConnectedEndpoint {
+                    dc_id: protocol_dc.directory_dc_id,
+                    address: SocketAddr::new(logical.ip_address, logical.port),
+                },
+                transport,
+            ));
+        }
         if proxy.kind != NetworkProxyKind::Mtproto {
             return Err(NetworkError::UnsupportedProxyCarrier);
         }
@@ -1983,7 +2145,6 @@ mod proxy_projection_contracts {
         for kind in [
             NetworkProxyKind::Socks5,
             NetworkProxyKind::Http,
-            NetworkProxyKind::Web,
         ] {
             let unsupported = NetworkProxyProjection {
                 enabled: true,

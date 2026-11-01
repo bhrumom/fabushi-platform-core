@@ -104,6 +104,8 @@ dependencies = [
  "fabushi-telegram-protocol",
  "getrandom 0.2.17",
  "rustls",
+ "serde_json",
+ "sha1",
  "thiserror",
  "webpki-roots 0.26.11",
  "zeroize",
