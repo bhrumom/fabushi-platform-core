@@ -4849,4 +4849,18 @@ fn dc_options_only_replacement_preserves_metadata_and_publishes_exact_dc_changes
     assert!(!directory.test_mode());
     assert!(directory.endpoints().iter().any(|endpoint| endpoint.dc_id == 4));
     assert!(!directory.endpoints().iter().any(|endpoint| endpoint.dc_id == 3));
+
+    let before = directory.endpoints().to_vec();
+    let secret_only = before
+        .iter()
+        .cloned()
+        .map(|mut endpoint| {
+            if endpoint.dc_id == 2 {
+                endpoint.secret = Some(vec![0x11; 16]);
+            }
+            endpoint
+        })
+        .collect();
+    assert!(directory.replace_endpoints(secret_only).unwrap().is_empty());
+    assert_eq!(directory.endpoints(), before.as_slice());
 }

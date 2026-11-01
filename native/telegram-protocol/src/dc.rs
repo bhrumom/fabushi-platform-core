@@ -324,7 +324,13 @@ impl DcDirectory {
                     .iter()
                     .filter(|endpoint| endpoint.dc_id == *dc_id)
                     .collect();
-                current != next
+                current.len() != next.len()
+                    || current.iter().any(|endpoint| {
+                        !next.iter().any(|candidate| {
+                            candidate.ip_address == endpoint.ip_address
+                                && candidate.port == endpoint.port
+                        })
+                    })
             })
             .collect();
         if !changed.is_empty() {
